@@ -3537,6 +3537,16 @@ export function t(
     value = value?.[k]
   }
 
+  // Fall back to English when the selected language is missing this key, so a
+  // partially translated locale degrades to English text instead of showing
+  // raw translation keys in the UI.
+  if (typeof value !== 'string' && lang !== 'en') {
+    value = translations.en
+    for (const k of keys) {
+      value = value?.[k]
+    }
+  }
+
   let text = typeof value === 'string' ? value : key
 
   // Replace parameters like {count}, {gap}, etc.

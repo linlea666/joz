@@ -54,12 +54,54 @@ export const CLAW402_MODELS: Claw402Model[] = [
   { id: 'glm-5', name: 'GLM-5', provider: 'Z.ai', desc: 'Deep reasoning flagship', brand: 'zhipu', priceIn: 0.6, priceOut: 2 },
 ]
 
-// AI Provider configuration - default models and API links
+// AI Provider configuration - default models and API links.
+// defaultModel must mirror the Default*Model constants in mcp / mcp/provider,
+// and the provider keys must match the catalog in api/handler_ai_model.go.
 export const AI_PROVIDER_CONFIG: Record<string, AIProviderConfig> = {
   claw402: {
     defaultModel: DEFAULT_CLAW402_MODEL,
     apiUrl: 'https://claw402.ai',
     apiName: 'Claw402',
+  },
+  deepseek: {
+    defaultModel: 'deepseek-chat',
+    apiUrl: 'https://platform.deepseek.com/api_keys',
+    apiName: 'DeepSeek Platform',
+  },
+  openai: {
+    defaultModel: 'gpt-5.4',
+    apiUrl: 'https://platform.openai.com/api-keys',
+    apiName: 'OpenAI Platform',
+  },
+  claude: {
+    defaultModel: 'claude-opus-4-6',
+    apiUrl: 'https://console.anthropic.com/settings/keys',
+    apiName: 'Anthropic Console',
+  },
+  qwen: {
+    defaultModel: 'qwen3-max',
+    apiUrl: 'https://bailian.console.aliyun.com',
+    apiName: 'Alibaba Cloud Bailian',
+  },
+  gemini: {
+    defaultModel: 'gemini-3.1-pro',
+    apiUrl: 'https://aistudio.google.com/apikey',
+    apiName: 'Google AI Studio',
+  },
+  grok: {
+    defaultModel: 'grok-3-latest',
+    apiUrl: 'https://console.x.ai',
+    apiName: 'xAI Console',
+  },
+  kimi: {
+    defaultModel: 'moonshot-v1-auto',
+    apiUrl: 'https://platform.moonshot.cn/console/api-keys',
+    apiName: 'Moonshot Platform',
+  },
+  minimax: {
+    defaultModel: 'MiniMax-M2.7',
+    apiUrl: 'https://platform.minimax.io',
+    apiName: 'MiniMax Platform',
   },
 }
 

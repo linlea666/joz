@@ -10,17 +10,28 @@ const LanguageContext = createContext<LanguageContextType | undefined>(
   undefined
 )
 
+const VALID_LANGUAGES: Language[] = ['en', 'zh', 'id']
+const DEFAULT_LANGUAGE: Language = 'zh'
+
+// A dedicated storage key: the legacy `language` key was force-written to 'en'
+// on every visit while the UI was English-only, so its value carries no user
+// intent and must not be read back.
+const STORAGE_KEY = 'nofx_language'
+
 export function LanguageProvider({ children }: { children: ReactNode }) {
-  // The product UI is English-only. Normalize legacy browser state left by the
-  // removed language switcher so an old `language=zh|id` value cannot revive a
-  // partially translated, layout-breaking interface.
-  const [language] = useState<Language>(() => {
-    localStorage.setItem('language', 'en')
-    return 'en'
+  const [language, setLanguageState] = useState<Language>(() => {
+    const stored = localStorage.getItem(STORAGE_KEY) as Language | null
+    if (stored && VALID_LANGUAGES.includes(stored)) {
+      return stored
+    }
+    localStorage.setItem(STORAGE_KEY, DEFAULT_LANGUAGE)
+    return DEFAULT_LANGUAGE
   })
 
-  const handleSetLanguage = (_lang: Language) => {
-    localStorage.setItem('language', 'en')
+  const handleSetLanguage = (lang: Language) => {
+    if (!VALID_LANGUAGES.includes(lang)) return
+    localStorage.setItem(STORAGE_KEY, lang)
+    setLanguageState(lang)
   }
 
   return (
