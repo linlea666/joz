@@ -22,11 +22,14 @@ mkswap /swapfile
 swapon /swapfile
 echo '/swapfile none swap sw 0 0' >> /etc/fstab
 
-# 2. 克隆仓库
+# 2. 安装 git（如果没有）
+command -v git >/dev/null 2>&1 || { command -v yum >/dev/null 2>&1 && yum install -y git || apt install -y git; }
+
+# 3. 克隆仓库
 git clone https://github.com/linlea666/joz.git /opt/nofx
 cd /opt/nofx
 
-# 3. 一键构建并启动
+# 4. 一键构建并启动
 #    脚本会自动：复制 .env.example → 生成三个加密密钥 → 创建 data/ 目录 → 构建镜像并启动
 ./start.sh start --build
 ```
