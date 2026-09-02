@@ -35,8 +35,8 @@ Thumbs.db
 config.json
 configbak.json
 
-# 数据目录（数据库、日志等）
-data/
+# 数据目录（数据库、日志等）- 只匹配根目录，避免误伤 web/src/data 等源码目录
+/data/
 *.db
 
 # 决策日志
