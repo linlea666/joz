@@ -154,6 +154,15 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	signalID := uuid.NewString()
 	traceID := signalID
 
+	// Receive latency is measured from the revision the pipeline is reacting
+	// to: for edits that is EditedAt, not the original post time (an old
+	// message edited days later would otherwise record a multi-day latency
+	// and poison the latency stats). Mirrors the TTL gate's refTime rule.
+	latencyRef := msg.MessageTimestamp
+	if msg.EditedAt != nil && msg.EditedAt.After(latencyRef) {
+		latencyRef = *msg.EditedAt
+	}
+
 	sig := &store.CopyTradeSignal{
 		ID:               signalID,
 		TraderID:         e.traderID,
@@ -163,7 +172,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		Status:           store.SignalStatusReceived,
 		MessageTimestamp: msg.MessageTimestamp,
 		ReceivedAt:       time.Now().UTC(),
-		ReceiveLatencyMs: time.Since(msg.MessageTimestamp).Milliseconds(),
+		ReceiveLatencyMs: time.Since(latencyRef).Milliseconds(),
 	}
 	if err := e.st.CopyTrade().CreateSignal(sig); err != nil {
 		logger.Errorf("[CopyTrade %s] signal persist failed: %v", e.traderID, err)

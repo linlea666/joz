@@ -445,10 +445,26 @@ func (client *Client) Call(systemPrompt, userPrompt string) (string, error) {
 	// Step 8: Parse response (via hooks for dynamic dispatch)
 	result, err := client.Hooks.ParseMCPResponse(body)
 	if err != nil {
-		return "", fmt.Errorf("fail to parse AI server response: %w", err)
+		return "", fmt.Errorf("fail to parse AI server response: %w (body: %s)", err, bodySnippet(body))
 	}
 
 	return result, nil
+}
+
+// bodySnippet returns a short, single-line preview of a response body for
+// error messages, so misconfigured endpoints (HTML pages, proxy errors) are
+// diagnosable from the log alone.
+func bodySnippet(body []byte) string {
+	const max = 200
+	s := strings.TrimSpace(string(body))
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	if s == "" {
+		return "<empty>"
+	}
+	return s
 }
 
 func (client *Client) String() string {
@@ -586,7 +602,11 @@ func (client *Client) callWithRequestFull(req *Request) (*LLMResponse, error) {
 		return nil, fmt.Errorf("API returned error (status %d): %s", resp.StatusCode, string(body))
 	}
 
-	return client.Hooks.ParseMCPResponseFull(body)
+	result, err := client.Hooks.ParseMCPResponseFull(body)
+	if err != nil {
+		return nil, fmt.Errorf("fail to parse AI server response: %w (body: %s)", err, bodySnippet(body))
+	}
+	return result, nil
 }
 
 // callWithRequest single AI API call (using Request object)
@@ -627,7 +647,7 @@ func (client *Client) callWithRequest(req *Request) (string, error) {
 
 	result, err := client.Hooks.ParseMCPResponse(body)
 	if err != nil {
-		return "", fmt.Errorf("fail to parse AI server response: %w", err)
+		return "", fmt.Errorf("fail to parse AI server response: %w (body: %s)", err, bodySnippet(body))
 	}
 
 	return result, nil
