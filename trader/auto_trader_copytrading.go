@@ -12,6 +12,12 @@ func (at *AutoTrader) IsCopyTrading() bool {
 	return at.config.TraderType == string(copytrader.TraderTypeCopy)
 }
 
+// CopyEngine returns the running copy-trading engine (nil when the trader is
+// stopped or not a copy-trading trader).
+func (at *AutoTrader) CopyEngine() *copytrader.Engine {
+	return at.copyEngine
+}
+
 // runCopyTradingMode replaces the market-scan loop for copy-trading traders:
 // it starts the copytrader engine (poller subscription + reconcile loop) and
 // blocks until Stop() is called. No scan cycles, no kernel decisions.

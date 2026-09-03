@@ -5,6 +5,7 @@ import type {
   CopyTradeSignal,
   CopyTradeContext,
   CopyTradeAIStat,
+  CopyTradeReplayReport,
 } from '../../types'
 import { API_BASE, httpClient } from './helpers'
 
@@ -127,6 +128,26 @@ export const discordApi = {
     )
     if (!result.success) throw new Error('Failed to fetch copy trade contexts')
     return result.data?.contexts ?? []
+  },
+
+  async startCopyTradeReplay(traderId: string, limit: number): Promise<void> {
+    const result = await httpClient.post(`${API_BASE}/copytrade/replay`, {
+      trader_id: traderId,
+      limit,
+    })
+    if (!result.success) {
+      throw new Error(result.message || 'Failed to start replay')
+    }
+  },
+
+  async getCopyTradeReplay(
+    traderId: string
+  ): Promise<CopyTradeReplayReport | null> {
+    const result = await httpClient.get<{
+      report: CopyTradeReplayReport | null
+    }>(`${API_BASE}/copytrade/replay?trader_id=${encodeURIComponent(traderId)}`)
+    if (!result.success) throw new Error('Failed to fetch replay status')
+    return result.data?.report ?? null
   },
 
   async getCopyTradeAIStats(days = 7): Promise<CopyTradeAIStat[]> {

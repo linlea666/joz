@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { X as IconX, RefreshCw, Radio, Download } from 'lucide-react'
+import { X as IconX, RefreshCw, Radio, Download, Play } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '../../lib/api'
 import type {
@@ -7,10 +7,11 @@ import type {
   CopyTradeSignal,
   CopyTradeContext,
   CopyTradeAIStat,
+  CopyTradeReplayReport,
 } from '../../types'
 import { t, type Language } from '../../i18n/translations'
 
-type LogTab = 'events' | 'signals' | 'contexts' | 'aistats'
+type LogTab = 'events' | 'signals' | 'contexts' | 'aistats' | 'replay'
 type TimeRange = 'all' | 'today' | '7d' | '30d' | 'custom'
 
 // rangeBounds converts the selected range into unix-ms bounds (0 = unbounded).
@@ -88,6 +89,9 @@ export function CopyTradeLogModal({
   const [signals, setSignals] = useState<CopyTradeSignal[]>([])
   const [contexts, setContexts] = useState<CopyTradeContext[]>([])
   const [aiStats, setAIStats] = useState<CopyTradeAIStat[]>([])
+  const [replay, setReplay] = useState<CopyTradeReplayReport | null>(null)
+  const [replayLimit, setReplayLimit] = useState(20)
+  const [isStartingReplay, setIsStartingReplay] = useState(false)
 
   const load = useCallback(async () => {
     setIsLoading(true)
@@ -99,6 +103,8 @@ export function CopyTradeLogModal({
         setSignals(await api.getCopyTradeSignals(traderId, 100, startMs, endMs))
       } else if (tab === 'contexts') {
         setContexts(await api.getCopyTradeContexts(traderId))
+      } else if (tab === 'replay') {
+        setReplay(await api.getCopyTradeReplay(traderId))
       } else {
         setAIStats(await api.getCopyTradeAIStats(7))
       }
@@ -108,6 +114,23 @@ export function CopyTradeLogModal({
       setIsLoading(false)
     }
   }, [tab, traderId, language, range, customStart, customEnd])
+
+  const handleStartReplay = async () => {
+    if (isStartingReplay) return
+    setIsStartingReplay(true)
+    try {
+      await api.startCopyTradeReplay(traderId, replayLimit)
+      setReplay(await api.getCopyTradeReplay(traderId))
+    } catch (err) {
+      toast.error(
+        err instanceof Error && err.message
+          ? err.message
+          : t('copytrade.replayFailed', language)
+      )
+    } finally {
+      setIsStartingReplay(false)
+    }
+  }
 
   const handleExport = async () => {
     if (isExporting || (tab !== 'events' && tab !== 'signals')) return
@@ -133,11 +156,25 @@ export function CopyTradeLogModal({
     return () => clearInterval(timer)
   }, [tab, load])
 
+  // Poll replay progress every 3s while a replay is running
+  useEffect(() => {
+    if (tab !== 'replay' || replay?.status !== 'running') return
+    const timer = setInterval(async () => {
+      try {
+        setReplay(await api.getCopyTradeReplay(traderId))
+      } catch {
+        /* transient poll error: keep last state */
+      }
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [tab, replay?.status, traderId])
+
   const tabs: { key: LogTab; label: string }[] = [
     { key: 'events', label: t('copytrade.tabEvents', language) },
     { key: 'signals', label: t('copytrade.tabSignals', language) },
     { key: 'contexts', label: t('copytrade.tabContexts', language) },
     { key: 'aistats', label: t('copytrade.tabAIStats', language) },
+    { key: 'replay', label: t('copytrade.tabReplay', language) },
   ]
 
   return (
@@ -393,6 +430,133 @@ export function CopyTradeLogModal({
                 </tbody>
               </table>
             ))}
+
+          {/* Recognition replay (dry run) */}
+          {tab === 'replay' && (
+            <div className="space-y-3">
+              <p className="text-xs text-nofx-text-muted">
+                {t('copytrade.replayHint', language)}
+              </p>
+              <div className="flex items-center gap-2">
+                <select
+                  value={replayLimit}
+                  onChange={(e) => setReplayLimit(Number(e.target.value))}
+                  className="px-2 py-1.5 rounded-lg bg-nofx-bg-deeper text-xs text-nofx-text border border-nofx-gold/20"
+                >
+                  {[10, 20, 50, 100].map((n) => (
+                    <option key={n} value={n}>
+                      {t('copytrade.replayCount', language)} {n}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={handleStartReplay}
+                  disabled={isStartingReplay || replay?.status === 'running'}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-nofx-gold text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  {replay?.status === 'running'
+                    ? `${t('copytrade.replayRunning', language)} ${replay.done}/${replay.total}`
+                    : t('copytrade.replayStart', language)}
+                </button>
+              </div>
+
+              {!replay || replay.items.length === 0 ? (
+                <EmptyHint text={t('copytrade.replayEmpty', language)} />
+              ) : (
+                <div className="space-y-2">
+                  {replay.items.map((item) => (
+                    <div
+                      key={item.message_id}
+                      className="px-3 py-2 rounded bg-nofx-bg border border-nofx-gold/10 text-xs space-y-1"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-nofx-text-muted whitespace-nowrap">
+                          {fmtTime(item.timestamp)}
+                        </span>
+                        {item.author && (
+                          <span className="text-nofx-text-muted">{item.author}</span>
+                        )}
+                        {item.image_count > 0 && (
+                          <span className="text-nofx-text-muted">
+                            🖼 {item.images_sent}/{item.image_count}
+                          </span>
+                        )}
+                        <span
+                          className="ml-auto px-1.5 py-0.5 rounded font-semibold whitespace-nowrap"
+                          style={{
+                            color: '#fff',
+                            backgroundColor:
+                              item.verdict === 'EXECUTE'
+                                ? '#2E8B57'
+                                : item.verdict === 'SKIP'
+                                  ? '#8A8478'
+                                  : '#D6433A',
+                          }}
+                        >
+                          {item.verdict === 'EXECUTE'
+                            ? t('copytrade.replayVerdictExecute', language)
+                            : item.verdict === 'SKIP'
+                              ? t('copytrade.replayVerdictSkip', language)
+                              : item.verdict === 'INVALID'
+                                ? t('copytrade.replayVerdictInvalid', language)
+                                : t('copytrade.replayVerdictError', language)}
+                        </span>
+                        {item.llm_ms > 0 && (
+                          <span className="font-mono text-nofx-text-muted whitespace-nowrap">
+                            {(item.llm_ms / 1000).toFixed(1)}s
+                          </span>
+                        )}
+                      </div>
+                      {item.excerpt && (
+                        <div className="text-nofx-text-muted break-all">
+                          {item.excerpt}
+                        </div>
+                      )}
+                      <div className="font-mono text-nofx-text break-all">
+                        {item.error ? (
+                          <span style={{ color: '#D6433A' }}>{item.error}</span>
+                        ) : (
+                          <>
+                            <span className="font-semibold">
+                              {item.classification}
+                              {item.action ? ` / ${item.action}` : ''}
+                              {item.direction ? ` ${item.direction}` : ''}
+                              {item.canonical || item.symbol
+                                ? ` ${item.canonical || item.symbol}`
+                                : ''}
+                            </span>
+                            {item.entries && <span> · E: {item.entries}</span>}
+                            {item.stop_loss && <span> · SL: {item.stop_loss}</span>}
+                            {item.take_profits && (
+                              <span> · TP: {item.take_profits}</span>
+                            )}
+                            {item.verdict_detail &&
+                              item.verdict !== 'EXECUTE' && (
+                                <span className="text-nofx-text-muted">
+                                  {' '}
+                                  · {item.verdict_detail}
+                                </span>
+                              )}
+                          </>
+                        )}
+                      </div>
+                      {item.reasoning && (
+                        <div className="text-nofx-text-muted break-all">
+                          {item.reasoning}
+                        </div>
+                      )}
+                      {item.warnings && item.warnings.length > 0 && (
+                        <div style={{ color: '#C9862B' }} className="break-all">
+                          ⚠ {item.warnings.join('; ')}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* AI latency stats */}
           {tab === 'aistats' &&

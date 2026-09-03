@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"nofx/copytrader"
 	"nofx/discord"
 	"nofx/logger"
 	"nofx/store"
@@ -354,6 +355,65 @@ func (s *Server) handleGetCopyTradeContexts(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"contexts": ctxs})
+}
+
+// copyEngineFor resolves the RUNNING copy-trading engine of an owned trader.
+// Writes the error response and returns nil when unavailable.
+func (s *Server) copyEngineFor(c *gin.Context, traderID string) *copytrader.Engine {
+	if traderID == "" {
+		SafeBadRequest(c, "trader_id is required")
+		return nil
+	}
+	if !s.verifyTraderOwnership(c, traderID) {
+		return nil
+	}
+	at, err := s.traderManager.GetTrader(traderID)
+	if err != nil {
+		SafeNotFound(c, "Trader")
+		return nil
+	}
+	engine := at.CopyEngine()
+	if engine == nil {
+		SafeBadRequest(c, "交易员未在运行中（识别回放需要跟单交易员处于运行状态）")
+		return nil
+	}
+	return engine
+}
+
+// handleStartCopyTradeReplay launches a dry-run recognition replay over the
+// stored channel history. No orders are placed, nothing is persisted.
+func (s *Server) handleStartCopyTradeReplay(c *gin.Context) {
+	var req struct {
+		TraderID string `json:"trader_id"`
+		Limit    int    `json:"limit"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		SafeBadRequest(c, "Invalid request format")
+		return
+	}
+	engine := s.copyEngineFor(c, req.TraderID)
+	if engine == nil {
+		return
+	}
+	if err := engine.StartReplay(req.Limit); err != nil {
+		SafeBadRequest(c, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "started"})
+}
+
+// handleGetCopyTradeReplay returns the progress/result of the current replay.
+func (s *Server) handleGetCopyTradeReplay(c *gin.Context) {
+	engine := s.copyEngineFor(c, c.Query("trader_id"))
+	if engine == nil {
+		return
+	}
+	report := engine.ReplayStatus()
+	if report == nil {
+		c.JSON(http.StatusOK, gin.H{"report": nil})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"report": report})
 }
 
 // handleGetCopyTradeAIStats aggregates per-model parse latency for comparison.

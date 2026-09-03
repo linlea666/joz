@@ -348,6 +348,8 @@ The token is validated against the Discord API before saving and stored encrypte
 			s.route(protected, "GET", "/copytrade/signals", "Copy trading interpreted signals (trader_id)", s.handleGetCopyTradeSignals)
 			s.route(protected, "GET", "/copytrade/contexts", "Copy trading active trade contexts (trader_id)", s.handleGetCopyTradeContexts)
 			s.route(protected, "GET", "/copytrade/ai-stats", "Copy trading AI latency comparison (days)", s.handleGetCopyTradeAIStats)
+			s.route(protected, "POST", "/copytrade/replay", "Start dry-run recognition replay (trader_id, limit)", s.handleStartCopyTradeReplay)
+			s.route(protected, "GET", "/copytrade/replay", "Recognition replay progress/result (trader_id)", s.handleGetCopyTradeReplay)
 
 			// Strategy management
 			s.routeWithSchema(protected, "GET", "/strategies", "List user's strategies",

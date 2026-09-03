@@ -166,3 +166,36 @@ export interface CopyTradeAIStat {
   min_ms: number
   max_ms: number
 }
+
+// Dry-run recognition replay (accuracy testing, no execution/persistence).
+export interface CopyTradeReplayItem {
+  message_id: string
+  timestamp: string
+  author: string
+  excerpt: string
+  image_count: number
+  images_sent: number
+  llm_ms: number
+  classification?: string
+  action?: string
+  symbol?: string
+  canonical?: string
+  direction?: string
+  entries?: string
+  stop_loss?: string
+  take_profits?: string
+  verdict: 'EXECUTE' | 'SKIP' | 'INVALID' | 'ERROR'
+  verdict_detail?: string
+  reasoning?: string
+  warnings?: string[]
+  error?: string
+}
+
+export interface CopyTradeReplayReport {
+  status: 'running' | 'done' | 'aborted'
+  total: number
+  done: number
+  started_at: string
+  finished_at?: string
+  items: CopyTradeReplayItem[]
+}
