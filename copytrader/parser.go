@@ -83,6 +83,42 @@ func normalizeInterpretation(si *SourceInterpretation) error {
 		return fmt.Errorf("unknown classification %q", si.Classification)
 	}
 
+	// Multi-instruction message: every element inherits the message-level
+	// classification and provenance, is normalized like a standalone
+	// instruction, and may not nest further. The top-level per-trade fields
+	// then act only as a summary for storage/UI.
+	if len(si.Instructions) > 0 {
+		symbols := make([]string, 0, len(si.Instructions))
+		seen := map[string]bool{}
+		for i, ins := range si.Instructions {
+			if ins == nil {
+				return fmt.Errorf("instructions[%d] is null", i)
+			}
+			ins.Instructions = nil
+			ins.Classification = si.Classification
+			ins.SourceInfo = si.SourceInfo
+			if err := normalizeInstructionFields(ins); err != nil {
+				return fmt.Errorf("instructions[%d]: %w", i, err)
+			}
+			if s := ins.Symbol; s != "" && !seen[s] {
+				seen[s] = true
+				symbols = append(symbols, s)
+			}
+		}
+		if si.Action == "" {
+			si.Action = si.Instructions[0].Action
+		}
+		if si.Symbol == "" {
+			si.Symbol = strings.Join(symbols, ", ")
+		}
+	}
+
+	return normalizeInstructionFields(si)
+}
+
+// normalizeInstructionFields canonicalizes the per-trade fields shared by the
+// top level and every element of a multi-instruction message.
+func normalizeInstructionFields(si *SourceInterpretation) error {
 	si.Action = Action(strings.ToUpper(strings.TrimSpace(string(si.Action))))
 	switch si.Action {
 	case ActionOpen, ActionAdd, ActionReduce, ActionClose, ActionCancel,

@@ -212,42 +212,73 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 	item.StopLoss = fmtSLLevels(interp.StopLossLevels)
 	item.TakeProfits = fmtTPLevels(interp.TakeProfitLevels)
 
-	// Same gate order as processMessage (TTL is skipped on purpose: replayed
-	// history is always expired, and TTL is deterministic, not an AI concern).
+	instructions := interp.Flatten()
+	if len(instructions) == 1 {
+		verdict, detail, canonical := e.replayEvaluate(instructions[0])
+		item.Canonical = canonical
+		item.Verdict = verdict
+		item.VerdictDetail = detail
+		return item
+	}
+
+	// Multi-instruction message: evaluate every instruction through the same
+	// gates and aggregate (any EXECUTE wins, else any INVALID, else SKIP).
+	var details []string
+	executes, invalids := 0, 0
+	for _, ins := range instructions {
+		verdict, detail, _ := e.replayEvaluate(ins)
+		switch verdict {
+		case VerdictExecute:
+			executes++
+		case VerdictInvalid:
+			invalids++
+		}
+		d := fmt.Sprintf("%s %s => %s", ins.Action, ins.Symbol, verdict)
+		if detail != "" {
+			d += " (" + detail + ")"
+		}
+		details = append(details, d)
+	}
+	switch {
+	case executes > 0:
+		item.Verdict = VerdictExecute
+	case invalids > 0:
+		item.Verdict = VerdictInvalid
+	default:
+		item.Verdict = VerdictSkip
+	}
+	item.VerdictDetail = strings.Join(details, "; ")
+	return item
+}
+
+// replayEvaluate applies the live pipeline's instrument + validation gates to
+// ONE instruction (TTL is skipped on purpose: replayed history is always
+// expired, and TTL is deterministic, not an AI concern). Returns the dry-run
+// verdict, its detail and the resolved canonical symbol.
+func (e *Engine) replayEvaluate(interp *SourceInterpretation) (verdict, detail, canonical string) {
 	marketPrice := 0.0
 	if interp.Symbol != "" {
 		if c, rerr := ResolveInstrument(interp.Symbol); rerr == nil {
-			item.Canonical = c
+			canonical = c
 			if mp, perr := e.exec.ex.GetMarketPrice(c); perr == nil {
 				marketPrice = mp
 			}
 		} else if interp.IsActionable() {
-			item.Verdict = VerdictSkip
-			item.VerdictDetail = string(SkipUnsupportedInstrument)
-			return item
+			return VerdictSkip, string(SkipUnsupportedInstrument), ""
 		}
 	}
 
 	skipReason, verr := ValidateInterpretation(interp, marketPrice)
 	if verr != nil {
-		item.Verdict = VerdictInvalid
-		item.VerdictDetail = verr.Error()
-		return item
+		return VerdictInvalid, verr.Error(), canonical
 	}
 	if skipReason != SkipNone {
-		item.Verdict = VerdictSkip
-		item.VerdictDetail = string(skipReason)
-		return item
+		return VerdictSkip, string(skipReason), canonical
 	}
 	if !interp.IsActionable() {
-		item.Verdict = VerdictSkip
-		item.VerdictDetail = string(SkipNotSignal)
-		return item
+		return VerdictSkip, string(SkipNotSignal), canonical
 	}
-
-	item.Verdict = VerdictExecute
-	item.VerdictDetail = fmt.Sprintf("%s %s %s", interp.Action, interp.Direction, item.Canonical)
-	return item
+	return VerdictExecute, fmt.Sprintf("%s %s %s", interp.Action, interp.Direction, canonical), canonical
 }
 
 func excerpt(s string, max int) string {

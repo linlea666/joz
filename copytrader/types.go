@@ -166,6 +166,14 @@ type SourceInterpretation struct {
 	Reasoning      string             `json:"reasoning,omitempty"`
 	Warnings       []string           `json:"warnings,omitempty"`
 	SourceInfo     SourceInfo         `json:"source_info"`
+
+	// Instructions carries the per-trade instructions of a multi-instruction
+	// message (one post managing several tracked trades, e.g. "SEI SL to BE,
+	// SUI SL to BE"). Each element uses the same per-trade fields as the top
+	// level; classification/reasoning/source_info stay message-level (the
+	// parser copies them onto every element). Empty for single-instruction
+	// messages, whose per-trade fields live directly on the top level.
+	Instructions []*SourceInterpretation `json:"instructions,omitempty"`
 }
 
 // IsActionable reports whether the interpretation should enter the
@@ -174,7 +182,30 @@ func (si *SourceInterpretation) IsActionable() bool {
 	if si == nil {
 		return false
 	}
+	if len(si.Instructions) > 0 {
+		for _, ins := range si.Instructions {
+			if ins.IsActionable() {
+				return true
+			}
+		}
+		return false
+	}
 	return si.Classification == ClassificationSignal && si.Action != ActionIgnore && si.Action != ""
+}
+
+// Flatten returns the executable instruction views of this interpretation:
+// the instructions themselves for a multi-instruction message, or the
+// interpretation itself for the classic single-instruction shape. Every
+// element is a self-contained *SourceInterpretation the validation and
+// routing layers can consume unchanged.
+func (si *SourceInterpretation) Flatten() []*SourceInterpretation {
+	if si == nil {
+		return nil
+	}
+	if len(si.Instructions) == 0 {
+		return []*SourceInterpretation{si}
+	}
+	return si.Instructions
 }
 
 // SkipReason are terminal non-error outcomes of processing a signal.

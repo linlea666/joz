@@ -226,7 +226,86 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 			interp.Symbol, interp.Direction, float64(timings.llmMs)/1000),
 		timings.llmMs, map[string]interface{}{"reasoning": interp.Reasoning, "warnings": interp.Warnings})
 
-	// --- 2. Validation & classification gates ---
+	// --- 2..4. Gates & routing, per instruction ---
+	// Multi-instruction messages (one post managing several tracked trades,
+	// e.g. "SEI SL to BE, SUI SL to BE") flatten to their instructions;
+	// classic single-instruction messages flatten to themselves. Every
+	// instruction runs the same gates the single path always had.
+	instructions := interp.Flatten()
+	multi := len(instructions) > 1
+
+	if interp.IsActionable() {
+		e.updateSignal(signalID, map[string]interface{}{"status": store.SignalStatusExecuting})
+	}
+
+	var (
+		firstErr   error
+		errCount   int
+		firstSkip  SkipReason
+		skipDetail string
+		executed   int
+	)
+	for i, ins := range instructions {
+		insSkip, insDetail, insErr := e.processInstruction(traceID, signalID, msg, ins)
+		label := ""
+		if multi {
+			label = fmt.Sprintf("instruction %d/%d (%s %s): ", i+1, len(instructions), ins.Action, ins.Symbol)
+		}
+		switch {
+		case insErr != nil:
+			errCount++
+			if firstErr == nil {
+				firstErr = insErr
+			}
+			if multi {
+				e.events.Error(traceID, signalID, msg.MessageID, EvExecutionError, label+insErr.Error(), nil)
+			}
+		case insSkip != SkipNone:
+			if firstSkip == SkipNone {
+				firstSkip, skipDetail = insSkip, insDetail
+			}
+			if multi {
+				e.events.Info(traceID, signalID, msg.MessageID, EvSignalSkipped,
+					fmt.Sprintf("%sskipped (%s): %s", label, insSkip, insDetail), nil)
+			}
+		default:
+			executed++
+		}
+	}
+
+	totalMs := time.Since(pipelineStart).Milliseconds()
+	switch {
+	case firstErr != nil:
+		if multi && errCount > 1 {
+			fail("execution", fmt.Errorf("%d/%d instructions failed, first: %w", errCount, len(instructions), firstErr))
+		} else {
+			fail("execution", firstErr)
+		}
+	case executed == 0:
+		if firstSkip == SkipNone {
+			// No instruction was actionable (pure status / chatter).
+			firstSkip, skipDetail = SkipNotSignal, string(interp.Classification)
+		}
+		skip(firstSkip, skipDetail)
+	default:
+		e.updateSignal(signalID, map[string]interface{}{
+			"status": store.SignalStatusExecuted, "total_ms": totalMs,
+		})
+		summary := fmt.Sprintf("signal fully executed in %.1fs", float64(totalMs)/1000)
+		if multi {
+			summary = fmt.Sprintf("signal executed in %.1fs (%d/%d instructions applied)",
+				float64(totalMs)/1000, executed, len(instructions))
+		}
+		e.events.Success(traceID, signalID, msg.MessageID, EvTradeUpdated, summary, totalMs, nil)
+	}
+}
+
+// processInstruction runs the instrument / validation / TTL gates and routes
+// ONE instruction — exactly the pipeline stages 2-4 that the single-
+// instruction path always had. Returns a terminal skip reason with detail,
+// or an error.
+func (e *Engine) processInstruction(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation) (SkipReason, string, error) {
+	// Instrument resolution & market reference.
 	marketPrice := 0.0
 	canonical := ""
 	if interp.Symbol != "" {
@@ -236,42 +315,37 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 				marketPrice = mp
 			}
 		} else if interp.IsActionable() {
-			skip(SkipUnsupportedInstrument, rerr.Error())
-			return
+			return SkipUnsupportedInstrument, rerr.Error(), nil
 		}
 	}
 
+	// Validation & classification gates.
 	skipReason, verr := ValidateInterpretation(interp, marketPrice)
 	if verr != nil {
-		fail("validation", verr)
-		return
+		return SkipNone, "", fmt.Errorf("validation failed: %w", verr)
 	}
 	if skipReason != SkipNone {
-		skip(skipReason, "validation gate")
-		return
+		return skipReason, "validation gate", nil
 	}
 	if !interp.IsActionable() {
-		skip(SkipNotSignal, string(interp.Classification))
-		return
+		return SkipNotSignal, string(interp.Classification), nil
 	}
 
-	// --- 3. TTL gate (per action class) ---
+	// TTL gate (per action class). Edits carry lifecycle updates; measure
+	// freshness from the edit, not the original post.
 	ttl := time.Duration(e.cfg.MgmtSignalTTLSeconds) * time.Second
 	if interp.Action == ActionOpen || interp.Action == ActionAdd {
 		ttl = time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second
 	}
-	// Edits carry lifecycle updates; measure freshness from the edit, not the post.
 	refTime := msg.MessageTimestamp
 	if msg.EditedAt != nil && msg.EditedAt.After(refTime) {
 		refTime = *msg.EditedAt
 	}
 	if IsExpired(refTime, time.Now().UTC(), ttl) {
-		skip(SkipExpired, fmt.Sprintf("signal age %v exceeds TTL %v", time.Since(refTime).Round(time.Second), ttl))
-		return
+		return SkipExpired, fmt.Sprintf("signal age %v exceeds TTL %v", time.Since(refTime).Round(time.Second), ttl), nil
 	}
 
-	// --- 4. Route by action ---
-	e.updateSignal(signalID, map[string]interface{}{"status": store.SignalStatusExecuting})
+	// Route by action.
 	var execErr error
 	var finalSkip SkipReason
 	switch interp.Action {
@@ -291,20 +365,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	default:
 		finalSkip = SkipNotSignal
 	}
-
-	totalMs := time.Since(pipelineStart).Milliseconds()
-	switch {
-	case execErr != nil:
-		fail("execution", execErr)
-	case finalSkip != SkipNone:
-		skip(finalSkip, "execution gate")
-	default:
-		e.updateSignal(signalID, map[string]interface{}{
-			"status": store.SignalStatusExecuted, "total_ms": totalMs,
-		})
-		e.events.Success(traceID, signalID, msg.MessageID, EvTradeUpdated,
-			fmt.Sprintf("signal fully executed in %.1fs", float64(totalMs)/1000), totalMs, nil)
-	}
+	return finalSkip, "execution gate", execErr
 }
 
 type pipelineTimings struct {

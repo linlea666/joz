@@ -611,7 +611,8 @@ export function CopyTradeLogModal({
                               <span> · TP: {item.take_profits}</span>
                             )}
                             {item.verdict_detail &&
-                              item.verdict !== 'EXECUTE' && (
+                              (item.verdict !== 'EXECUTE' ||
+                                item.verdict_detail.includes('=>')) && (
                                 <span className="text-nofx-text-muted">
                                   {' '}
                                   · {item.verdict_detail}

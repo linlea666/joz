@@ -135,6 +135,97 @@ func TestParseInterpretation_Rejections(t *testing.T) {
 	}
 }
 
+// The trader-bamp style: one post managing several tracked trades
+// ("SEI - SL to breakeven / SUI - SL to breakeven / BTC - letting it run").
+func TestParseInterpretation_MultiInstruction(t *testing.T) {
+	raw := `{"classification": "SIGNAL",
+		"reasoning": "status update moving two stops to breakeven",
+		"source_info": {"has_image": true, "image_count": 1},
+		"instructions": [
+			{"action": "update_sl", "symbol": "SEI", "direction": "long",
+			 "stop_loss_levels": [{"price": {"type": "breakeven"}}]},
+			{"action": "UPDATE_SL", "symbol": "SUI", "direction": "long",
+			 "stop_loss_levels": [{"price": {"type": "breakeven"}}]}
+		]}`
+	si, err := ParseInterpretation(raw)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(si.Instructions) != 2 {
+		t.Fatalf("expected 2 instructions, got %d", len(si.Instructions))
+	}
+	if !si.IsActionable() {
+		t.Fatal("multi-instruction signal should be actionable")
+	}
+	flat := si.Flatten()
+	if len(flat) != 2 {
+		t.Fatalf("Flatten should return the 2 instructions, got %d", len(flat))
+	}
+	for i, ins := range flat {
+		if ins.Classification != ClassificationSignal {
+			t.Fatalf("instruction %d must inherit classification, got %s", i, ins.Classification)
+		}
+		if !ins.SourceInfo.HasImage {
+			t.Fatalf("instruction %d must inherit source_info", i)
+		}
+		if ins.Action != ActionUpdateSL {
+			t.Fatalf("instruction %d action = %s", i, ins.Action)
+		}
+		if ins.StopLossLevels[0].Price.Type != PriceBreakeven {
+			t.Fatalf("instruction %d SL type = %s", i, ins.StopLossLevels[0].Price.Type)
+		}
+	}
+	// Top level becomes a storage/UI summary.
+	if si.Action != ActionUpdateSL {
+		t.Fatalf("summary action = %s", si.Action)
+	}
+	if si.Symbol != "SEI, SUI" {
+		t.Fatalf("summary symbol = %q", si.Symbol)
+	}
+}
+
+func TestParseInterpretation_MultiInstructionRejections(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"instruction without action",
+			`{"classification": "SIGNAL", "instructions": [{"symbol": "SEI"}]}`,
+			"SIGNAL without action"},
+		{"null instruction",
+			`{"classification": "SIGNAL", "instructions": [null]}`,
+			"is null"},
+		{"bad instruction field",
+			`{"classification": "SIGNAL", "instructions": [
+				{"action": "REDUCE", "symbol": "SEI", "close_ratio": 150}]}`,
+			"close_ratio"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseInterpretation(tc.raw)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
+func TestParseInterpretation_SingleInstructionFlatten(t *testing.T) {
+	raw := `{"classification": "SIGNAL", "action": "CLOSE", "symbol": "BTC", "source_info": {}}`
+	si, err := ParseInterpretation(raw)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	flat := si.Flatten()
+	if len(flat) != 1 || flat[0] != si {
+		t.Fatalf("single-instruction Flatten must return the interpretation itself")
+	}
+}
+
 func TestParseInterpretation_NestedBracesInReasoning(t *testing.T) {
 	raw := `{"classification": "SIGNAL", "action": "CLOSE", "symbol": "BTC",
 		"reasoning": "author wrote {closed at breakeven} with a \" quote",

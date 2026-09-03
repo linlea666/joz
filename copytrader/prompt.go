@@ -10,7 +10,7 @@ import (
 
 // PromptVersion tags every AI run so output quality can be compared across
 // prompt iterations.
-const PromptVersion = "copytrade-v2"
+const PromptVersion = "copytrade-v3"
 
 // SystemPrompt is the fixed interpretation contract. It deliberately does NOT
 // ask the AI for quantities, leverage or risk decisions — those belong to the
@@ -38,10 +38,19 @@ Reply with EXACTLY ONE JSON object (no markdown fences, no commentary):
   "confidence": {"classification": 0.0, "symbol": 0.0, "direction": 0.0, "entry": 0.0, "stop_loss": 0.0},
   "reasoning": "one concise sentence",
   "warnings": [],
-  "source_info": {"has_image": false, "image_count": 0, "text_priority_used": false, "used_linked_message": false, "used_trade_context": false}
+  "source_info": {"has_image": false, "image_count": 0, "text_priority_used": false, "used_linked_message": false, "used_trade_context": false},
+  "instructions": []
 }
 
 Omit fields that do not apply. All confidence values are 0.0-1.0.
+
+## Multi-instruction messages
+When ONE message instructs actions on SEVERAL trades (e.g. "SEI - SL to breakeven / SUI - SL to breakeven / BTC - letting it run"), put one object PER acted-on trade into "instructions". Each element carries the same per-trade fields as the top level: action, symbol, direction, close_mode, close_ratio, entry_orders, take_profit_levels, stop_loss_levels, trade_reference, confidence, reasoning. Rules:
+- Only emit an instruction for a trade with an actual action (open/close/reduce/SL move/TP change/cancel). "Letting it run" / "holding" / "still in profit" gets NO instruction.
+- If nothing in the message is actionable, use classification IGNORE and leave "instructions" empty.
+- Bilingual channels often repeat the same content in two languages: emit each trade's action ONCE.
+- classification, warnings and source_info stay at the top level only.
+- For a single-trade message keep the classic shape (top-level fields, no "instructions").
 
 ## Classification rules
 - SIGNAL: an actionable instruction NOW (open, close, move stop, cancel, take partial profit).
@@ -52,8 +61,8 @@ Omit fields that do not apply. All confidence values are 0.0-1.0.
 
 ## Action semantics
 - A NEW trade instruction => OPEN. Adding margin/size to an existing tracked trade => ADD.
-- "Stops to entry", "SL to BE", "risk free now" => UPDATE_SL with price type ENTRY or BREAKEVEN.
-- "TP1 hit, closed 30%" style posts: if the author states they took partial profit as an instruction => REDUCE with close_ratio; if it is only a status celebration => IGNORE.
+- "Stops to entry", "SL to BE", "risk free now" => UPDATE_SL with price type ENTRY or BREAKEVEN. This applies even when phrased as a past-tense status update on a tracked trade ("SL moved to breakeven") — the follower must mirror it.
+- "TPn hit / TPn booked" on a TRACKED trade => do NOT emit REDUCE: the follower's own take-profit orders already rest on the exchange and fill at the same level; re-reducing would double-close. Only emit REDUCE when the author instructs an ad-hoc partial exit at market ("closing 50% here"). If the same post also moves the stop, still emit that UPDATE_SL.
 - "Cut it", "out", "closing here", "stopped out manually" => CLOSE (close_mode FULL unless a portion is stated).
 - Cancelling an unfilled limit order ("cancel the bid") => CANCEL.
 - Lifecycle updates delivered by EDITING an existing trade-card message: interpret the CURRENT card state. A card now showing "Trade Closed" / "SL hit" => CLOSE. A card whose stop moved => UPDATE_SL.
