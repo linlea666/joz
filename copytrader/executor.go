@@ -612,6 +612,11 @@ func (x *Executor) hasStopLossOrder(symbol string) (bool, bool) {
 
 // confirmFill polls the order status briefly for actual avg price / quantity,
 // degrading to the reference values when the exchange is slow.
+//
+// The filled quantity is sanitized before being returned: contract-denominated
+// exchanges report fills in contracts and convert with contracts*ctVal, whose
+// float artifacts (414*0.1 = 41.400000000000006) would otherwise be persisted
+// on the trade context and propagate into TP plans and later close math.
 func (x *Executor) confirmFill(symbol, orderID string, fallbackQty, fallbackPrice float64) (avgPrice, filledQty float64) {
 	avgPrice, filledQty = fallbackPrice, fallbackQty
 	if orderID == "" {
@@ -626,7 +631,7 @@ func (x *Executor) confirmFill(symbol, orderID string, fallbackQty, fallbackPric
 					avgPrice = p
 				}
 				if q, ok := status["executedQty"].(float64); ok && q > 0 {
-					filledQty = q
+					filledQty = types.SanitizeBaseQuantity(q)
 				}
 				return
 			}

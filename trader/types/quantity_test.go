@@ -2,6 +2,29 @@ package types
 
 import "testing"
 
+func TestSanitizeBaseQuantity(t *testing.T) {
+	tests := []struct {
+		name string
+		in   float64
+		want float64
+	}{
+		// The HYPE incident: OKX fill of 414 contracts * ctVal 0.1.
+		{"contracts times ctVal artifact", 414 * 0.1, 41.4},
+		{"ratio split artifact", 41.4 * 0.3, 12.42},
+		{"already clean", 41.4, 41.4},
+		{"integer", 33113, 33113},
+		{"zero", 0, 0},
+		{"tiny meme quantity survives", 0.000000166, 0.000000166},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := SanitizeBaseQuantity(tt.in); got != tt.want {
+				t.Fatalf("SanitizeBaseQuantity(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFormatBaseQuantityByContract(t *testing.T) {
 	tests := []struct {
 		name         string

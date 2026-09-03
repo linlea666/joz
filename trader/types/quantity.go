@@ -39,11 +39,19 @@ func FormatBaseQuantityByContract(quantity, contractSize, lotSize float64) strin
 	if steps < 0 {
 		steps = 0
 	}
-	aligned := steps * step
 	// Re-round the product to kill accumulated float error before printing.
-	aligned = math.Round(aligned*1e12) / 1e12
+	aligned := SanitizeBaseQuantity(steps * step)
 
 	return strconv.FormatFloat(aligned, 'f', decimalPlaces(step), 64)
+}
+
+// SanitizeBaseQuantity strips binary floating-point artifacts from a
+// base-asset quantity by rounding to 12 decimal places (e.g. a fill reported
+// as contracts and converted with 414 * 0.1 = 41.400000000000006 becomes
+// 41.4). Real instrument steps are far coarser than 1e-12, so this never
+// changes an economically meaningful digit.
+func SanitizeBaseQuantity(q float64) float64 {
+	return math.Round(q*1e12) / 1e12
 }
 
 // decimalPlaces returns the number of decimal digits needed to represent the

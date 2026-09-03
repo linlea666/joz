@@ -3,6 +3,8 @@ package copytrader
 import (
 	"fmt"
 	"math"
+
+	"nofx/trader/types"
 )
 
 // AllocateTPRatios decides the position percentage per TP level.
@@ -136,12 +138,15 @@ func SplitTPQuantities(filledQty float64, ratios []float64, stepSize, minQty flo
 
 	// Drop zero-quantity levels but keep order alignment by compacting later:
 	// callers pair quantities[i] with the TP price at the same index and skip zeros.
+	// Sanitize each level: ratio math (qty*r/100, steps*step) leaves binary
+	// float artifacts that would be persisted in the TP plan and displayed.
 	sum := 0.0
-	for _, q := range quantities {
+	for i, q := range quantities {
 		if q < 0 {
 			return nil, fmt.Errorf("internal error: negative TP quantity")
 		}
-		sum += q
+		quantities[i] = types.SanitizeBaseQuantity(q)
+		sum += quantities[i]
 	}
 	if sum > filledQty+1e-9 {
 		return nil, fmt.Errorf("TP quantities %.10f exceed filled quantity %.10f", sum, filledQty)

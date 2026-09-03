@@ -11,6 +11,7 @@ import type {
   CopyTradeAIRun,
 } from '../../types'
 import { t, type Language } from '../../i18n/translations'
+import { formatQuantity } from '../../utils/format'
 
 type LogTab = 'events' | 'signals' | 'contexts' | 'aistats' | 'replay'
 type TimeRange = 'all' | 'today' | '7d' | '30d' | 'custom'
@@ -482,7 +483,7 @@ export function CopyTradeLogModal({
                         {ctx.avg_fill_price || ctx.planned_entry_price || '-'}
                       </td>
                       <td className="py-2 pr-2 text-right font-mono">
-                        {ctx.quantity || '-'}
+                        {ctx.quantity ? formatQuantity(ctx.quantity) : '-'}
                       </td>
                       <td className="py-2 pr-2 text-right font-mono">
                         {ctx.stop_loss_price || '-'}
