@@ -484,19 +484,20 @@ func (t *GateTrader) CancelStopOrders(symbol string) error {
 	return nil
 }
 
-// FormatQuantity formats quantity to correct precision
+// FormatQuantity aligns a base-asset quantity to the quanto multiplier and
+// returns it STILL IN BASE-ASSET units (Trader interface contract). Do NOT
+// return contract count here: order methods (OpenLong/CloseLong/...) convert
+// base asset -> contracts internally, so returning contracts would
+// double-convert and inflate the order by 1/quanto_multiplier.
 func (t *GateTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
 	contract, err := t.getContract(symbol)
 	if err != nil {
 		return fmt.Sprintf("%.4f", quantity), nil
 	}
 
-	// Gate uses quanto_multiplier for contract size
 	quantoMultiplier, _ := strconv.ParseFloat(contract.QuantoMultiplier, 64)
 	if quantoMultiplier > 0 {
-		// Calculate number of contracts
-		numContracts := quantity / quantoMultiplier
-		return fmt.Sprintf("%.0f", math.Floor(numContracts)), nil
+		return types.FormatBaseQuantityByContract(quantity, quantoMultiplier, 1), nil
 	}
 
 	return fmt.Sprintf("%.4f", quantity), nil

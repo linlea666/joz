@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"nofx/logger"
+	"nofx/trader/types"
 	"strings"
 	"sync"
 	"time"
@@ -274,16 +275,17 @@ func (t *OKXTrader) convertSymbolBack(instId string) string {
 	return instId
 }
 
-// FormatQuantity formats quantity (converts base asset quantity to contract count)
+// FormatQuantity aligns a base-asset quantity to the instrument's contract
+// step and returns it STILL IN BASE-ASSET units (Trader interface contract).
+// Do NOT return contract count here: order methods (OpenLong/CloseLong/...)
+// convert base asset -> contracts internally, so returning contracts would
+// double-convert and inflate the order by 1/ctVal.
 func (t *OKXTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
 	inst, err := t.getInstrument(symbol)
 	if err != nil {
 		return fmt.Sprintf("%.3f", quantity), nil
 	}
-
-	// OKX uses contract count: quantity (in base asset) / ctVal (asset per contract)
-	sz := quantity / inst.CtVal
-	return t.formatSize(sz, inst), nil
+	return types.FormatBaseQuantityByContract(quantity, inst.CtVal, inst.LotSz), nil
 }
 
 // formatSize formats contract size

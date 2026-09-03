@@ -81,6 +81,17 @@ func (x *Executor) ExecuteOpen(traceID, signalID string, plan *OpenPlan) (*store
 	qtyStr, err := x.ex.FormatQuantity(plan.Symbol, plan.Quantity)
 	if err == nil {
 		if q, perr := strconv.ParseFloat(qtyStr, 64); perr == nil && q > 0 {
+			// Unit-mismatch guard: precision alignment may only nudge the
+			// quantity (flooring to one step cuts at most ~50%; rounding up
+			// adds at most half a step). A larger deviation means the
+			// exchange returned a different UNIT (e.g. contract count
+			// instead of base asset) — submitting it would trade a wildly
+			// wrong size, so refuse instead.
+			if q > plan.Quantity*1.5 || q < plan.Quantity*0.5 {
+				x.events.Error(traceID, signalID, "", EvExecutionError,
+					fmt.Sprintf("quantity sanity check failed: planned %.8g, formatted %.8g — unit mismatch suspected, order refused", plan.Quantity, q), nil)
+				return nil, fmt.Errorf("quantity sanity check failed: planned %.8g vs formatted %.8g (unit mismatch suspected)", plan.Quantity, q)
+			}
 			plan.Quantity = q
 		}
 	}

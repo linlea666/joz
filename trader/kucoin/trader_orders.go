@@ -3,7 +3,6 @@ package kucoin
 import (
 	"encoding/json"
 	"fmt"
-	"math"
 	"nofx/logger"
 	"nofx/trader/types"
 	"strconv"
@@ -545,20 +544,17 @@ func (t *KuCoinTrader) SetLeverage(symbol string, leverage int) error {
 	return nil
 }
 
-// FormatQuantity formats quantity to correct precision
+// FormatQuantity aligns a base-asset quantity to the contract multiplier and
+// returns it STILL IN BASE-ASSET units (Trader interface contract). Do NOT
+// return lot count here: order methods (OpenLong/CloseLong/...) convert base
+// asset -> lots internally via quantityToLots, so returning lots would
+// double-convert and inflate the order by 1/multiplier.
 func (t *KuCoinTrader) FormatQuantity(symbol string, quantity float64) (string, error) {
 	contract, err := t.getContract(symbol)
 	if err != nil {
 		return "", err
 	}
-
-	// Calculate lots
-	lots := quantity / contract.Multiplier
-
-	// Round to integer
-	lotsInt := int64(math.Round(lots))
-
-	return strconv.FormatInt(lotsInt, 10), nil
+	return types.FormatBaseQuantityByContract(quantity, contract.Multiplier, 1), nil
 }
 
 // GetOrderStatus gets order status
