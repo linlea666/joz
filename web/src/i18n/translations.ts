@@ -1303,7 +1303,7 @@ export const translations = {
       majorOffset: 'BTC/ETH Price Offset Threshold (%)',
       altOffset: 'Altcoin Price Offset Threshold (%)',
       offsetHint:
-        "A market at or better than the author's price always enters at market. A worse price within the threshold may still enter at market; beyond it a limit order rests at the author's price. 0 or empty disables the tolerance: only better-than-author prices enter at market.",
+        "A market at or better than the author's price always enters at market. A worse price within the threshold may still enter at market; beyond it a limit order rests at the author's price. 0 disables the tolerance: only better-than-author prices enter at market.",
       limitToMarket: 'Market entry within threshold',
       parseImages: 'Parse Images (AI vision)',
       autoBreakeven: 'Move SL to breakeven after TP1',
@@ -2610,7 +2610,7 @@ export const translations = {
       majorOffset: 'BTC/ETH 市价偏移阈值（%）',
       altOffset: '山寨币市价偏移阈值（%）',
       offsetHint:
-        '市价优于或等于博主价时始终直接市价进场；比博主价差但在阈值内也可市价进场，超出阈值则按博主价挂限价单等待。填 0 或留空表示关闭容忍：只有优于博主价才市价进场。',
+        '市价优于或等于博主价时始终直接市价进场；比博主价差但在阈值内也可市价进场，超出阈值则按博主价挂限价单等待。填 0 表示关闭容忍：只有优于博主价才市价进场。',
       limitToMarket: '阈值内限价改市价',
       parseImages: '解析图片（AI 视觉）',
       autoBreakeven: 'TP1 后止损移至保本',

@@ -678,7 +678,7 @@ export function TraderConfigModal({
                         type="number"
                         min="0"
                         step="0.1"
-                        value={copyConfig.major_price_offset_pct || ''}
+                        value={copyConfig.major_price_offset_pct}
                         onChange={(e) =>
                           handleCopyConfigChange(
                             'major_price_offset_pct',
@@ -686,7 +686,6 @@ export function TraderConfigModal({
                           )
                         }
                         className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
-                        placeholder="0.3"
                       />
                     </div>
                     <div>
@@ -697,7 +696,7 @@ export function TraderConfigModal({
                         type="number"
                         min="0"
                         step="0.1"
-                        value={copyConfig.altcoin_price_offset_pct || ''}
+                        value={copyConfig.altcoin_price_offset_pct}
                         onChange={(e) =>
                           handleCopyConfigChange(
                             'altcoin_price_offset_pct',
@@ -705,7 +704,6 @@ export function TraderConfigModal({
                           )
                         }
                         className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
-                        placeholder="1"
                       />
                     </div>
                   </div>
