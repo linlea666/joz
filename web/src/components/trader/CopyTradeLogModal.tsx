@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, Fragment } from 'react'
 import { X as IconX, RefreshCw, Radio, Download, Play } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '../../lib/api'
@@ -8,6 +8,7 @@ import type {
   CopyTradeContext,
   CopyTradeAIStat,
   CopyTradeReplayReport,
+  CopyTradeAIRun,
 } from '../../types'
 import { t, type Language } from '../../i18n/translations'
 
@@ -92,6 +93,9 @@ export function CopyTradeLogModal({
   const [replay, setReplay] = useState<CopyTradeReplayReport | null>(null)
   const [replayLimit, setReplayLimit] = useState(20)
   const [isStartingReplay, setIsStartingReplay] = useState(false)
+  const [openReplayId, setOpenReplayId] = useState<string | null>(null)
+  const [openSignalId, setOpenSignalId] = useState<string | null>(null)
+  const [signalRuns, setSignalRuns] = useState<Record<string, CopyTradeAIRun | 'loading' | 'missing'>>({})
 
   const load = useCallback(async () => {
     setIsLoading(true)
@@ -129,6 +133,26 @@ export function CopyTradeLogModal({
       )
     } finally {
       setIsStartingReplay(false)
+    }
+  }
+
+  const toggleSignalRun = async (sig: CopyTradeSignal) => {
+    if (openSignalId === sig.id) {
+      setOpenSignalId(null)
+      return
+    }
+    setOpenSignalId(sig.id)
+    if (!sig.ai_run_id) {
+      setSignalRuns((prev) => ({ ...prev, [sig.id]: 'missing' }))
+      return
+    }
+    if (signalRuns[sig.id] && signalRuns[sig.id] !== 'loading') return
+    setSignalRuns((prev) => ({ ...prev, [sig.id]: 'loading' }))
+    try {
+      const run = await api.getCopyTradeAIRun(traderId, sig.ai_run_id)
+      setSignalRuns((prev) => ({ ...prev, [sig.id]: run }))
+    } catch {
+      setSignalRuns((prev) => ({ ...prev, [sig.id]: 'missing' }))
     }
   }
 
@@ -335,14 +359,13 @@ export function CopyTradeLogModal({
                     <th className="py-2 pr-2">{t('copytrade.colStatus', language)}</th>
                     <th className="py-2 pr-2 text-right">{t('copytrade.colLatency', language)}</th>
                     <th className="py-2 text-right">{t('copytrade.colTotalMs', language)}</th>
+                    <th className="py-2" />
                   </tr>
                 </thead>
                 <tbody>
                   {signals.map((sig) => (
-                    <tr
-                      key={sig.id}
-                      className="border-b border-nofx-gold/10 text-nofx-text"
-                    >
+                    <Fragment key={sig.id}>
+                    <tr className="border-b border-nofx-gold/10 text-nofx-text">
                       <td className="py-2 pr-2 font-mono whitespace-nowrap">
                         {fmtTime(sig.message_timestamp)}
                       </td>
@@ -374,7 +397,49 @@ export function CopyTradeLogModal({
                       <td className="py-2 text-right font-mono">
                         {sig.total_ms > 0 ? sig.total_ms : '-'}
                       </td>
+                      <td className="py-2 text-right">
+                        <button
+                          type="button"
+                          onClick={() => toggleSignalRun(sig)}
+                          className="text-nofx-gold hover:underline whitespace-nowrap"
+                        >
+                          {openSignalId === sig.id
+                            ? t('copytrade.hideIO', language)
+                            : t('copytrade.showIO', language)}
+                        </button>
+                      </td>
                     </tr>
+                    {openSignalId === sig.id && (
+                      <tr key={`${sig.id}-io`} className="border-b border-nofx-gold/10">
+                        <td colSpan={7} className="py-2">
+                          {signalRuns[sig.id] === 'loading' && (
+                            <div className="text-nofx-text-muted text-xs px-2">
+                              {t('copytrade.loadingIO', language)}
+                            </div>
+                          )}
+                          {signalRuns[sig.id] === 'missing' && (
+                            <div className="text-nofx-text-muted text-xs px-2">
+                              {t('copytrade.noAIRun', language)}
+                            </div>
+                          )}
+                          {(() => {
+                            const run = signalRuns[sig.id]
+                            if (!run || typeof run !== 'object') return null
+                            return (
+                              <AIInteractionView
+                                language={language}
+                                systemPrompt={run.system_prompt}
+                                userPrompt={run.input_prompt}
+                                rawResponse={run.raw_response}
+                                parsedJSON={run.parsed_json}
+                                imageCount={run.image_count}
+                              />
+                            )
+                          })()}
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>
@@ -437,6 +502,9 @@ export function CopyTradeLogModal({
               <p className="text-xs text-nofx-text-muted">
                 {t('copytrade.replayHint', language)}
               </p>
+              <p className="text-xs text-nofx-text-muted">
+                {t('copytrade.replayProfileHint', language)}
+              </p>
               <div className="flex items-center gap-2">
                 <select
                   value={replayLimit}
@@ -465,6 +533,7 @@ export function CopyTradeLogModal({
                 <EmptyHint text={t('copytrade.replayEmpty', language)} />
               ) : (
                 <div className="space-y-2">
+                  <ReplayStats items={replay.items} language={language} />
                   {replay.items.map((item) => (
                     <div
                       key={item.message_id}
@@ -478,8 +547,18 @@ export function CopyTradeLogModal({
                           <span className="text-nofx-text-muted">{item.author}</span>
                         )}
                         {item.image_count > 0 && (
-                          <span className="text-nofx-text-muted">
+                          <span
+                            className="text-nofx-text-muted"
+                            style={
+                              item.images_sent === 0
+                                ? { color: '#C9862B' }
+                                : undefined
+                            }
+                          >
                             🖼 {item.images_sent}/{item.image_count}
+                            {item.image_count > 3
+                              ? ` ${t('copytrade.replayImageCap', language)}`
+                              : ''}
                           </span>
                         )}
                         <span
@@ -551,6 +630,36 @@ export function CopyTradeLogModal({
                           ⚠ {item.warnings.join('; ')}
                         </div>
                       )}
+                      {item.image_error && (
+                        <div style={{ color: '#C9862B' }} className="break-all">
+                          ⚠ {item.image_error}
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenReplayId(
+                            openReplayId === item.message_id
+                              ? null
+                              : item.message_id
+                          )
+                        }
+                        className="text-nofx-gold hover:underline"
+                      >
+                        {openReplayId === item.message_id
+                          ? t('copytrade.hideIO', language)
+                          : t('copytrade.showIO', language)}
+                      </button>
+                      {openReplayId === item.message_id && (
+                        <AIInteractionView
+                          language={language}
+                          systemPrompt={item.system_prompt || ''}
+                          userPrompt={item.user_prompt || ''}
+                          rawResponse={item.raw_response || ''}
+                          parsedJSON={item.parsed_json || ''}
+                          imageCount={item.images_sent}
+                        />
+                      )}
                     </div>
                   ))}
                 </div>
@@ -610,5 +719,86 @@ export function CopyTradeLogModal({
 function EmptyHint({ text }: { text: string }) {
   return (
     <div className="text-center py-12 text-nofx-text-muted text-sm">{text}</div>
+  )
+}
+
+function ReplayStats({
+  items,
+  language,
+}: {
+  items: CopyTradeReplayReport['items']
+  language: Language
+}) {
+  const execute = items.filter((i) => i.verdict === 'EXECUTE').length
+  const skip = items.filter((i) => i.verdict === 'SKIP').length
+  const invalid = items.filter((i) => i.verdict === 'INVALID').length
+  const error = items.filter((i) => i.verdict === 'ERROR').length
+  const withMs = items.filter((i) => i.llm_ms > 0)
+  const avg =
+    withMs.length > 0
+      ? withMs.reduce((s, i) => s + i.llm_ms, 0) / withMs.length / 1000
+      : 0
+  return (
+    <div className="text-xs text-nofx-text-muted px-1">
+      {t('copytrade.replayStats', language)
+        .replace('{execute}', String(execute))
+        .replace('{skip}', String(skip))
+        .replace('{invalid}', String(invalid))
+        .replace('{error}', String(error))
+        .replace('{avg}', avg.toFixed(1))}
+    </div>
+  )
+}
+
+function AIInteractionView({
+  language,
+  systemPrompt,
+  userPrompt,
+  rawResponse,
+  parsedJSON,
+  imageCount,
+}: {
+  language: Language
+  systemPrompt: string
+  userPrompt: string
+  rawResponse: string
+  parsedJSON: string
+  imageCount: number
+}) {
+  return (
+    <div className="mt-2 space-y-2 text-xs">
+      <details open className="rounded bg-nofx-bg-deeper border border-nofx-gold/10 p-2">
+        <summary className="cursor-pointer text-nofx-text-muted">
+          {t('copytrade.ioSent', language)}
+          {imageCount > 0
+            ? ` · ${t('copytrade.ioImages', language)} ${imageCount}`
+            : ''}
+        </summary>
+        {systemPrompt && (
+          <pre className="mt-2 whitespace-pre-wrap break-all text-nofx-text-muted max-h-48 overflow-y-auto">
+            {systemPrompt}
+          </pre>
+        )}
+        <pre className="mt-2 whitespace-pre-wrap break-all text-nofx-text max-h-72 overflow-y-auto">
+          {userPrompt || '-'}
+        </pre>
+      </details>
+      <details className="rounded bg-nofx-bg-deeper border border-nofx-gold/10 p-2">
+        <summary className="cursor-pointer text-nofx-text-muted">
+          {t('copytrade.ioRaw', language)}
+        </summary>
+        <pre className="mt-2 whitespace-pre-wrap break-all text-nofx-text max-h-72 overflow-y-auto">
+          {rawResponse || '-'}
+        </pre>
+      </details>
+      <details className="rounded bg-nofx-bg-deeper border border-nofx-gold/10 p-2">
+        <summary className="cursor-pointer text-nofx-text-muted">
+          {t('copytrade.ioParsed', language)}
+        </summary>
+        <pre className="mt-2 whitespace-pre-wrap break-all text-nofx-text max-h-72 overflow-y-auto">
+          {parsedJSON || '-'}
+        </pre>
+      </details>
+    </div>
   )
 }

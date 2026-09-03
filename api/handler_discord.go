@@ -374,7 +374,7 @@ func (s *Server) copyEngineFor(c *gin.Context, traderID string) *copytrader.Engi
 	}
 	engine := at.CopyEngine()
 	if engine == nil {
-		SafeBadRequest(c, "交易员未在运行中（识别回放需要跟单交易员处于运行状态）")
+		SafeBadRequest(c, "交易员未在运行中（该操作需要跟单交易员处于运行状态）")
 		return nil
 	}
 	return engine
@@ -414,6 +414,51 @@ func (s *Server) handleGetCopyTradeReplay(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"report": report})
+}
+
+// handleGetCopyTradeAIRun returns one persisted AI interaction (live path).
+func (s *Server) handleGetCopyTradeAIRun(c *gin.Context) {
+	traderID := c.Query("trader_id")
+	if traderID == "" {
+		SafeBadRequest(c, "trader_id is required")
+		return
+	}
+	if !s.verifyTraderOwnership(c, traderID) {
+		return
+	}
+	id, err := strconv.ParseInt(c.Query("id"), 10, 64)
+	if err != nil || id <= 0 {
+		SafeBadRequest(c, "id is required")
+		return
+	}
+	run, err := s.store.CopyTrade().GetAIRun(traderID, id)
+	if err != nil || run == nil {
+		SafeNotFound(c, "AI run")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"run": run})
+}
+
+// handleGenerateCopyTradeProfile drafts channel_notes from stored history.
+func (s *Server) handleGenerateCopyTradeProfile(c *gin.Context) {
+	var req struct {
+		TraderID string `json:"trader_id"`
+		Limit    int    `json:"limit"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		SafeBadRequest(c, "Invalid request format")
+		return
+	}
+	engine := s.copyEngineFor(c, req.TraderID)
+	if engine == nil {
+		return
+	}
+	draft, err := engine.GenerateProfile(req.Limit)
+	if err != nil {
+		SafeBadRequest(c, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"draft": draft})
 }
 
 // handleGetCopyTradeAIStats aggregates per-model parse latency for comparison.

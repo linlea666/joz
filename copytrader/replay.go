@@ -52,6 +52,11 @@ type ReplayItem struct {
 	Reasoning      string    `json:"reasoning,omitempty"`
 	Warnings       []string  `json:"warnings,omitempty"`
 	Error          string    `json:"error,omitempty"`
+	ImageError     string    `json:"image_error,omitempty"`
+	SystemPrompt   string    `json:"system_prompt,omitempty"`
+	UserPrompt     string    `json:"user_prompt,omitempty"`
+	RawResponse    string    `json:"raw_response,omitempty"`
+	ParsedJSON     string    `json:"parsed_json,omitempty"`
 }
 
 // ReplayReport is the full state of one replay run (kept in memory only).
@@ -181,8 +186,16 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 		}
 	}
 
-	interp, _, timings, err := e.interpret("replay", "", msg, false, true)
+	interp, run, timings, err := e.interpret("replay", "", msg, false, true)
 	item.LLMMs = timings.llmMs
+	item.ImageError = timings.imageErr
+	if run != nil {
+		item.ImagesSent = run.ImageCount
+		item.SystemPrompt = run.SystemPrompt
+		item.UserPrompt = run.InputPrompt
+		item.RawResponse = run.RawResponse
+		item.ParsedJSON = run.ParsedJSON
+	}
 	if err != nil {
 		item.Verdict = VerdictError
 		item.Error = err.Error()

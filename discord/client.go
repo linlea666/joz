@@ -184,11 +184,15 @@ func (c *Client) GetMessage(channelID, messageID string) (*Message, error) {
 // signed with expiry parameters, so downloads must happen promptly after the
 // message is received. Returns the raw bytes and the response content type.
 func (c *Client) DownloadAttachment(rawURL string) ([]byte, string, error) {
-	// CDN downloads don't count against the API rate limits and need no auth,
-	// but still go through a bounded reader and timeout.
+	// CDN downloads don't count against the API rate limits, but user-token
+	// signed attachment URLs often 401 without the same Authorization header
+	// used for the REST API. Reuse the client token.
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, "", err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", c.token)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

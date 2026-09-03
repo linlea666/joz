@@ -19,7 +19,19 @@ import {
   UserPlus,
 } from 'lucide-react'
 import { httpClient } from '../../lib/httpClient'
+import { api } from '../../lib/api'
+import { toast } from 'sonner'
 import { NofxSelect } from '../ui/select'
+
+const CHANNEL_PROFILE_TEMPLATE_ZH = `发单格式：
+- 常见噪音（忽略）：
+- 黑话对照：
+- 图片/卡片约定：`
+
+const CHANNEL_PROFILE_TEMPLATE_EN = `How they post entries:
+- Noise to ignore:
+- Slang:
+- Images / cards:`
 
 // Extract the name part after the underscore
 function getShortName(fullName: string): string {
@@ -119,6 +131,7 @@ export function TraderConfigModal({
     ...DEFAULT_COPY_TRADING_CONFIG,
   })
   const [isSaving, setIsSaving] = useState(false)
+  const [isGeneratingProfile, setIsGeneratingProfile] = useState(false)
   const [strategies, setStrategies] = useState<Strategy[]>([])
 
   const isCopyTrading = formData.trader_type === 'copy_trading'
@@ -431,20 +444,72 @@ export function TraderConfigModal({
                   </p>
                 </div>
 
-                {/* Channel notes */}
+                {/* Channel profile */}
                 <div>
                   <label className="text-sm text-nofx-text block mb-2">
                     {t('copytrade.channelNotes', language)}
                   </label>
+                  <p className="text-xs text-nofx-text-muted mb-2">
+                    {t('copytrade.channelNotesHint', language)}
+                  </p>
                   <textarea
                     value={copyConfig.channel_notes || ''}
                     onChange={(e) =>
                       handleCopyConfigChange('channel_notes', e.target.value)
                     }
-                    rows={2}
+                    rows={8}
                     className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text text-sm focus:border-nofx-gold focus:outline-none"
                     placeholder={t('copytrade.channelNotesPlaceholder', language)}
                   />
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (copyConfig.channel_notes?.trim()) return
+                        handleCopyConfigChange(
+                          'channel_notes',
+                          language === 'zh'
+                            ? CHANNEL_PROFILE_TEMPLATE_ZH
+                            : CHANNEL_PROFILE_TEMPLATE_EN
+                        )
+                      }}
+                      className="px-2.5 py-1 rounded text-xs bg-nofx-bg-deeper text-nofx-text-muted hover:text-nofx-text"
+                    >
+                      {t('copytrade.channelNotesTemplate', language)}
+                    </button>
+                    {isEditMode && traderData?.trader_id && (
+                      <button
+                        type="button"
+                        disabled={isGeneratingProfile}
+                        onClick={async () => {
+                          if (isGeneratingProfile) return
+                          setIsGeneratingProfile(true)
+                          try {
+                            const draft = await api.generateCopyTradeProfile(
+                              traderData.trader_id!
+                            )
+                            handleCopyConfigChange('channel_notes', draft)
+                            toast.success(
+                              t('copytrade.channelNotesGenerated', language)
+                            )
+                          } catch (err) {
+                            toast.error(
+                              err instanceof Error && err.message
+                                ? err.message
+                                : t('copytrade.channelNotesGenerateFailed', language)
+                            )
+                          } finally {
+                            setIsGeneratingProfile(false)
+                          }
+                        }}
+                        className="px-2.5 py-1 rounded text-xs bg-nofx-gold text-white disabled:opacity-50"
+                      >
+                        {isGeneratingProfile
+                          ? t('copytrade.channelNotesGenerating', language)
+                          : t('copytrade.channelNotesGenerate', language)}
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 {/* Risk mode */}

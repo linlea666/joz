@@ -6,6 +6,7 @@ import type {
   CopyTradeContext,
   CopyTradeAIStat,
   CopyTradeReplayReport,
+  CopyTradeAIRun,
 } from '../../types'
 import { API_BASE, httpClient } from './helpers'
 
@@ -128,6 +129,45 @@ export const discordApi = {
     )
     if (!result.success) throw new Error('Failed to fetch copy trade contexts')
     return result.data?.contexts ?? []
+  },
+
+  async getCopyTradeAIRun(
+    traderId: string,
+    id: number
+  ): Promise<CopyTradeAIRun> {
+    const result = await httpClient.get<{ run: CopyTradeAIRun }>(
+      `${API_BASE}/copytrade/ai-run?trader_id=${encodeURIComponent(traderId)}&id=${id}`
+    )
+    if (!result.success || !result.data?.run) {
+      throw new Error(result.message || 'Failed to fetch AI run')
+    }
+    return result.data.run
+  },
+
+  async generateCopyTradeProfile(
+    traderId: string,
+    limit = 40
+  ): Promise<string> {
+    const token = localStorage.getItem('auth_token')
+    const resp = await fetch(`${API_BASE}/copytrade/generate-profile`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ trader_id: traderId, limit }),
+      signal: AbortSignal.timeout(120000),
+    })
+    const json = (await resp.json().catch(() => ({}))) as {
+      draft?: string
+      error?: string
+      message?: string
+    }
+    if (!resp.ok) {
+      throw new Error(json.error || json.message || `Generate failed (${resp.status})`)
+    }
+    if (!json.draft) throw new Error(json.error || json.message || 'Empty draft')
+    return json.draft
   },
 
   async startCopyTradeReplay(traderId: string, limit: number): Promise<void> {

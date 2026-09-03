@@ -272,6 +272,16 @@ func (s *CopyTradeStore) CreateAIRun(run *CopyTradeAIRun) error {
 	return s.db.Create(run).Error
 }
 
+// GetAIRun returns one AI run scoped to a trader (ownership).
+func (s *CopyTradeStore) GetAIRun(traderID string, id int64) (*CopyTradeAIRun, error) {
+	var run CopyTradeAIRun
+	err := s.db.Where("id = ? AND trader_id = ?", id, traderID).First(&run).Error
+	if err != nil {
+		return nil, err
+	}
+	return &run, nil
+}
+
 // AIStat aggregates model latency for comparison.
 type AIStat struct {
 	Model    string  `json:"model"`

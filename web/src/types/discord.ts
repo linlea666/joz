@@ -189,6 +189,28 @@ export interface CopyTradeReplayItem {
   reasoning?: string
   warnings?: string[]
   error?: string
+  image_error?: string
+  system_prompt?: string
+  user_prompt?: string
+  raw_response?: string
+  parsed_json?: string
+}
+
+export interface CopyTradeAIRun {
+  id: number
+  trader_id: string
+  channel_id: string
+  message_id: string
+  model: string
+  provider: string
+  prompt_version: string
+  system_prompt: string
+  input_prompt: string
+  image_count: number
+  raw_response: string
+  parsed_json: string
+  error: string
+  duration_ms: number
 }
 
 export interface CopyTradeReplayReport {

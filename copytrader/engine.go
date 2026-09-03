@@ -198,10 +198,14 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	}
 
 	// --- 1. Assemble context ---
-	interp, aiRunID, timings, err := e.interpret(traceID, signalID, msg, isEdit, false)
+	interp, run, timings, err := e.interpret(traceID, signalID, msg, isEdit, false)
 	if err != nil {
 		fail("AI interpretation", err)
 		return
+	}
+	aiRunID := int64(0)
+	if run != nil {
+		aiRunID = run.ID
 	}
 	interpJSON, _ := json.Marshal(interp)
 	e.updateSignal(signalID, map[string]interface{}{
@@ -307,12 +311,13 @@ type pipelineTimings struct {
 	mediaMs  int64
 	promptMs int64
 	llmMs    int64
+	imageErr string
 }
 
 // interpret builds the prompt (with context and optional images) and runs the LLM.
 // dryRun skips all persistence (AI run records, events): used by the replay tool
 // so accuracy testing never pollutes real stats or the event stream.
-func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, isEdit, dryRun bool) (*SourceInterpretation, int64, pipelineTimings, error) {
+func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, isEdit, dryRun bool) (*SourceInterpretation, *store.CopyTradeAIRun, pipelineTimings, error) {
 	var t pipelineTimings
 
 	// Context: active trades, recent signals, reply/linked messages.
@@ -344,10 +349,12 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	mediaStart := time.Now()
 	var imageParts []mcp.ContentPart
 	imageCount := 0
+	var imageErr string
 	if e.cfg.ParseImages {
-		imageParts, imageCount = e.collectImages(traceID, signalID, msg, dryRun)
+		imageParts, imageCount, imageErr = e.collectImages(traceID, signalID, msg, dryRun)
 	}
 	t.mediaMs = time.Since(mediaStart).Milliseconds()
+	t.imageErr = imageErr
 
 	// Positions snapshot (optional, non-fatal).
 	var positions []store.PositionSnapshot
@@ -428,7 +435,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 			_ = e.st.CopyTrade().CreateAIRun(run)
 			e.events.Error(traceID, signalID, msg.MessageID, EvAIError, callErr.Error(), nil)
 		}
-		return nil, run.ID, t, fmt.Errorf("LLM call failed: %w", callErr)
+		return nil, run, t, fmt.Errorf("LLM call failed: %w", callErr)
 	}
 
 	interp, perr := ParseInterpretation(raw)
@@ -438,7 +445,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 			_ = e.st.CopyTrade().CreateAIRun(run)
 			e.events.Error(traceID, signalID, msg.MessageID, EvAIError, "parse failed: "+perr.Error(), nil)
 		}
-		return nil, run.ID, t, fmt.Errorf("interpretation parse failed: %w", perr)
+		return nil, run, t, fmt.Errorf("interpretation parse failed: %w", perr)
 	}
 	parsedJSON, _ := json.Marshal(interp)
 	run.ParsedJSON = string(parsedJSON)
@@ -447,27 +454,33 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 		e.events.Success(traceID, signalID, msg.MessageID, EvAIParsed,
 			fmt.Sprintf("LLM responded in %.1fs", float64(t.llmMs)/1000), t.llmMs, nil)
 	}
-	return interp, run.ID, t, nil
+	return interp, run, t, nil
 }
 
 // collectImages downloads message images and converts them to data-URL parts.
 // Failures degrade to text-only with a warning (never fail the signal).
-func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessage, dryRun bool) ([]mcp.ContentPart, int) {
+func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessage, dryRun bool) ([]mcp.ContentPart, int, string) {
 	client := e.poller.Client()
 	if client == nil {
-		return nil, 0
+		return nil, 0, "discord client unavailable"
 	}
 	var parts []mcp.ContentPart
 	count := 0
+	var lastErr string
+	failed := 0
+	available := 0
 	for _, att := range discord.ParseStoredAttachments(msg.AttachmentsJSON) {
 		if !att.IsImage() || att.URL == "" {
 			continue
 		}
+		available++
 		if count >= 3 { // bound prompt size
-			break
+			continue
 		}
 		img, err := discord.DownloadImage(client, att.URL)
 		if err != nil {
+			failed++
+			lastErr = err.Error()
 			if !dryRun {
 				e.events.Warn(traceID, signalID, msg.MessageID, EvMessageSkipped,
 					fmt.Sprintf("image download failed, degrading to text-only: %v", err), nil)
@@ -476,13 +489,21 @@ func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessa
 		}
 		data, err := discord.ReadImageBytes(img)
 		if err != nil {
+			failed++
+			lastErr = err.Error()
 			continue
 		}
 		dataURL := "data:" + img.MimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
 		parts = append(parts, mcp.NewImagePart(dataURL))
 		count++
 	}
-	return parts, count
+	var imageErr string
+	if failed > 0 && count == 0 && available > 0 {
+		imageErr = fmt.Sprintf("%d/%d images failed to download: %s", failed, available, lastErr)
+	} else if failed > 0 {
+		imageErr = fmt.Sprintf("%d/%d images failed to download: %s", failed, available, lastErr)
+	}
+	return parts, count, imageErr
 }
 
 // lookupMessage reads a message from the store, falling back to the API.
