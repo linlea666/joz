@@ -8,6 +8,7 @@ import {
   EyeOff,
   Copy,
   Check,
+  Radio,
 } from 'lucide-react'
 import type { TraderInfo, Exchange } from '../../types'
 import type { Language } from '../../i18n/translations'
@@ -38,6 +39,7 @@ interface TradersListProps {
   onDeleteTrader: (traderId: string) => void
   onToggleTraderAddress: (traderId: string) => void
   onCopyAddress: (id: string, address: string) => void
+  onShowCopyLog?: (traderId: string, traderName: string) => void
 }
 
 export function TradersList({
@@ -57,6 +59,7 @@ export function TradersList({
   onDeleteTrader,
   onToggleTraderAddress,
   onCopyAddress,
+  onShowCopyLog,
 }: TradersListProps) {
   return (
     <div className="binance-card p-4 md:p-6">
@@ -93,6 +96,7 @@ export function TradersList({
               onDeleteTrader={onDeleteTrader}
               onToggleTraderAddress={onToggleTraderAddress}
               onCopyAddress={onCopyAddress}
+              onShowCopyLog={onShowCopyLog}
             />
           ))}
         </div>
@@ -184,6 +188,7 @@ function TraderRow({
   onDeleteTrader,
   onToggleTraderAddress,
   onCopyAddress,
+  onShowCopyLog,
 }: {
   trader: TraderInfo
   allExchanges: Exchange[]
@@ -198,8 +203,10 @@ function TraderRow({
   onDeleteTrader: (traderId: string) => void
   onToggleTraderAddress: (traderId: string) => void
   onCopyAddress: (id: string, address: string) => void
+  onShowCopyLog?: (traderId: string, traderName: string) => void
 }) {
   const exchange = allExchanges.find(e => e.id === trader.exchange_id)
+  const isCopyTrading = trader.trader_type === 'copy_trading'
   const walletAddr = getWalletAddress(exchange)
   const isPerpDex = isPerpDexExchange(exchange?.exchange_type)
   const isVisible = visibleTraderAddresses.has(trader.trader_id)
@@ -225,10 +232,21 @@ function TraderRow({
         </div>
         <div className="min-w-0">
           <div
-            className="font-bold text-base md:text-lg truncate"
+            className="font-bold text-base md:text-lg truncate flex items-center gap-2"
             style={{ color: '#1A1813' }}
           >
             {trader.trader_name}
+            {isCopyTrading && (
+              <span
+                className="text-[10px] px-1.5 py-0.5 rounded-full font-semibold whitespace-nowrap"
+                style={{
+                  background: 'rgba(88, 101, 242, 0.12)',
+                  color: '#5865F2',
+                }}
+              >
+                {t('copytrade.typeCopyTrading', language)}
+              </span>
+            )}
           </div>
           <div
             className="text-xs md:text-sm truncate"
@@ -336,6 +354,20 @@ function TraderRow({
             <BarChart3 className="w-3 h-3 md:w-4 md:h-4" />
             {t('view', language)}
           </button>
+
+          {isCopyTrading && onShowCopyLog && (
+            <button
+              onClick={() => onShowCopyLog(trader.trader_id, trader.trader_name)}
+              className="px-2 md:px-3 py-1.5 md:py-2 rounded text-xs md:text-sm font-semibold transition-all hover:scale-105 flex items-center gap-1 whitespace-nowrap"
+              style={{
+                background: 'rgba(88, 101, 242, 0.1)',
+                color: '#5865F2',
+              }}
+            >
+              <Radio className="w-3 h-3 md:w-4 md:h-4" />
+              {t('copytrade.logTitle', language)}
+            </button>
+          )}
 
           <button
             onClick={() => onEditTrader(trader.trader_id)}

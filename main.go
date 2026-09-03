@@ -5,6 +5,7 @@ import (
 	"nofx/auth"
 	"nofx/config"
 	"nofx/crypto"
+	"nofx/discord"
 	"nofx/logger"
 	"nofx/manager"
 	_ "nofx/mcp/payment"
@@ -103,6 +104,13 @@ func main() {
 	// time.Sleep(500 * time.Millisecond)
 	logger.Info("📊 Using CoinAnk API for all market data (WebSocket cache disabled)")
 
+	// Initialize the global Discord poller (copy-trading signal source).
+	// Traders subscribe on start; polling begins only when a token is set.
+	discordPoller := discord.InitGlobal(st)
+	if err := discordPoller.Start(); err != nil {
+		logger.Warnf("⚠️ Discord poller start failed: %v", err)
+	}
+
 	// Create TraderManager
 	traderManager := manager.NewTraderManager()
 
@@ -163,6 +171,9 @@ func main() {
 
 	// Stop all traders
 	traderManager.StopAll()
+
+	// Stop Discord poller
+	discordPoller.Stop()
 	logger.Info("✅ System shut down safely")
 }
 

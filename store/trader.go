@@ -30,8 +30,16 @@ type Trader struct {
 	IsRunning           bool      `gorm:"column:is_running;default:false" json:"is_running"`
 	IsCrossMargin       bool      `gorm:"column:is_cross_margin;default:true" json:"is_cross_margin"`
 	ShowInCompetition   bool      `gorm:"column:show_in_competition;default:true" json:"show_in_competition"`
-	CreatedAt           time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
-	UpdatedAt           time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
+	// TraderType: "ai_scan" (autonomous market scan, default) or "copy_trading"
+	// (Discord channel following). The two modes are mutually exclusive.
+	TraderType string `gorm:"column:trader_type;default:ai_scan" json:"trader_type"`
+	// PrimaryChannelID is denormalized from CopyTradingConfig for fast lookup
+	// (which traders subscribe to a given Discord channel).
+	PrimaryChannelID string `gorm:"column:primary_channel_id;default:'';index" json:"primary_channel_id"`
+	// CopyTradingConfig is the JSON-encoded copytrader.CopyTradingConfig.
+	CopyTradingConfig string    `gorm:"column:copy_trading_config;default:''" json:"copy_trading_config"`
+	CreatedAt         time.Time `gorm:"column:created_at;autoCreateTime" json:"created_at"`
+	UpdatedAt         time.Time `gorm:"column:updated_at;autoUpdateTime" json:"updated_at"`
 
 	// Following fields are deprecated, kept for backward compatibility, new traders should use StrategyID
 	BTCETHLeverage       int    `gorm:"column:btc_eth_leverage;default:5" json:"btc_eth_leverage,omitempty"`
@@ -58,11 +66,23 @@ type TraderFullConfig struct {
 }
 
 func (s *TraderStore) initTables() error {
-	// For PostgreSQL with existing table, skip AutoMigrate
+	// For PostgreSQL with existing table, skip AutoMigrate but ensure the
+	// copy-trading columns exist (AutoMigrate is skipped so new columns must
+	// be added explicitly).
 	if s.db.Dialector.Name() == "postgres" {
 		var tableExists int64
 		s.db.Raw(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'traders'`).Scan(&tableExists)
 		if tableExists > 0 {
+			migrations := []string{
+				`ALTER TABLE traders ADD COLUMN IF NOT EXISTS trader_type TEXT DEFAULT 'ai_scan'`,
+				`ALTER TABLE traders ADD COLUMN IF NOT EXISTS primary_channel_id TEXT DEFAULT ''`,
+				`ALTER TABLE traders ADD COLUMN IF NOT EXISTS copy_trading_config TEXT DEFAULT ''`,
+			}
+			for _, m := range migrations {
+				if err := s.db.Exec(m).Error; err != nil {
+					return fmt.Errorf("failed to add copy trading columns: %w", err)
+				}
+			}
 			return nil
 		}
 	}
@@ -124,6 +144,13 @@ func (s *TraderStore) Update(trader *Trader) error {
 		"custom_prompt":          trader.CustomPrompt,
 		"override_base_prompt":   trader.OverrideBasePrompt,
 		"system_prompt_template": trader.SystemPromptTemplate,
+	}
+
+	// Copy-trading fields: trader_type itself is immutable after creation,
+	// but the copy config can be edited.
+	if trader.TraderType == "copy_trading" {
+		updates["primary_channel_id"] = trader.PrimaryChannelID
+		updates["copy_trading_config"] = trader.CopyTradingConfig
 	}
 
 	// Only update these if > 0

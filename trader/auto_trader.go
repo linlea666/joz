@@ -3,6 +3,7 @@ package trader
 import (
 	"fmt"
 	"github.com/ethereum/go-ethereum/crypto"
+	"nofx/copytrader"
 	"nofx/kernel"
 	"nofx/logger"
 	"nofx/mcp"
@@ -161,6 +162,12 @@ type AutoTraderConfig struct {
 	// Strategy configuration (use complete strategy config)
 	StrategyConfig    *store.StrategyConfig // Strategy configuration (includes coin sources, indicators, risk control, prompts, etc.)
 	StrategyConfigRaw string                // Raw strategy config JSON from DB, used to detect live edits
+
+	// Copy trading (Discord channel following). When TraderType is
+	// "copy_trading", Run() starts the copytrader engine instead of the
+	// market-scan loop.
+	TraderType        string // "ai_scan" (default) or "copy_trading"
+	CopyTradingConfig string // JSON-encoded copytrader.CopyTradingConfig
 }
 
 // AutoTrader automatic trader
@@ -203,6 +210,7 @@ type AutoTrader struct {
 	aiWalletStatus        string             // "ok"|"low"|"empty"|"unknown" — see runtime_health.go
 	aiWalletBalanceUSDC   float64            // Last observed Base USDC balance of the claw402 wallet
 	aiWalletCheckedAt     time.Time          // When the balance was last observed
+	copyEngine            *copytrader.Engine // Copy-trading engine (only for TraderType=copy_trading)
 }
 
 // NewAutoTrader creates an automatic trader
@@ -374,18 +382,24 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		logger.Infof("📊 [%s] Decision records will be stored to database", config.Name)
 	}
 
-	// Create strategy engine (must have strategy config)
+	// Create strategy engine (must have strategy config, except for
+	// copy-trading traders whose risk rules live in CopyTradingConfig)
+	var strategyEngine *kernel.StrategyEngine
 	if config.StrategyConfig == nil {
-		return nil, fmt.Errorf("[%s] strategy not configured", config.Name)
+		if config.TraderType != string(copytrader.TraderTypeCopy) {
+			return nil, fmt.Errorf("[%s] strategy not configured", config.Name)
+		}
+		logger.Infof("✓ [%s] Copy-trading trader: no strategy engine needed", config.Name)
+	} else {
+		// Pass claw402 wallet key to strategy engine so nofxos data requests
+		// are routed through claw402 (reuses the same wallet as AI calls)
+		claw402Key := config.Claw402WalletKey
+		if claw402Key == "" && config.AIModel == "claw402" && config.CustomAPIKey != "" {
+			claw402Key = config.CustomAPIKey
+		}
+		strategyEngine = kernel.NewStrategyEngine(config.StrategyConfig, claw402Key)
+		logger.Infof("✓ [%s] Using strategy engine (strategy configuration loaded)", config.Name)
 	}
-	// Pass claw402 wallet key to strategy engine so nofxos data requests
-	// are routed through claw402 (reuses the same wallet as AI calls)
-	claw402Key := config.Claw402WalletKey
-	if claw402Key == "" && config.AIModel == "claw402" && config.CustomAPIKey != "" {
-		claw402Key = config.CustomAPIKey
-	}
-	strategyEngine := kernel.NewStrategyEngine(config.StrategyConfig, claw402Key)
-	logger.Infof("✓ [%s] Using strategy engine (strategy configuration loaded)", config.Name)
 
 	return &AutoTrader{
 		id:                    config.ID,
@@ -461,6 +475,13 @@ func (at *AutoTrader) Run() error {
 
 	at.stopMonitorCh = make(chan struct{})
 	at.startTime = time.Now()
+
+	// Copy-trading traders follow Discord signals; they never run scan cycles.
+	if at.IsCopyTrading() {
+		at.monitorWg.Add(1)
+		defer at.monitorWg.Done()
+		return at.runCopyTradingMode()
+	}
 
 	logger.Info("🚀 AI-driven automatic trading system started")
 	at.logInfof("💰 Initial balance: %.2f USDT", at.initialBalance)

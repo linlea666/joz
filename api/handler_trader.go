@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"nofx/copytrader"
 	"nofx/logger"
 	"nofx/store"
 
@@ -38,6 +39,10 @@ type CreateTraderRequest struct {
 	SystemPromptTemplate string `json:"system_prompt_template"` // System prompt template name
 	UseAI500             bool   `json:"use_ai500"`
 	UseOITop             bool   `json:"use_oi_top"`
+
+	// Copy trading (Discord channel following)
+	TraderType        string `json:"trader_type"`         // "" / "ai_scan" / "copy_trading"
+	CopyTradingConfig string `json:"copy_trading_config"` // JSON-encoded copytrader.CopyTradingConfig
 }
 
 // UpdateTraderRequest Update trader request
@@ -57,6 +62,9 @@ type UpdateTraderRequest struct {
 	CustomPrompt         string `json:"custom_prompt"`
 	OverrideBasePrompt   bool   `json:"override_base_prompt"`
 	SystemPromptTemplate string `json:"system_prompt_template"`
+
+	// Copy trading (Discord channel following)
+	CopyTradingConfig string `json:"copy_trading_config"`
 }
 
 func formatTraderCreationError(reason, nextStep string) string {
@@ -378,7 +386,35 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		return
 	}
 
-	if req.StrategyID == "" {
+	// Copy trading traders: validate their config; strategy is not required.
+	traderType := req.TraderType
+	if traderType == "" {
+		traderType = string(copytrader.TraderTypeAIScan)
+	}
+	primaryChannelID := ""
+	if traderType == string(copytrader.TraderTypeCopy) {
+		ctCfg, cfgErr := copytrader.ParseCopyTradingConfig(req.CopyTradingConfig)
+		if cfgErr == nil {
+			cfgErr = ctCfg.Validate()
+		}
+		if cfgErr != nil {
+			SafeBadRequestWithDetails(c, formatTraderCreationError(
+				fmt.Sprintf("Copy trading configuration is invalid: %s", cfgErr.Error()),
+				"Please check the Discord channel ID and risk settings, then try again",
+			), "trader.create.invalid_copy_config", nil)
+			return
+		}
+		if hasToken, tokenErr := s.store.DiscordConfig().HasToken(); tokenErr == nil && !hasToken {
+			SafeBadRequestWithDetails(c, formatTraderCreationError(
+				"Global Discord Token is not configured",
+				"Please configure the Discord token in Settings first, then create the copy-trading bot",
+			), "trader.create.discord_token_missing", nil)
+			return
+		}
+		encoded, _ := ctCfg.Encode()
+		req.CopyTradingConfig = encoded
+		primaryChannelID = ctCfg.PrimaryChannelID
+	} else if req.StrategyID == "" {
 		SafeBadRequestWithDetails(c, formatTraderCreationError("You have not selected a trading strategy yet", "Please select a strategy first, then continue creating the bot"), "trader.create.strategy_required", nil)
 		return
 	}
@@ -514,6 +550,9 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		ShowInCompetition:    showInCompetition,
 		ScanIntervalMinutes:  scanIntervalMinutes,
 		IsRunning:            false,
+		TraderType:           traderType,
+		PrimaryChannelID:     primaryChannelID,
+		CopyTradingConfig:    req.CopyTradingConfig,
 	}
 
 	// Save to database
@@ -656,6 +695,23 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		initialBalance = 0
 	}
 
+	// Copy trading config update (trader_type itself never changes after creation)
+	copyTradingConfig := existingTrader.CopyTradingConfig
+	primaryChannelID := existingTrader.PrimaryChannelID
+	if existingTrader.TraderType == string(copytrader.TraderTypeCopy) && req.CopyTradingConfig != "" {
+		ctCfg, cfgErr := copytrader.ParseCopyTradingConfig(req.CopyTradingConfig)
+		if cfgErr == nil {
+			cfgErr = ctCfg.Validate()
+		}
+		if cfgErr != nil {
+			SafeBadRequest(c, fmt.Sprintf("Copy trading configuration is invalid: %s", cfgErr.Error()))
+			return
+		}
+		encoded, _ := ctCfg.Encode()
+		copyTradingConfig = encoded
+		primaryChannelID = ctCfg.PrimaryChannelID
+	}
+
 	// Update trader configuration
 	traderRecord := &store.Trader{
 		ID:                   traderID,
@@ -675,6 +731,9 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		ShowInCompetition:    showInCompetition,
 		ScanIntervalMinutes:  scanIntervalMinutes,
 		IsRunning:            existingTrader.IsRunning, // Keep original value
+		TraderType:           existingTrader.TraderType,
+		PrimaryChannelID:     primaryChannelID,
+		CopyTradingConfig:    copyTradingConfig,
 	}
 
 	// Check if trader was running before update (we'll restart it after)

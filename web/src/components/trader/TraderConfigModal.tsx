@@ -5,7 +5,9 @@ import type {
   CreateTraderRequest,
   Strategy,
   TraderConfigData,
+  CopyTradingConfig,
 } from '../../types'
+import { DEFAULT_COPY_TRADING_CONFIG } from '../../types'
 import { useLanguage } from '../../contexts/LanguageContext'
 import { t } from '../../i18n/translations'
 import {
@@ -71,6 +73,16 @@ interface FormState {
   is_cross_margin: boolean
   show_in_competition: boolean
   scan_interval_minutes: number
+  trader_type: string // 'ai_scan' | 'copy_trading'
+}
+
+function parseCopyConfig(raw?: string): CopyTradingConfig {
+  if (!raw) return { ...DEFAULT_COPY_TRADING_CONFIG }
+  try {
+    return { ...DEFAULT_COPY_TRADING_CONFIG, ...JSON.parse(raw) }
+  } catch {
+    return { ...DEFAULT_COPY_TRADING_CONFIG }
+  }
 }
 
 interface TraderConfigModalProps {
@@ -101,9 +113,15 @@ export function TraderConfigModal({
     is_cross_margin: true,
     show_in_competition: true,
     scan_interval_minutes: 15,
+    trader_type: 'ai_scan',
+  })
+  const [copyConfig, setCopyConfig] = useState<CopyTradingConfig>({
+    ...DEFAULT_COPY_TRADING_CONFIG,
   })
   const [isSaving, setIsSaving] = useState(false)
   const [strategies, setStrategies] = useState<Strategy[]>([])
+
+  const isCopyTrading = formData.trader_type === 'copy_trading'
 
   // Fetch the user's strategy list
   useEffect(() => {
@@ -145,7 +163,9 @@ export function TraderConfigModal({
       setFormData({
         ...traderData,
         strategy_id: traderData.strategy_id || '',
+        trader_type: traderData.trader_type || 'ai_scan',
       })
+      setCopyConfig(parseCopyConfig(traderData.copy_trading_config))
     } else if (!isEditMode) {
       setFormData({
         trader_name: '',
@@ -155,7 +175,9 @@ export function TraderConfigModal({
         is_cross_margin: true,
         show_in_competition: true,
         scan_interval_minutes: 15,
+        trader_type: 'ai_scan',
       })
+      setCopyConfig({ ...DEFAULT_COPY_TRADING_CONFIG })
     }
   }, [traderData, isEditMode, availableModels, availableExchanges])
 
@@ -169,6 +191,13 @@ export function TraderConfigModal({
     setFormData((prev) => ({ ...prev, exchange_id: exchangeId }))
   }
 
+  const handleCopyConfigChange = (
+    field: keyof CopyTradingConfig,
+    value: any
+  ) => {
+    setCopyConfig((prev) => ({ ...prev, [field]: value }))
+  }
+
   const handleSave = async () => {
     if (!onSave) return
 
@@ -178,10 +207,17 @@ export function TraderConfigModal({
         name: formData.trader_name,
         ai_model_id: formData.ai_model,
         exchange_id: formData.exchange_id,
-        strategy_id: formData.strategy_id,
+        strategy_id: isCopyTrading ? '' : formData.strategy_id,
         is_cross_margin: formData.is_cross_margin,
         show_in_competition: formData.show_in_competition,
         scan_interval_minutes: formData.scan_interval_minutes,
+        trader_type: formData.trader_type,
+      }
+      if (isCopyTrading) {
+        saveData.copy_trading_config = JSON.stringify({
+          ...copyConfig,
+          primary_channel_id: copyConfig.primary_channel_id.trim(),
+        })
       }
 
       await onSave(saveData)
@@ -244,6 +280,45 @@ export function TraderConfigModal({
               {t('basicConfig', language)}
             </h3>
             <div className="space-y-4">
+              {/* Trader type (fixed after creation) */}
+              <div>
+                <label className="text-sm text-nofx-text block mb-2">
+                  {t('copytrade.traderType', language)}
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={isEditMode}
+                    onClick={() => handleInputChange('trader_type', 'ai_scan')}
+                    className={`flex-1 px-3 py-2 rounded text-sm ${
+                      !isCopyTrading
+                        ? 'bg-nofx-gold text-white'
+                        : 'bg-nofx-bg-lighter text-nofx-text-muted border border-nofx-gold/20'
+                    } ${isEditMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    {t('copytrade.typeAIScan', language)}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isEditMode}
+                    onClick={() =>
+                      handleInputChange('trader_type', 'copy_trading')
+                    }
+                    className={`flex-1 px-3 py-2 rounded text-sm ${
+                      isCopyTrading
+                        ? 'bg-nofx-gold text-white'
+                        : 'bg-nofx-bg-lighter text-nofx-text-muted border border-nofx-gold/20'
+                    } ${isEditMode ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    {t('copytrade.typeCopyTrading', language)}
+                  </button>
+                </div>
+                {isCopyTrading && (
+                  <p className="text-xs text-nofx-text-muted mt-1">
+                    {t('copytrade.typeHint', language)}
+                  </p>
+                )}
+              </div>
               <div>
                 <label className="text-sm text-nofx-text block mb-2">
                   {t('traderNameRequired', language)}
@@ -326,7 +401,252 @@ export function TraderConfigModal({
             </div>
           </div>
 
+          {/* Copy Trading Config (replaces strategy for copy-trading traders) */}
+          {isCopyTrading && (
+            <div className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5">
+              <h3 className="text-lg font-semibold text-nofx-text mb-5 flex items-center gap-2">
+                <span className="text-nofx-gold">2</span>{' '}
+                {t('copytrade.configTitle', language)}
+              </h3>
+              <div className="space-y-4">
+                {/* Channel */}
+                <div>
+                  <label className="text-sm text-nofx-text block mb-2">
+                    {t('copytrade.channelId', language)}
+                  </label>
+                  <input
+                    type="text"
+                    value={copyConfig.primary_channel_id}
+                    onChange={(e) =>
+                      handleCopyConfigChange(
+                        'primary_channel_id',
+                        e.target.value
+                      )
+                    }
+                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text font-mono focus:border-nofx-gold focus:outline-none"
+                    placeholder="1385639865194315949"
+                  />
+                  <p className="text-xs text-nofx-text-muted mt-1">
+                    {t('copytrade.channelIdHint', language)}
+                  </p>
+                </div>
+
+                {/* Channel notes */}
+                <div>
+                  <label className="text-sm text-nofx-text block mb-2">
+                    {t('copytrade.channelNotes', language)}
+                  </label>
+                  <textarea
+                    value={copyConfig.channel_notes || ''}
+                    onChange={(e) =>
+                      handleCopyConfigChange('channel_notes', e.target.value)
+                    }
+                    rows={2}
+                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text text-sm focus:border-nofx-gold focus:outline-none"
+                    placeholder={t('copytrade.channelNotesPlaceholder', language)}
+                  />
+                </div>
+
+                {/* Risk mode */}
+                <div>
+                  <label className="text-sm text-nofx-text block mb-2">
+                    {t('copytrade.riskMode', language)}
+                  </label>
+                  <div className="flex gap-2">
+                    {(
+                      [
+                        ['by_loss', t('copytrade.riskByLoss', language)],
+                        ['percent', t('copytrade.riskPercent', language)],
+                        ['fixed', t('copytrade.riskFixed', language)],
+                      ] as const
+                    ).map(([mode, label]) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => handleCopyConfigChange('risk_mode', mode)}
+                        className={`flex-1 px-3 py-2 rounded text-sm ${
+                          copyConfig.risk_mode === mode
+                            ? 'bg-nofx-gold text-white'
+                            : 'bg-nofx-bg-lighter text-nofx-text-muted border border-nofx-gold/20'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-nofx-text-muted mt-1">
+                    {copyConfig.risk_mode === 'by_loss'
+                      ? t('copytrade.riskByLossHint', language)
+                      : copyConfig.risk_mode === 'percent'
+                        ? t('copytrade.riskPercentHint', language)
+                        : t('copytrade.riskFixedHint', language)}
+                  </p>
+                </div>
+
+                {/* Risk amount + max notional */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-sm text-nofx-text block mb-2">
+                      {copyConfig.risk_mode === 'percent'
+                        ? t('copytrade.riskAmountPct', language)
+                        : t('copytrade.riskAmountUsd', language)}
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={copyConfig.risk_amount_usd}
+                      onChange={(e) =>
+                        handleCopyConfigChange(
+                          'risk_amount_usd',
+                          Number(e.target.value)
+                        )
+                      }
+                      className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm text-nofx-text block mb-2">
+                      {t('copytrade.maxNotional', language)}
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="100"
+                      value={copyConfig.max_position_notional_usd}
+                      onChange={(e) =>
+                        handleCopyConfigChange(
+                          'max_position_notional_usd',
+                          Number(e.target.value)
+                        )
+                      }
+                      className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* Leverage */}
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="text-sm text-nofx-text block mb-2">
+                      {t('copytrade.majorLeverage', language)}
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="125"
+                      value={copyConfig.major_leverage}
+                      onChange={(e) =>
+                        handleCopyConfigChange(
+                          'major_leverage',
+                          Number(e.target.value)
+                        )
+                      }
+                      className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm text-nofx-text block mb-2">
+                      {t('copytrade.altLeverage', language)}
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="125"
+                      value={copyConfig.altcoin_leverage}
+                      onChange={(e) =>
+                        handleCopyConfigChange(
+                          'altcoin_leverage',
+                          Number(e.target.value)
+                        )
+                      }
+                      className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-sm text-nofx-text block mb-2">
+                      {t('copytrade.maxPositions', language)}
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="20"
+                      value={copyConfig.max_open_positions}
+                      onChange={(e) =>
+                        handleCopyConfigChange(
+                          'max_open_positions',
+                          Number(e.target.value)
+                        )
+                      }
+                      className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                {/* TP ratios */}
+                <div>
+                  <label className="text-sm text-nofx-text block mb-2">
+                    {t('copytrade.tpRatios', language)}
+                  </label>
+                  <input
+                    type="text"
+                    value={copyConfig.default_tp_ratios}
+                    onChange={(e) =>
+                      handleCopyConfigChange('default_tp_ratios', e.target.value)
+                    }
+                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text font-mono focus:border-nofx-gold focus:outline-none"
+                    placeholder="50,30,20"
+                  />
+                  <p className="text-xs text-nofx-text-muted mt-1">
+                    {t('copytrade.tpRatiosHint', language)}
+                  </p>
+                </div>
+
+                {/* Toggles */}
+                <div className="grid grid-cols-2 gap-3">
+                  {(
+                    [
+                      ['parse_images', t('copytrade.parseImages', language)],
+                      [
+                        'auto_breakeven_after_tp',
+                        t('copytrade.autoBreakeven', language),
+                      ],
+                      [
+                        'duplicate_open_protection',
+                        t('copytrade.dupProtection', language),
+                      ],
+                      ['paused', t('copytrade.paused', language)],
+                    ] as const
+                  ).map(([field, label]) => (
+                    <button
+                      key={field}
+                      type="button"
+                      onClick={() =>
+                        handleCopyConfigChange(field, !copyConfig[field])
+                      }
+                      className={`px-3 py-2 rounded text-sm text-left flex items-center justify-between ${
+                        copyConfig[field]
+                          ? field === 'paused'
+                            ? 'bg-nofx-danger/20 text-nofx-danger border border-nofx-danger/40'
+                            : 'bg-nofx-gold/15 text-nofx-text border border-nofx-gold/40'
+                          : 'bg-nofx-bg-lighter text-nofx-text-muted border border-nofx-gold/20'
+                      }`}
+                    >
+                      <span>{label}</span>
+                      <span className="text-xs font-mono">
+                        {copyConfig[field]
+                          ? t('copytrade.on', language)
+                          : t('copytrade.off', language)}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Strategy Selection */}
+          {!isCopyTrading && (
           <div className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5">
             <h3 className="text-lg font-semibold text-nofx-text mb-5 flex items-center gap-2">
               <span className="text-nofx-gold">2</span>{' '}
@@ -452,6 +772,7 @@ export function TraderConfigModal({
               )}
             </div>
           </div>
+          )}
 
           {/* Trading Parameters */}
           <div className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5">
@@ -492,6 +813,7 @@ export function TraderConfigModal({
                     </button>
                   </div>
                 </div>
+                {!isCopyTrading && (
                 <div>
                   <label className="text-sm text-nofx-text block mb-2">
                     {t('aiScanInterval', language)}
@@ -515,6 +837,7 @@ export function TraderConfigModal({
                     {t('scanIntervalRecommend', language)}
                   </p>
                 </div>
+                )}
               </div>
 
               {/* Competition visibility */}
@@ -593,7 +916,8 @@ export function TraderConfigModal({
                 isSaving ||
                 !formData.trader_name ||
                 !formData.ai_model ||
-                !formData.exchange_id
+                !formData.exchange_id ||
+                (isCopyTrading && !copyConfig.primary_channel_id.trim())
               }
               className="px-8 py-3 bg-nofx-gold text-white rounded-lg hover:bg-nofx-gold/90 transition-all duration-200 disabled:bg-nofx-bg-deeper disabled:text-nofx-text-muted disabled:cursor-not-allowed font-medium shadow-lg"
             >

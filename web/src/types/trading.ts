@@ -129,6 +129,8 @@ export interface TraderInfo {
   use_ai500?: boolean
   use_oi_top?: boolean
   system_prompt_template?: string
+  trader_type?: string
+  primary_channel_id?: string
 }
 
 // Competition related types
@@ -172,6 +174,9 @@ export interface TraderConfigData {
   system_prompt_template?: string
   use_ai500?: boolean
   use_oi_top?: boolean
+  // Copy trading (Discord channel following)
+  trader_type?: string
+  copy_trading_config?: string
 }
 
 // Position History Types

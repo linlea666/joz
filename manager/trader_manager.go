@@ -673,7 +673,9 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 		// per-position ratio remains a hard safety cap.
 		logger.Infof("✓ Trader %s loaded strategy config: %s (maxPos=%d, posRatio=%.1f)", traderCfg.Name, strategy.Name, strategyConfig.RiskControl.MaxPositions, strategyConfig.RiskControl.AltcoinMaxPositionValueRatio)
 		ensureHyperliquidNativeStrategy(traderCfg.Name, exchangeCfg.ExchangeType, strategyConfig)
-	} else {
+	} else if traderCfg.TraderType != "copy_trading" {
+		// Copy-trading traders get their risk rules from copy_trading_config;
+		// a strategy is only mandatory for market-scan traders.
 		return fmt.Errorf("trader %s has no strategy configured", traderCfg.Name)
 	}
 
@@ -704,6 +706,8 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 		ShowInCompetition:     traderCfg.ShowInCompetition,
 		StrategyConfig:        strategyConfig,
 		StrategyConfigRaw:     strategyConfigRaw,
+		TraderType:            traderCfg.TraderType,
+		CopyTradingConfig:     traderCfg.CopyTradingConfig,
 	}
 
 	logger.Infof("📊 Loading trader %s: ScanIntervalMinutes=%d (from DB), ScanInterval=%v",

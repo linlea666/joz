@@ -327,6 +327,28 @@ Both fields are required. After saving, the user must send /start in Telegram to
 				`No body needed. Clears the Telegram chat_id binding so the user can re-bind with /start.`,
 				s.handleUnbindTelegram)
 
+			// Discord copy-trading configuration (global token shared by all copy-trading traders)
+			s.routeWithSchema(protected, "GET", "/discord", "Get global Discord copy-trading configuration",
+				`Returns: {"configured":<bool>,"token_masked":"<masked>","poll_interval_seconds":<int>,"enabled":<bool>,"channels":[...poller status...]}`,
+				s.handleGetDiscordConfig)
+			s.routeWithSchema(protected, "POST", "/discord", "Set global Discord token and polling options",
+				`Body: {"token":"<Discord token; empty keeps the stored one>","poll_interval_seconds":<3-300, optional>,"enabled":<bool, optional>}
+The token is validated against the Discord API before saving and stored encrypted.`,
+				s.handleUpdateDiscordConfig)
+			s.route(protected, "DELETE", "/discord/token", "Clear the stored Discord token", s.handleDeleteDiscordToken)
+			s.routeWithSchema(protected, "POST", "/discord/test", "Test Discord token validity",
+				`Body: {"token":"<optional; omit to test the stored token>"}. Returns {"ok":<bool>,"username":"<string>"}`,
+				s.handleTestDiscordConnection)
+			s.routeWithSchema(protected, "POST", "/discord/test-channel", "Preview latest messages of a Discord channel",
+				`Body: {"channel_id":"<numeric channel id>"}. Returns {"ok":<bool>,"messages":[{"author_name","content","timestamp",...}]}. Use to verify a channel ID before binding a copy-trading trader.`,
+				s.handleTestDiscordChannel)
+
+			// Copy-trading observability
+			s.route(protected, "GET", "/copytrade/events", "Copy trading event stream (trader_id or trace_id)", s.handleGetCopyTradeEvents)
+			s.route(protected, "GET", "/copytrade/signals", "Copy trading interpreted signals (trader_id)", s.handleGetCopyTradeSignals)
+			s.route(protected, "GET", "/copytrade/contexts", "Copy trading active trade contexts (trader_id)", s.handleGetCopyTradeContexts)
+			s.route(protected, "GET", "/copytrade/ai-stats", "Copy trading AI latency comparison (days)", s.handleGetCopyTradeAIStats)
+
 			// Strategy management
 			s.routeWithSchema(protected, "GET", "/strategies", "List user's strategies",
 				`Returns: [{"id":"<EXACT id — use as strategy_id when creating/updating a trader>","name":"<string>","is_active":<bool>,"is_default":<bool>}]

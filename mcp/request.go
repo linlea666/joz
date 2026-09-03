@@ -4,13 +4,45 @@ import "context"
 
 // Message represents a conversation message.
 // Supports plain messages (Role+Content), assistant tool-call messages (ToolCalls),
-// and tool result messages (Role="tool", ToolCallID, Content).
+// tool result messages (Role="tool", ToolCallID, Content), and multimodal
+// user messages (ContentParts with text + images for vision models).
 type Message struct {
-	Role             string     `json:"role"`                            // "system", "user", "assistant", "tool"
-	Content          string     `json:"content,omitempty"`               // Text content (omitted when ToolCalls present)
-	ReasoningContent string     `json:"reasoning_content,omitempty"`     // Thinking-model reasoning (must be echoed back in multi-turn)
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`            // Set by assistant when calling tools
-	ToolCallID       string     `json:"tool_call_id,omitempty"`          // Set on role="tool" result messages
+	Role             string        `json:"role"`                        // "system", "user", "assistant", "tool"
+	Content          string        `json:"content,omitempty"`           // Text content (omitted when ToolCalls present)
+	ContentParts     []ContentPart `json:"content_parts,omitempty"`     // Multimodal content (takes priority over Content when set)
+	ReasoningContent string        `json:"reasoning_content,omitempty"` // Thinking-model reasoning (must be echoed back in multi-turn)
+	ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`        // Set by assistant when calling tools
+	ToolCallID       string        `json:"tool_call_id,omitempty"`      // Set on role="tool" result messages
+}
+
+// ContentPart is one element of a multimodal message (OpenAI vision format).
+// Exactly one of Text / ImageURL should be set, matching Type.
+type ContentPart struct {
+	Type     string           `json:"type"`                // "text" or "image_url"
+	Text     string           `json:"text,omitempty"`      // for type="text"
+	ImageURL *ContentImageURL `json:"image_url,omitempty"` // for type="image_url"
+}
+
+// ContentImageURL carries the image, typically a base64 data URL
+// ("data:image/png;base64,...").
+type ContentImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"` // "low" | "high" | "auto"
+}
+
+// NewTextPart creates a text content part.
+func NewTextPart(text string) ContentPart {
+	return ContentPart{Type: "text", Text: text}
+}
+
+// NewImagePart creates an image content part from a data URL or https URL.
+func NewImagePart(url string) ContentPart {
+	return ContentPart{Type: "image_url", ImageURL: &ContentImageURL{URL: url}}
+}
+
+// NewMultimodalUserMessage creates a user message carrying text + images.
+func NewMultimodalUserMessage(parts ...ContentPart) Message {
+	return Message{Role: "user", ContentParts: parts}
 }
 
 // ToolCall is a single function call requested by the LLM.

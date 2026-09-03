@@ -30,6 +30,9 @@ type Store struct {
 	grid           *GridStore
 	aiCharge       *AIChargeStore
 	telegramConfig TelegramConfigStore
+	discordConfig  *DiscordConfigStore
+	discordMessage *DiscordMessageStore
+	copyTrade      *CopyTradeStore
 
 	mu sync.RWMutex
 }
@@ -163,6 +166,15 @@ func (s *Store) initTables() error {
 	}
 	if err := s.AICharge().initTables(); err != nil {
 		return fmt.Errorf("failed to initialize AI charge tables: %w", err)
+	}
+	if err := s.DiscordConfig().initTables(); err != nil {
+		return fmt.Errorf("failed to initialize discord config tables: %w", err)
+	}
+	if err := s.DiscordMessage().initTables(); err != nil {
+		return fmt.Errorf("failed to initialize discord message tables: %w", err)
+	}
+	if err := s.CopyTrade().initTables(); err != nil {
+		return fmt.Errorf("failed to initialize copy trade tables: %w", err)
 	}
 	return nil
 }
@@ -305,6 +317,36 @@ func (s *Store) TelegramConfig() TelegramConfigStore {
 		s.telegramConfig = NewTelegramConfigStore(s.gdb)
 	}
 	return s.telegramConfig
+}
+
+// DiscordConfig gets the global Discord token configuration storage
+func (s *Store) DiscordConfig() *DiscordConfigStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.discordConfig == nil {
+		s.discordConfig = NewDiscordConfigStore(s.gdb)
+	}
+	return s.discordConfig
+}
+
+// DiscordMessage gets the raw Discord message storage
+func (s *Store) DiscordMessage() *DiscordMessageStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.discordMessage == nil {
+		s.discordMessage = NewDiscordMessageStore(s.gdb)
+	}
+	return s.discordMessage
+}
+
+// CopyTrade gets the copy-trading storage (contexts, AI runs, signals, events)
+func (s *Store) CopyTrade() *CopyTradeStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.copyTrade == nil {
+		s.copyTrade = NewCopyTradeStore(s.gdb)
+	}
+	return s.copyTrade
 }
 
 // Close closes database connection

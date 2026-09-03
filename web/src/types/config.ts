@@ -113,6 +113,9 @@ export interface CreateTraderRequest {
   system_prompt_template?: string
   use_ai500?: boolean
   use_oi_top?: boolean
+  // Copy trading (Discord channel following)
+  trader_type?: string // "" / "ai_scan" / "copy_trading"
+  copy_trading_config?: string // JSON-encoded CopyTradingConfig
 }
 
 export interface UpdateModelConfigRequest {

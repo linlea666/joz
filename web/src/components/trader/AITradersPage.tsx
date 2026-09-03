@@ -21,6 +21,7 @@ import { TelegramConfigModal } from './TelegramConfigModal'
 import { ModelConfigModal } from './ModelConfigModal'
 import { ConfigStatusGrid } from './ConfigStatusGrid'
 import { TradersList } from './TradersList'
+import { CopyTradeLogModal } from './CopyTradeLogModal'
 import { AutopilotLaunchPanel } from './AutopilotLaunchPanel'
 import { Bot, Plus, MessageCircle } from 'lucide-react'
 import { confirmToast } from '../../lib/notify'
@@ -62,6 +63,10 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     Set<string>
   >(new Set())
   const [copiedId, setCopiedId] = useState<string | null>(null)
+  const [copyLogTrader, setCopyLogTrader] = useState<{
+    id: string
+    name: string
+  } | null>(null)
 
   const loadConfigs = async () => {
     if (!user || !token) {
@@ -265,6 +270,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         scan_interval_minutes: data.scan_interval_minutes,
         is_cross_margin: data.is_cross_margin,
         show_in_competition: data.show_in_competition,
+        copy_trading_config: data.copy_trading_config,
       }
 
       await api.updateTrader(editingTrader.trader_id, request)
@@ -825,7 +831,18 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
           onDeleteTrader={handleDeleteTrader}
           onToggleTraderAddress={toggleTraderAddressVisibility}
           onCopyAddress={handleCopyAddress}
+          onShowCopyLog={(id, name) => setCopyLogTrader({ id, name })}
         />
+
+        {/* Copy Trading Log Modal */}
+        {copyLogTrader && (
+          <CopyTradeLogModal
+            traderId={copyLogTrader.id}
+            traderName={copyLogTrader.name}
+            language={language}
+            onClose={() => setCopyLogTrader(null)}
+          />
+        )}
 
         {/* Create Trader Modal */}
         {showCreateModal && (

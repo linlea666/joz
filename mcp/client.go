@@ -648,6 +648,9 @@ func (client *Client) BuildRequestBodyFromRequest(req *Request) map[string]any {
 			// Tool result message (role="tool").
 			m["tool_call_id"] = msg.ToolCallID
 			m["content"] = msg.Content
+		} else if len(msg.ContentParts) > 0 {
+			// Multimodal message (vision): content is an array of parts.
+			m["content"] = msg.ContentParts
 		} else {
 			m["content"] = msg.Content
 		}

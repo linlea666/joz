@@ -5,6 +5,7 @@ import {
   Cpu,
   Building2,
   MessageCircle,
+  MessageSquare,
   Eye,
   EyeOff,
   ChevronRight,
@@ -16,10 +17,11 @@ import { useLanguage } from '../contexts/LanguageContext'
 import { api } from '../lib/api'
 import { ExchangeConfigModal } from '../components/trader/ExchangeConfigModal'
 import { TelegramConfigModal } from '../components/trader/TelegramConfigModal'
+import { DiscordConfigModal } from '../components/trader/DiscordConfigModal'
 import { ModelConfigModal } from '../components/trader/ModelConfigModal'
 import type { Exchange, AIModel, ExchangeAccountState } from '../types'
 
-type Tab = 'account' | 'models' | 'exchanges' | 'telegram'
+type Tab = 'account' | 'models' | 'exchanges' | 'telegram' | 'discord'
 
 function configBadge(label: string, active: boolean) {
   return (
@@ -62,6 +64,9 @@ export function SettingsPage() {
 
   // Telegram state
   const [showTelegramModal, setShowTelegramModal] = useState(false)
+
+  // Discord state
+  const [showDiscordModal, setShowDiscordModal] = useState(false)
 
   const refreshModelConfigs = async () => {
     const [configs, supported] = await Promise.all([
@@ -332,6 +337,7 @@ export function SettingsPage() {
     { key: 'models', label: 'AI Models', icon: <Cpu size={16} /> },
     { key: 'exchanges', label: 'Exchanges', icon: <Building2 size={16} /> },
     { key: 'telegram', label: 'Telegram', icon: <MessageCircle size={16} /> },
+    { key: 'discord', label: 'Discord', icon: <MessageSquare size={16} /> },
   ]
 
   return (
@@ -632,6 +638,33 @@ export function SettingsPage() {
               </button>
             </div>
           )}
+
+          {/* Discord Tab */}
+          {activeTab === 'discord' && (
+            <div className="space-y-4">
+              <p className="text-sm text-nofx-text-muted">
+                Configure a global Discord token used by all copy-trading
+                traders to read signal channels.
+              </p>
+              <button
+                onClick={() => setShowDiscordModal(true)}
+                className="w-full flex items-center justify-between px-4 py-3 rounded-xl bg-nofx-bg-deeper hover:bg-nofx-bg-deeper border border-[rgba(26,24,19,0.14)] transition-colors group"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-[#5865F2]/20 flex items-center justify-center">
+                    <MessageSquare size={14} className="text-[#5865F2]" />
+                  </div>
+                  <span className="text-sm font-medium text-nofx-text">
+                    Configure Discord Token
+                  </span>
+                </div>
+                <ChevronRight
+                  size={14}
+                  className="text-nofx-text-muted group-hover:text-nofx-text-muted transition-colors"
+                />
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -675,6 +708,16 @@ export function SettingsPage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
           <TelegramConfigModal
             onClose={() => setShowTelegramModal(false)}
+            language={language}
+          />
+        </div>
+      )}
+
+      {/* Discord Modal */}
+      {showDiscordModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm px-4">
+          <DiscordConfigModal
+            onClose={() => setShowDiscordModal(false)}
             language={language}
           />
         </div>
