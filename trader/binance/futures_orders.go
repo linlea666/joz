@@ -6,6 +6,7 @@ import (
 	"nofx/logger"
 	"nofx/trader/types"
 	"strconv"
+	"strings"
 
 	"github.com/adshao/go-binance/v2/futures"
 )
@@ -435,7 +436,17 @@ func (t *FuturesTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.Li
 		}
 	}
 
-	// Determine side and position side
+	// Determine side and position side.
+	//
+	// The account runs in hedge (dual-side) mode, so positionSide decides
+	// which position the order acts on. When the caller specifies
+	// req.PositionSide it MUST be honored: a SELL against positionSide=LONG
+	// is a close/reduce of the long, while a SELL against SHORT opens a
+	// short — deriving positionSide from Side turned copy-trading TP orders
+	// into opening shorts. Without an explicit PositionSide (grid callers)
+	// the legacy side-derived open semantics are preserved. reduceOnly is
+	// never sent: Binance rejects it in hedge mode (closing intent is
+	// implied by side+positionSide).
 	var side futures.SideType
 	var positionSide futures.PositionSideType
 
@@ -444,6 +455,12 @@ func (t *FuturesTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.Li
 		positionSide = futures.PositionSideTypeLong
 	} else {
 		side = futures.SideTypeSell
+		positionSide = futures.PositionSideTypeShort
+	}
+	switch strings.ToUpper(req.PositionSide) {
+	case "LONG":
+		positionSide = futures.PositionSideTypeLong
+	case "SHORT":
 		positionSide = futures.PositionSideTypeShort
 	}
 

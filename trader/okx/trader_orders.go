@@ -827,12 +827,25 @@ func (t *OKXTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.LimitO
 	sz := req.Quantity / inst.CtVal
 	szStr := t.formatSize(sz, inst)
 
-	// Determine side and position side
+	// Determine side and position side.
+	//
+	// This trader always sends long/short posSide (hedge mode), so posSide
+	// decides which position the order acts on. When the caller specifies
+	// req.PositionSide it MUST be honored: sell+posSide=long closes the
+	// long, while sell+posSide=short opens a short — deriving posSide from
+	// side made copy-trading TP orders open-short requests, which OKX
+	// rejected with "Insufficient USDT margin". Without an explicit
+	// PositionSide (grid callers) the legacy side-derived open semantics
+	// are preserved.
 	side := "buy"
 	posSide := "long"
 	if req.Side == "SELL" {
 		side = "sell"
 		posSide = "short"
+	}
+	explicitPosSide := strings.ToLower(req.PositionSide) == "long" || strings.ToLower(req.PositionSide) == "short"
+	if explicitPosSide {
+		posSide = strings.ToLower(req.PositionSide)
 	}
 
 	marginMode := t.marginMode()
@@ -849,8 +862,11 @@ func (t *OKXTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.LimitO
 		"tag":     okxTag,
 	}
 
-	// Add reduce only if specified
-	if req.ReduceOnly {
+	// reduceOnly is only legal in net position mode; in long/short mode the
+	// closing intent is implied by an opposite side against posSide, and OKX
+	// rejects orders that carry the flag. Only pass it through on the legacy
+	// path where the caller manages semantics itself.
+	if req.ReduceOnly && !explicitPosSide {
 		body["reduceOnly"] = true
 	}
 

@@ -117,7 +117,14 @@ type OpenOrder struct {
 	Status       string  `json:"status"` // NEW
 }
 
-// LimitOrderRequest represents a limit order request for grid trading
+// LimitOrderRequest represents a limit order request.
+//
+// PositionSide contract: when non-empty, implementations MUST place the order
+// against that position side (hedge mode). An opposite Side against
+// PositionSide is a close/reduce (e.g. SELL + PositionSide=LONG closes a
+// long); deriving the position side from Side instead would turn such closes
+// into opens on the other side. When PositionSide is empty (grid callers),
+// implementations keep their legacy side-derived open semantics.
 type LimitOrderRequest struct {
 	Symbol       string  `json:"symbol"`
 	Side         string  `json:"side"`          // BUY/SELL
