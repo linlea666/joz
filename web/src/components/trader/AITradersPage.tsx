@@ -230,6 +230,12 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       await mutateTraders()
     } catch (error) {
       console.error('Failed to create trader:', error)
+      // Backend rejections carry the actual cause (e.g. "Discord Token not
+      // configured") — show it instead of a generic failure toast.
+      if (error instanceof ApiError && error.message) {
+        toast.error(error.message)
+        return
+      }
       toast.error(t('createTraderFailed', language))
     }
   }
@@ -280,6 +286,10 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       await mutateTraders()
     } catch (error) {
       console.error('Failed to update trader:', error)
+      if (error instanceof ApiError && error.message) {
+        toast.error(error.message)
+        return
+      }
       toast.error(t('updateTraderFailed', language))
     }
   }

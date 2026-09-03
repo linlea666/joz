@@ -246,22 +246,39 @@ func (pm *PollerManager) fetchChannel(client *Client, w *channelWorker) {
 	}
 
 	msgStore := pm.store.DiscordMessage()
-	hasHistory, err := msgStore.HasMessages(w.channelID)
+	// The explicit per-channel flag is the ONLY trusted baseline signal.
+	// Row presence is not: cross-channel message lookups (reply/link context)
+	// can persist single rows into channels that were never baselined.
+	baselineDone, err := msgStore.IsBaselineDone(w.channelID)
 	if err != nil {
-		logger.Errorf("[Discord] channel %s store check failed: %v", w.channelID, err)
+		logger.Errorf("[Discord] channel %s baseline check failed: %v", w.channelID, err)
 		return
 	}
 
-	// First contact: persist history as baseline, never dispatch it.
-	if !hasHistory {
+	// First contact: persist history as baseline, never dispatch it. The flag
+	// is only set when EVERY message persisted; on partial failure the whole
+	// baseline is retried next cycle (MarkBaseline is idempotent).
+	if !baselineDone {
+		allOK := true
 		for _, m := range msgs {
 			rec, convErr := ToStoreMessage(m, w.channelID)
 			if convErr != nil {
+				logger.Warnf("[Discord] baseline convert failed for %s: %v", m.ID, convErr)
+				allOK = false
 				continue
 			}
 			if blErr := msgStore.MarkBaseline(rec); blErr != nil {
 				logger.Warnf("[Discord] baseline persist failed for %s: %v", m.ID, blErr)
+				allOK = false
 			}
+		}
+		if !allOK {
+			logger.Warnf("[Discord] channel %s baseline incomplete, retrying next cycle", w.channelID)
+			return
+		}
+		if doneErr := msgStore.MarkBaselineDone(w.channelID, len(msgs)); doneErr != nil {
+			logger.Errorf("[Discord] channel %s baseline flag persist failed: %v", w.channelID, doneErr)
+			return
 		}
 		logger.Infof("[Discord] channel %s baseline established (%d messages, not traded)", w.channelID, len(msgs))
 		return
@@ -319,6 +336,20 @@ func (pm *PollerManager) dispatchLoop(w *channelWorker) {
 	defer pm.wg.Done()
 	msgStore := pm.store.DiscordMessage()
 	for {
+		// Token cleared / polling disabled must also stop dispatching queued
+		// messages: an operator disabling Discord expects NO further trading.
+		pm.mu.Lock()
+		active := pm.enabled && pm.client != nil
+		pm.mu.Unlock()
+		if !active {
+			select {
+			case <-w.stop:
+				return
+			case <-time.After(15 * time.Second):
+				continue
+			}
+		}
+
 		msg, err := msgStore.NextPending(w.channelID)
 		if err != nil {
 			logger.Errorf("[Discord] channel %s queue read failed: %v", w.channelID, err)
@@ -378,8 +409,14 @@ func (pm *PollerManager) dispatchLoop(w *channelWorker) {
 			status = store.DiscordMsgFailed
 			errText = firstErr.Error()
 		}
-		if err := msgStore.SetStatus(msg.ID, status, errText); err != nil {
+		// Revision-conditional: if the author edited the message while we were
+		// processing, the row is already pending with a bumped revision — the
+		// terminal status of the OLD revision must not clobber it.
+		applied, err := msgStore.SetStatusIfRevision(msg.ID, msg.Revision, status, errText)
+		if err != nil {
 			logger.Errorf("[Discord] message %s status update failed: %v", msg.MessageID, err)
+		} else if !applied {
+			logger.Infof("[Discord] message %s edited during processing; new revision stays pending for reprocessing", msg.MessageID)
 		}
 
 		select {

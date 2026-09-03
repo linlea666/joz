@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { X as IconX, RefreshCw, Radio } from 'lucide-react'
+import { X as IconX, RefreshCw, Radio, Download } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '../../lib/api'
 import type {
@@ -11,6 +11,37 @@ import type {
 import { t, type Language } from '../../i18n/translations'
 
 type LogTab = 'events' | 'signals' | 'contexts' | 'aistats'
+type TimeRange = 'all' | 'today' | '7d' | '30d' | 'custom'
+
+// rangeBounds converts the selected range into unix-ms bounds (0 = unbounded).
+function rangeBounds(
+  range: TimeRange,
+  customStart: string,
+  customEnd: string
+): { startMs?: number; endMs?: number } {
+  const now = Date.now()
+  switch (range) {
+    case 'today': {
+      const d = new Date()
+      d.setHours(0, 0, 0, 0)
+      return { startMs: d.getTime() }
+    }
+    case '7d':
+      return { startMs: now - 7 * 24 * 3600 * 1000 }
+    case '30d':
+      return { startMs: now - 30 * 24 * 3600 * 1000 }
+    case 'custom': {
+      const start = customStart ? new Date(customStart).getTime() : undefined
+      const end = customEnd ? new Date(customEnd).getTime() : undefined
+      return {
+        startMs: start && !Number.isNaN(start) ? start : undefined,
+        endMs: end && !Number.isNaN(end) ? end : undefined,
+      }
+    }
+    default:
+      return {}
+  }
+}
 
 interface CopyTradeLogModalProps {
   traderId: string
@@ -49,6 +80,10 @@ export function CopyTradeLogModal({
 }: CopyTradeLogModalProps) {
   const [tab, setTab] = useState<LogTab>('events')
   const [isLoading, setIsLoading] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
+  const [range, setRange] = useState<TimeRange>('all')
+  const [customStart, setCustomStart] = useState('')
+  const [customEnd, setCustomEnd] = useState('')
   const [events, setEvents] = useState<CopyTradeEvent[]>([])
   const [signals, setSignals] = useState<CopyTradeSignal[]>([])
   const [contexts, setContexts] = useState<CopyTradeContext[]>([])
@@ -57,10 +92,11 @@ export function CopyTradeLogModal({
   const load = useCallback(async () => {
     setIsLoading(true)
     try {
+      const { startMs, endMs } = rangeBounds(range, customStart, customEnd)
       if (tab === 'events') {
-        setEvents(await api.getCopyTradeEvents(traderId, 200))
+        setEvents(await api.getCopyTradeEvents(traderId, 200, 0, startMs, endMs))
       } else if (tab === 'signals') {
-        setSignals(await api.getCopyTradeSignals(traderId, 100))
+        setSignals(await api.getCopyTradeSignals(traderId, 100, startMs, endMs))
       } else if (tab === 'contexts') {
         setContexts(await api.getCopyTradeContexts(traderId))
       } else {
@@ -71,7 +107,20 @@ export function CopyTradeLogModal({
     } finally {
       setIsLoading(false)
     }
-  }, [tab, traderId, language])
+  }, [tab, traderId, language, range, customStart, customEnd])
+
+  const handleExport = async () => {
+    if (isExporting || (tab !== 'events' && tab !== 'signals')) return
+    setIsExporting(true)
+    try {
+      const { startMs, endMs } = rangeBounds(range, customStart, customEnd)
+      await api.exportCopyTradeCSV(tab, traderId, startMs, endMs)
+    } catch {
+      toast.error(t('copytrade.exportFailed', language))
+    } finally {
+      setIsExporting(false)
+    }
+  }
 
   useEffect(() => {
     load()
@@ -147,6 +196,58 @@ export function CopyTradeLogModal({
             </button>
           ))}
         </div>
+
+        {/* Time range + export toolbar (events / signals only) */}
+        {(tab === 'events' || tab === 'signals') && (
+          <div className="flex flex-wrap items-center gap-2 px-5 pt-3">
+            {(
+              [
+                ['all', t('copytrade.rangeAll', language)],
+                ['today', t('copytrade.rangeToday', language)],
+                ['7d', t('copytrade.range7d', language)],
+                ['30d', t('copytrade.range30d', language)],
+                ['custom', t('copytrade.rangeCustom', language)],
+              ] as [TimeRange, string][]
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setRange(key)}
+                className={`px-2.5 py-1 rounded-lg text-xs transition-colors ${
+                  range === key
+                    ? 'bg-nofx-gold text-white'
+                    : 'bg-nofx-bg-deeper text-nofx-text-muted hover:text-nofx-text'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+            {range === 'custom' && (
+              <>
+                <input
+                  type="datetime-local"
+                  value={customStart}
+                  onChange={(e) => setCustomStart(e.target.value)}
+                  className="px-2 py-1 rounded-lg bg-nofx-bg-deeper text-xs text-nofx-text border border-nofx-gold/20"
+                />
+                <span className="text-xs text-nofx-text-muted">—</span>
+                <input
+                  type="datetime-local"
+                  value={customEnd}
+                  onChange={(e) => setCustomEnd(e.target.value)}
+                  className="px-2 py-1 rounded-lg bg-nofx-bg-deeper text-xs text-nofx-text border border-nofx-gold/20"
+                />
+              </>
+            )}
+            <button
+              onClick={handleExport}
+              disabled={isExporting}
+              className="ml-auto flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs bg-nofx-bg-deeper text-nofx-text-muted hover:text-nofx-text transition-colors disabled:opacity-50"
+            >
+              <Download className="w-3.5 h-3.5" />
+              {t('copytrade.exportCSV', language)}
+            </button>
+          </div>
+        )}
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-5 pt-3 min-h-[300px]">

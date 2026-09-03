@@ -105,6 +105,7 @@ func (s *Server) handleGetTraderConfig(c *gin.Context) {
 		"use_ai500":             traderConfig.UseAI500,
 		"use_oi_top":            traderConfig.UseOITop,
 		"is_running":            isRunning,
+		"show_in_competition":   traderConfig.ShowInCompetition,
 		"trader_type":           traderConfig.TraderType,
 		"copy_trading_config":   traderConfig.CopyTradingConfig,
 	}

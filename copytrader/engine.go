@@ -85,6 +85,11 @@ func (e *Engine) Start() error {
 	e.stateMu.Unlock()
 
 	if err := e.poller.Subscribe(e.cfg.PrimaryChannelID, e.traderID, e.HandleMessage); err != nil {
+		// Roll back so a later Start() attempt is not silently ignored.
+		e.stateMu.Lock()
+		e.running = false
+		close(e.stopCh)
+		e.stateMu.Unlock()
 		return fmt.Errorf("channel subscription failed: %w", err)
 	}
 	e.wg.Add(1)
@@ -617,9 +622,35 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 				canonical, interp.Direction, ctx.Quantity, ctx.AvgFillPrice, slPrice, len(tpPrices)), 0, nil)
 	}
 
-	// Author-stated conditional rules are stored on the context via TP plan;
-	// AutoBreakevenAfterTP / rules are enforced by the reconciler.
+	// Author-stated conditional rules: the supported subset ("after TP fill,
+	// move SL to entry/breakeven") is armed on the context and enforced by the
+	// reconciler; everything else is logged explicitly as unsupported instead
+	// of being dropped silently.
+	e.applyConditionalRules(traceID, signalID, msg.MessageID, interp, ctx)
 	return SkipNone, nil
+}
+
+// applyConditionalRules arms supported author-stated follow-up rules on the
+// trade context. Supported in V1: TP_FILLED => UPDATE_SL to ENTRY/BREAKEVEN.
+func (e *Engine) applyConditionalRules(traceID, signalID, messageID string, interp *SourceInterpretation, ctx *store.CopyTradeContext) {
+	for _, rule := range interp.ConditionalRules {
+		supported := rule.Condition == ConditionTPFilled &&
+			rule.Action == ActionUpdateSL &&
+			(rule.Price.Type == PriceEntry || rule.Price.Type == PriceBreakeven)
+		if !supported {
+			e.events.Warn(traceID, signalID, messageID, EvSignalClassified,
+				fmt.Sprintf("author conditional rule not supported in V1, ignored: %s(level %d) -> %s %s",
+					rule.Condition, rule.ConditionLevel, rule.Action, rule.Price.Type), nil)
+			continue
+		}
+		if ctx.BreakevenAfterTP {
+			continue
+		}
+		e.exec.updateContext(ctx, map[string]interface{}{"breakeven_after_tp": true})
+		ctx.BreakevenAfterTP = true
+		e.events.Info(traceID, signalID, messageID, EvSignalClassified,
+			"author rule armed: SL moves to entry after the first TP fill", nil)
+	}
 }
 
 // routeAdd: V1 treats ADD conservatively — only executes when there is no

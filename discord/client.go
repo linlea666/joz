@@ -51,8 +51,8 @@ type Client struct {
 	token      string
 	httpClient *http.Client
 
-	mu           sync.Mutex
-	rateResetAt  time.Time // do not send before this time
+	mu          sync.Mutex
+	rateResetAt time.Time // do not send before this time
 }
 
 // NewClient creates a client for a personal account token

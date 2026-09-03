@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/csv"
 	"net/http"
 	"strconv"
 	"time"
@@ -9,6 +10,7 @@ import (
 
 	"nofx/discord"
 	"nofx/logger"
+	"nofx/store"
 )
 
 // maskToken shows only the first/last 4 characters.
@@ -60,9 +62,13 @@ func (s *Server) handleUpdateDiscordConfig(c *gin.Context) {
 		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
+	// enabled omitted => preserve the stored value (never silently re-enable a
+	// deliberately disabled poller). First-time setup defaults to enabled.
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
+	} else if existing, gerr := s.store.DiscordConfig().Get(); gerr == nil && existing != nil {
+		enabled = existing.Enabled
 	}
 	if req.PollIntervalSeconds != 0 && (req.PollIntervalSeconds < 3 || req.PollIntervalSeconds > 300) {
 		SafeBadRequest(c, "poll_interval_seconds must be between 3 and 300")
@@ -180,15 +186,55 @@ func (s *Server) handleTestDiscordChannel(c *gin.Context) {
 
 // --- Copy trading observability ---
 
+// verifyTraderOwnership rejects queries for traders that do not belong to the
+// authenticated user. Returns false after writing the error response.
+func (s *Server) verifyTraderOwnership(c *gin.Context, traderID string) bool {
+	userID := c.GetString("user_id")
+	trader, err := s.store.Trader().GetByID(traderID)
+	if err != nil || trader == nil || trader.UserID != userID {
+		SafeNotFound(c, "Trader")
+		return false
+	}
+	return true
+}
+
+// parseTimeRange reads optional start_time / end_time query params
+// (RFC3339 or unix milliseconds). Zero values disable the bound.
+func parseTimeRange(c *gin.Context) (start, end time.Time, err error) {
+	parse := func(s string) (time.Time, error) {
+		if s == "" {
+			return time.Time{}, nil
+		}
+		if ms, perr := strconv.ParseInt(s, 10, 64); perr == nil {
+			return time.UnixMilli(ms).UTC(), nil
+		}
+		return time.Parse(time.RFC3339, s)
+	}
+	if start, err = parse(c.Query("start_time")); err != nil {
+		return
+	}
+	end, err = parse(c.Query("end_time"))
+	return
+}
+
 // handleGetCopyTradeEvents returns the trace event stream for a trader.
+// Supports start_time/end_time filtering and format=csv export.
 func (s *Server) handleGetCopyTradeEvents(c *gin.Context) {
 	traderID := c.Query("trader_id")
 	limit := parseIntDefault(c.Query("limit"), 100, 1, 500)
 	offset := parseIntDefault(c.Query("offset"), 0, 0, 1<<30)
 	traceID := c.Query("trace_id")
+	asCSV := c.Query("format") == "csv"
 
+	if traderID == "" {
+		SafeBadRequest(c, "trader_id is required")
+		return
+	}
+	if !s.verifyTraderOwnership(c, traderID) {
+		return
+	}
 	if traceID != "" {
-		events, err := s.store.CopyTrade().GetEventsByTrace(traceID)
+		events, err := s.store.CopyTrade().GetEventsByTrace(traderID, traceID)
 		if err != nil {
 			SafeInternalError(c, "Failed to read events", err)
 			return
@@ -196,32 +242,100 @@ func (s *Server) handleGetCopyTradeEvents(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"events": events})
 		return
 	}
-	if traderID == "" {
-		SafeBadRequest(c, "trader_id is required")
+	start, end, err := parseTimeRange(c)
+	if err != nil {
+		SafeBadRequest(c, "invalid start_time/end_time (use RFC3339 or unix milliseconds)")
 		return
 	}
-	events, err := s.store.CopyTrade().GetEventsByTrader(traderID, limit, offset)
+	if asCSV {
+		// Export ignores pagination: bounded by the time range instead.
+		limit = 100000
+		offset = 0
+	}
+	events, err := s.store.CopyTrade().GetEventsByTrader(traderID, start, end, limit, offset)
 	if err != nil {
 		SafeInternalError(c, "Failed to read events", err)
+		return
+	}
+	if asCSV {
+		writeEventsCSV(c, events)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"events": events})
 }
 
 // handleGetCopyTradeSignals returns interpreted signals for a trader.
+// Supports start_time/end_time filtering and format=csv export.
 func (s *Server) handleGetCopyTradeSignals(c *gin.Context) {
 	traderID := c.Query("trader_id")
 	if traderID == "" {
 		SafeBadRequest(c, "trader_id is required")
 		return
 	}
+	if !s.verifyTraderOwnership(c, traderID) {
+		return
+	}
 	limit := parseIntDefault(c.Query("limit"), 50, 1, 200)
-	signals, err := s.store.CopyTrade().GetRecentSignals(traderID, limit)
+	asCSV := c.Query("format") == "csv"
+	start, end, err := parseTimeRange(c)
+	if err != nil {
+		SafeBadRequest(c, "invalid start_time/end_time (use RFC3339 or unix milliseconds)")
+		return
+	}
+	if asCSV {
+		limit = 100000
+	}
+	signals, err := s.store.CopyTrade().GetRecentSignals(traderID, start, end, limit)
 	if err != nil {
 		SafeInternalError(c, "Failed to read signals", err)
 		return
 	}
+	if asCSV {
+		writeSignalsCSV(c, signals)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"signals": signals})
+}
+
+// writeEventsCSV streams events as a CSV attachment.
+func writeEventsCSV(c *gin.Context, events []*store.CopyTradeEvent) {
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", `attachment; filename="copytrade_events.csv"`)
+	w := csv.NewWriter(c.Writer)
+	_ = w.Write([]string{"occurred_at", "level", "event", "message", "trace_id", "signal_id", "message_id", "channel_id", "duration_ms"})
+	for _, ev := range events {
+		_ = w.Write([]string{
+			ev.OccurredAt.UTC().Format(time.RFC3339),
+			ev.Level, ev.Event, ev.Message,
+			ev.TraceID, ev.SignalID, ev.MessageID, ev.ChannelID,
+			strconv.FormatInt(ev.DurationMs, 10),
+		})
+	}
+	w.Flush()
+}
+
+// writeSignalsCSV streams signals as a CSV attachment.
+func writeSignalsCSV(c *gin.Context, signals []*store.CopyTradeSignal) {
+	c.Header("Content-Type", "text/csv; charset=utf-8")
+	c.Header("Content-Disposition", `attachment; filename="copytrade_signals.csv"`)
+	w := csv.NewWriter(c.Writer)
+	_ = w.Write([]string{
+		"message_timestamp", "status", "classification", "action", "symbol", "direction",
+		"skip_reason", "error_message", "receive_latency_ms", "llm_request_ms", "total_ms",
+		"message_id", "message_revision", "trade_context_id",
+	})
+	for _, sig := range signals {
+		_ = w.Write([]string{
+			sig.MessageTimestamp.UTC().Format(time.RFC3339),
+			sig.Status, sig.Classification, sig.Action, sig.Symbol, sig.Direction,
+			sig.SkipReason, sig.ErrorMessage,
+			strconv.FormatInt(sig.ReceiveLatencyMs, 10),
+			strconv.FormatInt(sig.LLMRequestMs, 10),
+			strconv.FormatInt(sig.TotalMs, 10),
+			sig.MessageID, strconv.Itoa(sig.MessageRevision), sig.TradeContextID,
+		})
+	}
+	w.Flush()
 }
 
 // handleGetCopyTradeContexts returns a trader's active followed trades.
@@ -229,6 +343,9 @@ func (s *Server) handleGetCopyTradeContexts(c *gin.Context) {
 	traderID := c.Query("trader_id")
 	if traderID == "" {
 		SafeBadRequest(c, "trader_id is required")
+		return
+	}
+	if !s.verifyTraderOwnership(c, traderID) {
 		return
 	}
 	ctxs, err := s.store.CopyTrade().GetActiveContexts(traderID)

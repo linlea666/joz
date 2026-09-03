@@ -159,6 +159,13 @@ func DecideEntryType(spec PriceSpec, marketPrice, thresholdPct float64, limitToM
 
 	switch spec.Type {
 	case PriceMarket:
+		// Deviation circuit breaker: when the author stated a reference price
+		// alongside a market entry ("CMP ~62000") and the live market has
+		// already run away past the threshold, fall back to a limit at the
+		// reference instead of chasing the move. No reference => plain market.
+		if spec.Price > 0 && !deviationOK(spec.Price) {
+			return EntryPlanLimit, spec.Price, nil
+		}
 		return EntryPlanMarket, marketPrice, nil
 	case PriceFixed:
 		if spec.Price <= 0 {

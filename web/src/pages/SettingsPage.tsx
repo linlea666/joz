@@ -19,6 +19,7 @@ import { ExchangeConfigModal } from '../components/trader/ExchangeConfigModal'
 import { TelegramConfigModal } from '../components/trader/TelegramConfigModal'
 import { DiscordConfigModal } from '../components/trader/DiscordConfigModal'
 import { ModelConfigModal } from '../components/trader/ModelConfigModal'
+import { t } from '../i18n/translations'
 import type { Exchange, AIModel, ExchangeAccountState } from '../types'
 
 type Tab = 'account' | 'models' | 'exchanges' | 'telegram' | 'discord'
@@ -643,8 +644,7 @@ export function SettingsPage() {
           {activeTab === 'discord' && (
             <div className="space-y-4">
               <p className="text-sm text-nofx-text-muted">
-                Configure a global Discord token used by all copy-trading
-                traders to read signal channels.
+                {t('discord.settingsHint', language)}
               </p>
               <button
                 onClick={() => setShowDiscordModal(true)}
@@ -655,7 +655,7 @@ export function SettingsPage() {
                     <MessageSquare size={14} className="text-[#5865F2]" />
                   </div>
                   <span className="text-sm font-medium text-nofx-text">
-                    Configure Discord Token
+                    {t('discord.openConfig', language)}
                   </span>
                 </div>
                 <ChevronRight

@@ -32,17 +32,22 @@ const (
 // Stored as JSON in traders.copy_trading_config; parse via ParseCopyTradingConfig.
 type CopyTradingConfig struct {
 	// Signal source
-	PrimaryChannelID string   `json:"primary_channel_id"`
-	SourceChannelIDs []string `json:"source_channel_ids,omitempty"` // reserved: extra channels feeding the same trades
-	SourceAuthorIDs  []string `json:"source_author_ids,omitempty"`  // empty = accept all authors
-	ChannelNotes     string   `json:"channel_notes,omitempty"`      // free-text channel profile injected into the prompt
+	PrimaryChannelID string `json:"primary_channel_id"`
+	// SourceChannelIDs is RESERVED and not wired anywhere yet: extra channels
+	// feeding the same trades (multi-channel authors). Kept in the schema so
+	// stored configs stay forward-compatible; setting it has NO effect in V1.
+	SourceChannelIDs []string `json:"source_channel_ids,omitempty"`
+	SourceAuthorIDs  []string `json:"source_author_ids,omitempty"` // empty = accept all authors
+	ChannelNotes     string   `json:"channel_notes,omitempty"`     // free-text channel profile injected into the prompt
 
 	// AI parsing
-	ParseImages          bool   `json:"parse_images"`
-	SendPositionSnapshot bool   `json:"send_position_snapshot"`
-	SignalContextEnabled bool   `json:"signal_context_enabled"`
-	ContextLookbackDays  int    `json:"context_lookback_days"`
-	ReasoningEffort      string `json:"reasoning_effort,omitempty"` // "", "low", "medium", "high"
+	ParseImages          bool `json:"parse_images"`
+	SendPositionSnapshot bool `json:"send_position_snapshot"`
+	SignalContextEnabled bool `json:"signal_context_enabled"`
+	ContextLookbackDays  int  `json:"context_lookback_days"`
+	// ReasoningEffort is RESERVED and not wired into the LLM layer yet
+	// ("", "low", "medium", "high"). Setting it has NO effect in V1.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 
 	// Risk
 	RiskMode               RiskMode `json:"risk_mode"`

@@ -1218,6 +1218,9 @@ export const translations = {
     // Discord copy-trading global settings
     discord: {
       title: 'Discord Copy Trading',
+      settingsHint:
+        'Configure a global Discord token used by all copy-trading traders to read signal channels.',
+      openConfig: 'Configure Discord Token',
       currentToken: 'Current Token',
       notConfigured: 'Not configured',
       tokenLabel: 'Discord Token',
@@ -1253,6 +1256,13 @@ export const translations = {
 
     // Copy-trading trader config
     copytrade: {
+      rangeAll: 'All',
+      rangeToday: 'Today',
+      range7d: 'Last 7 days',
+      range30d: 'Last 30 days',
+      rangeCustom: 'Custom',
+      exportCSV: 'Export CSV',
+      exportFailed: 'Export failed',
       traderType: 'Trader Type',
       typeAIScan: 'AI Scan',
       typeCopyTrading: 'Discord Copy Trading',
@@ -2482,6 +2492,8 @@ export const translations = {
     // Discord 跟单全局设置
     discord: {
       title: 'Discord 跟单配置',
+      settingsHint: '配置全局 Discord Token，所有跟单交易员共用它读取信号频道。',
+      openConfig: '配置 Discord Token',
       currentToken: '当前 Token',
       notConfigured: '未配置',
       tokenLabel: 'Discord Token',
@@ -2516,6 +2528,13 @@ export const translations = {
 
     // 跟单交易员配置
     copytrade: {
+      rangeAll: '全部',
+      rangeToday: '今天',
+      range7d: '近7天',
+      range30d: '近30天',
+      rangeCustom: '自定义',
+      exportCSV: '导出 CSV',
+      exportFailed: '导出失败',
       traderType: '交易员类型',
       typeAIScan: 'AI 扫描',
       typeCopyTrading: 'Discord 跟单',

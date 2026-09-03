@@ -5,10 +5,28 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// allowedMediaHosts is the download allowlist: attachment URLs come from
+// message payloads, so restricting hosts closes the SSRF surface.
+var allowedMediaHosts = map[string]bool{
+	"cdn.discordapp.com":   true,
+	"media.discordapp.net": true,
+}
+
+// isAllowedMediaURL validates that the URL is HTTPS on an allowed Discord CDN host.
+func isAllowedMediaURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https" && allowedMediaHosts[strings.ToLower(u.Hostname())]
+}
 
 // DownloadedImage is a validated, locally cached image ready for a vision model.
 type DownloadedImage struct {
@@ -28,6 +46,9 @@ const MediaDir = "data/discord_media"
 // images and upstream 404s break whole signals; callers must degrade to
 // text-only parsing with a warning instead of failing the signal.
 func DownloadImage(client *Client, rawURL string) (*DownloadedImage, error) {
+	if !isAllowedMediaURL(rawURL) {
+		return nil, fmt.Errorf("attachment host not allowed (only Discord CDN): %s", rawURL)
+	}
 	data, _, err := client.DownloadAttachment(rawURL)
 	if err != nil {
 		return nil, fmt.Errorf("download failed: %w", err)
@@ -73,6 +94,38 @@ func DownloadImage(client *Client, rawURL string) (*DownloadedImage, error) {
 		Source:   rawURL,
 	}, nil
 }
+
+// CleanOldMedia deletes cached media files whose modification time is older
+// than the retention window. Returns the number of files removed.
+func CleanOldMedia(days int) (int, error) {
+	entries, err := os.ReadDir(MediaDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	cutoff := timeNow().AddDate(0, 0, -days)
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		info, ierr := entry.Info()
+		if ierr != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			if rmErr := os.Remove(filepath.Join(MediaDir, entry.Name())); rmErr == nil {
+				removed++
+			}
+		}
+	}
+	return removed, nil
+}
+
+// timeNow is stubbed in tests.
+var timeNow = func() time.Time { return time.Now() }
 
 // ReadImageBytes loads a cached image back for base64 encoding.
 func ReadImageBytes(img *DownloadedImage) ([]byte, error) {

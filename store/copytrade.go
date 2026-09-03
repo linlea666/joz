@@ -34,6 +34,9 @@ type CopyTradeContext struct {
 	TPPlanJSON        string  `gorm:"column:tp_plan_json;default:''" json:"tp_plan_json"` // [{price, quantity, order_id}]
 	TPHitCount        int     `gorm:"column:tp_hit_count;default:0" json:"tp_hit_count"`
 	BreakevenApplied  bool    `gorm:"column:breakeven_applied;default:false" json:"breakeven_applied"`
+	// BreakevenAfterTP marks an author-stated conditional rule ("move SL to
+	// entry after TP1") on this specific trade; OR-ed with the global config.
+	BreakevenAfterTP bool `gorm:"column:breakeven_after_tp;default:false" json:"breakeven_after_tp"`
 
 	EntryOrderID string `gorm:"column:entry_order_id;default:''" json:"entry_order_id"`
 	LastAction   string `gorm:"column:last_action;default:''" json:"last_action"`
@@ -117,15 +120,15 @@ type CopyTradeSignal struct {
 	ReceivedAt       time.Time `gorm:"column:received_at" json:"received_at"`
 
 	// Latency breakdown (milliseconds)
-	ReceiveLatencyMs  int64 `gorm:"column:receive_latency_ms;default:0" json:"receive_latency_ms"`
-	MediaDownloadMs   int64 `gorm:"column:media_download_ms;default:0" json:"media_download_ms"`
-	PromptBuildMs     int64 `gorm:"column:prompt_build_ms;default:0" json:"prompt_build_ms"`
-	LLMRequestMs      int64 `gorm:"column:llm_request_ms;default:0" json:"llm_request_ms"`
-	RiskCalcMs        int64 `gorm:"column:risk_calc_ms;default:0" json:"risk_calc_ms"`
-	ExchangeSubmitMs  int64 `gorm:"column:exchange_submit_ms;default:0" json:"exchange_submit_ms"`
-	TotalMs           int64 `gorm:"column:total_ms;default:0" json:"total_ms"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ReceiveLatencyMs int64     `gorm:"column:receive_latency_ms;default:0" json:"receive_latency_ms"`
+	MediaDownloadMs  int64     `gorm:"column:media_download_ms;default:0" json:"media_download_ms"`
+	PromptBuildMs    int64     `gorm:"column:prompt_build_ms;default:0" json:"prompt_build_ms"`
+	LLMRequestMs     int64     `gorm:"column:llm_request_ms;default:0" json:"llm_request_ms"`
+	RiskCalcMs       int64     `gorm:"column:risk_calc_ms;default:0" json:"risk_calc_ms"`
+	ExchangeSubmitMs int64     `gorm:"column:exchange_submit_ms;default:0" json:"exchange_submit_ms"`
+	TotalMs          int64     `gorm:"column:total_ms;default:0" json:"total_ms"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 func (CopyTradeSignal) TableName() string { return "copytrade_signals" }
@@ -271,13 +274,13 @@ func (s *CopyTradeStore) CreateAIRun(run *CopyTradeAIRun) error {
 
 // AIStat aggregates model latency for comparison.
 type AIStat struct {
-	Model      string  `json:"model"`
-	Provider   string  `json:"provider"`
-	Runs       int64   `json:"runs"`
-	Errors     int64   `json:"errors"`
-	AvgMs      float64 `json:"avg_ms"`
-	MinMs      int64   `json:"min_ms"`
-	MaxMs      int64   `json:"max_ms"`
+	Model    string  `json:"model"`
+	Provider string  `json:"provider"`
+	Runs     int64   `json:"runs"`
+	Errors   int64   `json:"errors"`
+	AvgMs    float64 `json:"avg_ms"`
+	MinMs    int64   `json:"min_ms"`
+	MaxMs    int64   `json:"max_ms"`
 }
 
 // GetAIStats aggregates per-model parsing latency over a period.
@@ -321,21 +324,34 @@ func (s *CopyTradeStore) GetSignal(id string) (*CopyTradeSignal, error) {
 	return &sig, nil
 }
 
-// SignalProcessed reports whether this exact message revision was already
-// interpreted for this trader (duplicate-delivery guard across restarts).
+// SignalProcessed reports whether this exact message revision already reached
+// a terminal outcome for this trader (duplicate-delivery guard across
+// restarts). Non-terminal rows (received/parsed/executing) do NOT count: a
+// crash mid-pipeline must not permanently swallow the revision. Re-execution
+// safety comes from the duplicate-open protection and idempotent management
+// actions, not from half-finished signal rows.
 func (s *CopyTradeStore) SignalProcessed(traderID, messageID string, revision int) (bool, error) {
 	var n int64
 	err := s.db.Model(&CopyTradeSignal{}).
-		Where("trader_id = ? AND message_id = ? AND message_revision = ?", traderID, messageID, revision).
+		Where("trader_id = ? AND message_id = ? AND message_revision = ? AND status IN ?",
+			traderID, messageID, revision,
+			[]string{SignalStatusExecuted, SignalStatusSkipped, SignalStatusFailed}).
 		Count(&n).Error
 	return n > 0, err
 }
 
 // GetRecentSignals lists a trader's recent signals (newest first).
-func (s *CopyTradeStore) GetRecentSignals(traderID string, limit int) ([]*CopyTradeSignal, error) {
+// start/end are optional time bounds (zero value disables the bound).
+func (s *CopyTradeStore) GetRecentSignals(traderID string, start, end time.Time, limit int) ([]*CopyTradeSignal, error) {
 	var sigs []*CopyTradeSignal
-	err := s.db.Where("trader_id = ?", traderID).
-		Order("message_timestamp DESC").Limit(limit).Find(&sigs).Error
+	q := s.db.Where("trader_id = ?", traderID)
+	if !start.IsZero() {
+		q = q.Where("message_timestamp >= ?", start)
+	}
+	if !end.IsZero() {
+		q = q.Where("message_timestamp <= ?", end)
+	}
+	err := q.Order("message_timestamp DESC").Limit(limit).Find(&sigs).Error
 	return sigs, err
 }
 
@@ -360,24 +376,26 @@ func (s *CopyTradeStore) AppendEvent(ev *CopyTradeEvent) error {
 }
 
 // GetEventsByTrader lists a trader's events (newest first, paginated).
-func (s *CopyTradeStore) GetEventsByTrader(traderID string, limit, offset int) ([]*CopyTradeEvent, error) {
+// start/end are optional time bounds (zero value disables the bound).
+func (s *CopyTradeStore) GetEventsByTrader(traderID string, start, end time.Time, limit, offset int) ([]*CopyTradeEvent, error) {
 	var evs []*CopyTradeEvent
-	err := s.db.Where("trader_id = ?", traderID).
-		Order("occurred_at DESC").Limit(limit).Offset(offset).Find(&evs).Error
+	q := s.db.Where("trader_id = ?", traderID)
+	if !start.IsZero() {
+		q = q.Where("occurred_at >= ?", start)
+	}
+	if !end.IsZero() {
+		q = q.Where("occurred_at <= ?", end)
+	}
+	err := q.Order("occurred_at DESC").Limit(limit).Offset(offset).Find(&evs).Error
 	return evs, err
 }
 
-// GetEventsByTrace lists all events of one trace (oldest first: waterfall).
-func (s *CopyTradeStore) GetEventsByTrace(traceID string) ([]*CopyTradeEvent, error) {
+// GetEventsByTrace lists all events of one trace (oldest first: waterfall),
+// scoped to a trader so one user cannot read another trader's traces.
+func (s *CopyTradeStore) GetEventsByTrace(traderID, traceID string) ([]*CopyTradeEvent, error) {
 	var evs []*CopyTradeEvent
-	err := s.db.Where("trace_id = ?", traceID).Order("occurred_at ASC").Find(&evs).Error
-	return evs, err
-}
-
-// GetAllEvents lists events across traders (admin view).
-func (s *CopyTradeStore) GetAllEvents(limit, offset int) ([]*CopyTradeEvent, error) {
-	var evs []*CopyTradeEvent
-	err := s.db.Order("occurred_at DESC").Limit(limit).Offset(offset).Find(&evs).Error
+	err := s.db.Where("trader_id = ? AND trace_id = ?", traderID, traceID).
+		Order("occurred_at ASC").Find(&evs).Error
 	return evs, err
 }
 
@@ -385,5 +403,24 @@ func (s *CopyTradeStore) GetAllEvents(limit, offset int) ([]*CopyTradeEvent, err
 func (s *CopyTradeStore) CleanOldEvents(days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days)
 	result := s.db.Where("occurred_at < ?", cutoff).Delete(&CopyTradeEvent{})
+	return result.RowsAffected, result.Error
+}
+
+// CleanOldSignals removes terminal signals older than the retention window.
+// Non-terminal rows are kept regardless of age (still useful for debugging
+// stuck pipelines and never bulky).
+func (s *CopyTradeStore) CleanOldSignals(days int) (int64, error) {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	result := s.db.Where("created_at < ? AND status IN ?", cutoff,
+		[]string{SignalStatusExecuted, SignalStatusSkipped, SignalStatusFailed}).
+		Delete(&CopyTradeSignal{})
+	return result.RowsAffected, result.Error
+}
+
+// CleanOldAIRuns removes AI run records older than the retention window.
+// These rows carry full prompts and raw responses and dominate table growth.
+func (s *CopyTradeStore) CleanOldAIRuns(days int) (int64, error) {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	result := s.db.Where("created_at < ?", cutoff).Delete(&CopyTradeAIRun{})
 	return result.RowsAffected, result.Error
 }

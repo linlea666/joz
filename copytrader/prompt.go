@@ -10,7 +10,7 @@ import (
 
 // PromptVersion tags every AI run so output quality can be compared across
 // prompt iterations.
-const PromptVersion = "copytrade-v1"
+const PromptVersion = "copytrade-v2"
 
 // SystemPrompt is the fixed interpretation contract. It deliberately does NOT
 // ask the AI for quantities, leverage or risk decisions — those belong to the
@@ -61,7 +61,7 @@ Omit fields that do not apply. All confidence values are 0.0-1.0.
 ## Extraction rules
 1. NEVER invent numbers. A missing stop loss stays missing (empty stop_loss_levels) — do not estimate one.
 2. Text takes priority over images. If the text already carries entry/SL/TP, use the text and set source_info.text_priority_used=true. Only read numbers from the image when the text lacks them, and add a warning "params from image OCR".
-3. Price zones like "62k-61.5k" => RANGE with both bounds. "CMP" / "market" => MARKET.
+3. Price zones like "62k-61.5k" => RANGE with both bounds. "CMP" / "market" => MARKET; when the author states a reference price alongside ("CMP around 62000"), also set "price" to that reference.
 4. Soft/conditional stops ("2h close under 74k invalidates") => stop_loss_levels with the hard price AND the conditional text verbatim in "conditional".
 5. Multiple TPs: list in order. Only set "ratio" when the author explicitly states a portion ("close 50% at TP1"); otherwise leave ratio null.
 6. R-multiples ("2R"), percent moves ("+5%") => price type R_MULTIPLE / PERCENT_OFFSET with "offset" set. The system decides whether it can execute them.

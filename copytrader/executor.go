@@ -41,6 +41,10 @@ func NewExecutor(traderID string, ex types.Trader, st *store.Store, events *Even
 	return &Executor{traderID: traderID, ex: ex, gridEx: gridEx, st: st, events: events}
 }
 
+// retrySleep is time.Sleep, injectable so unit tests do not wait for real
+// backoff delays.
+var retrySleep = time.Sleep
+
 // positionSideOf maps direction to the exchange positionSide parameter.
 func positionSideOf(direction string) string {
 	if direction == string(DirectionShort) {
@@ -51,7 +55,7 @@ func positionSideOf(direction string) string {
 
 // OpenPlan is the fully resolved, deterministic plan for an OPEN.
 type OpenPlan struct {
-	Symbol     string  // canonical
+	Symbol     string // canonical
 	RawSymbol  string
 	Direction  Direction
 	EntryType  EntryPlanType
@@ -226,12 +230,20 @@ func (x *Executor) placeProtections(traceID, signalID string, plan *OpenPlan, ct
 		if slErr == nil {
 			break
 		}
-		time.Sleep(time.Duration(attempt) * time.Second)
+		retrySleep(time.Duration(attempt) * time.Second)
 	}
 	if slErr != nil {
 		x.events.Error(traceID, signalID, "", EvEmergencyClose,
 			fmt.Sprintf("stop loss placement failed after retries (%v) — closing position immediately", slErr), nil)
-		x.emergencyClose(traceID, signalID, plan.Symbol, string(plan.Direction))
+		if closeErr := x.emergencyClose(traceID, signalID, plan.Symbol, string(plan.Direction)); closeErr != nil {
+			// Both SL and emergency close failed: the position is live and
+			// unprotected. Keep the context in its non-terminal state so the
+			// reconciler keeps retrying SL placement every cycle.
+			x.updateContext(ctx, map[string]interface{}{
+				"last_error": "UNPROTECTED: SL placement failed (" + slErr.Error() + ") and emergency close failed (" + closeErr.Error() + ")",
+			})
+			return fmt.Errorf("SL placement failed and emergency close failed — position UNPROTECTED, reconciler will retry: SL err: %v, close err: %w", slErr, closeErr)
+		}
 		x.markContext(ctx, StateClosed, map[string]interface{}{
 			"last_error": "emergency close: SL placement failed: " + slErr.Error(),
 		})
@@ -324,6 +336,20 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 	full := closeRatio <= 0 || closeRatio >= 100
 	if !full {
 		closeQty = pos.qty * closeRatio / 100
+		// Exchange precision: an unrounded quantity gets rejected by most venues.
+		if qtyStr, ferr := x.ex.FormatQuantity(ctx.Symbol, closeQty); ferr == nil {
+			if q, perr := strconv.ParseFloat(qtyStr, 64); perr == nil && q > 0 {
+				closeQty = q
+			}
+		}
+		if closeQty <= 0 {
+			x.events.Info(traceID, signalID, "", EvSignalSkipped,
+				fmt.Sprintf("partial close skipped: %.0f%% of %.8g rounds to zero", closeRatio, pos.qty), nil)
+			return SkipAlreadyFlat, nil
+		}
+		if closeQty >= pos.qty {
+			full = true
+		}
 	}
 
 	if full {
@@ -353,8 +379,14 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 		x.updateContext(ctx, map[string]interface{}{"quantity": remaining, "last_action": "REDUCE"})
 		// Re-issue SL for the remaining quantity so protection matches the position.
 		if ctx.StopLossPrice > 0 {
-			if err := x.ex.CancelStopLossOrders(ctx.Symbol); err == nil {
-				_ = x.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), remaining, ctx.StopLossPrice)
+			if cerr := x.ex.CancelStopLossOrders(ctx.Symbol); cerr != nil {
+				x.events.Warn(traceID, signalID, "", EvExecutionError,
+					fmt.Sprintf("partial close: cancel old SL failed: %v", cerr), nil)
+			}
+			if serr := x.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), remaining, ctx.StopLossPrice); serr != nil {
+				// Reconciler's SL guard re-places it next cycle; log loudly.
+				x.events.Error(traceID, signalID, "", EvExecutionError,
+					fmt.Sprintf("partial close: re-issue SL failed (reconciler will retry): %v", serr), nil)
 			}
 		}
 		x.events.Success(traceID, signalID, "", EvTradeUpdated,
@@ -380,9 +412,28 @@ func (x *Executor) ExecuteUpdateSL(traceID, signalID string, ctx *store.CopyTrad
 		x.events.Warn(traceID, signalID, "", EvExecutionError,
 			fmt.Sprintf("cancel old SL failed (may not exist): %v", err), nil)
 	}
-	if err := x.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), pos.qty, newPrice); err != nil {
-		x.events.Error(traceID, signalID, "", EvExecutionError, fmt.Sprintf("set new SL failed: %v", err), nil)
-		return SkipNone, fmt.Errorf("set new SL failed: %w", err)
+	var slErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		slErr = x.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), pos.qty, newPrice)
+		if slErr == nil {
+			break
+		}
+		retrySleep(time.Duration(attempt) * time.Second)
+	}
+	if slErr != nil {
+		x.events.Error(traceID, signalID, "", EvExecutionError, fmt.Sprintf("set new SL failed: %v", slErr), nil)
+		// The old SL was already cancelled: restore protection at the previous
+		// price immediately instead of leaving the position naked.
+		if ctx.StopLossPrice > 0 {
+			if rerr := x.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), pos.qty, ctx.StopLossPrice); rerr != nil {
+				x.events.Error(traceID, signalID, "", EvExecutionError,
+					fmt.Sprintf("restore previous SL @ %.8g also failed (reconciler will retry): %v", ctx.StopLossPrice, rerr), nil)
+			} else {
+				x.events.Warn(traceID, signalID, "", EvSLSet,
+					fmt.Sprintf("new SL failed; previous SL restored @ %.8g", ctx.StopLossPrice), nil)
+			}
+		}
+		return SkipNone, fmt.Errorf("set new SL failed: %w", slErr)
 	}
 
 	updates := map[string]interface{}{"stop_loss_price": newPrice, "last_action": "UPDATE_SL"}
@@ -426,14 +477,44 @@ func (x *Executor) ExecuteUpdateTP(traceID, signalID string, ctx *store.CopyTrad
 	return SkipNone, nil
 }
 
-// ExecuteCancel cancels an unfilled entry order.
+// ExecuteCancel cancels an unfilled entry order. It only marks the context
+// CANCELLED once the exchange confirms the order is gone; a filled-in-race
+// order stays ENTRY_PENDING so the reconciler converts it to OPEN and places
+// protections instead of orphaning the position.
 func (x *Executor) ExecuteCancel(traceID, signalID string, ctx *store.CopyTradeContext) (SkipReason, error) {
 	if ctx.State != string(StateEntryPending) && ctx.State != string(StateNew) {
 		return SkipAlreadyFlat, nil
 	}
 	if ctx.EntryOrderID != "" && x.gridEx != nil {
+		// Race check: the entry may have filled before the cancel arrives.
+		if status, serr := x.ex.GetOrderStatus(ctx.Symbol, ctx.EntryOrderID); serr == nil {
+			if st, _ := status["status"].(string); st == "FILLED" {
+				x.events.Warn(traceID, signalID, "", EvExecutionError,
+					fmt.Sprintf("cancel requested but entry %s already FILLED; keeping trade active for reconciliation", ctx.EntryOrderID), nil)
+				return SkipNone, fmt.Errorf("entry order filled before cancel; position will be protected by the reconciler")
+			}
+		}
 		if err := x.gridEx.CancelOrder(ctx.Symbol, ctx.EntryOrderID); err != nil {
-			x.events.Warn(traceID, signalID, "", EvExecutionError, fmt.Sprintf("cancel entry order failed: %v", err), nil)
+			// Cancel failed: verify against exchange truth before deciding.
+			if status, serr := x.ex.GetOrderStatus(ctx.Symbol, ctx.EntryOrderID); serr == nil {
+				st, _ := status["status"].(string)
+				switch st {
+				case "FILLED":
+					x.events.Warn(traceID, signalID, "", EvExecutionError,
+						"cancel failed because entry already filled; keeping trade active for reconciliation", nil)
+					return SkipNone, fmt.Errorf("entry order filled before cancel; position will be protected by the reconciler")
+				case "CANCELED", "CANCELLED", "EXPIRED", "REJECTED":
+					// Already gone on the exchange: safe to finalize below.
+				default:
+					x.events.Warn(traceID, signalID, "", EvExecutionError,
+						fmt.Sprintf("cancel entry order failed (status %s), will retry: %v", st, err), nil)
+					return SkipNone, fmt.Errorf("cancel entry order failed: %w", err)
+				}
+			} else {
+				x.events.Warn(traceID, signalID, "", EvExecutionError,
+					fmt.Sprintf("cancel entry order failed and status unknown, will retry: %v", err), nil)
+				return SkipNone, fmt.Errorf("cancel entry order failed: %w", err)
+			}
 		}
 	} else {
 		x.cancelAllQuiet(ctx.Symbol)
@@ -444,7 +525,9 @@ func (x *Executor) ExecuteCancel(traceID, signalID string, ctx *store.CopyTradeC
 }
 
 // emergencyClose force-closes a position after protection placement failed.
-func (x *Executor) emergencyClose(traceID, signalID, symbol, direction string) {
+// Returns the close error so callers can avoid marking the trade terminal
+// while an unprotected position may still be live on the exchange.
+func (x *Executor) emergencyClose(traceID, signalID, symbol, direction string) error {
 	var err error
 	if direction == string(DirectionLong) {
 		_, err = x.ex.CloseLong(symbol, 0) // 0 = close all
@@ -456,6 +539,7 @@ func (x *Executor) emergencyClose(traceID, signalID, symbol, direction string) {
 		x.events.Error(traceID, signalID, "", EvEmergencyClose,
 			fmt.Sprintf("EMERGENCY CLOSE FAILED for %s %s — POSITION IS UNPROTECTED, manual action required: %v", symbol, direction, err), nil)
 	}
+	return err
 }
 
 // --- helpers ---
@@ -491,6 +575,28 @@ func (x *Executor) findPosition(symbol, direction string) (*positionInfo, error)
 		}
 	}
 	return nil, nil
+}
+
+// hasStopLossOrder reports whether a live stop-loss style order exists for the
+// symbol. Returns (exists, ok); ok=false means the exchange query failed and
+// the answer is unknown (callers must NOT treat that as "missing").
+func (x *Executor) hasStopLossOrder(symbol string) (bool, bool) {
+	orders, err := x.ex.GetOpenOrders(symbol)
+	if err != nil {
+		return false, false
+	}
+	for _, o := range orders {
+		t := strings.ToUpper(o.Type)
+		if strings.Contains(t, "TAKE_PROFIT") {
+			continue
+		}
+		// STOP / STOP_MARKET / STOP_LIMIT, or any conditional order with a
+		// trigger price that is not a take-profit.
+		if strings.Contains(t, "STOP") || o.StopPrice > 0 {
+			return true, true
+		}
+	}
+	return false, true
 }
 
 // confirmFill polls the order status briefly for actual avg price / quantity,

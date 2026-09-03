@@ -66,30 +66,57 @@ export const discordApi = {
   async getCopyTradeEvents(
     traderId: string,
     limit = 100,
-    offset = 0
+    offset = 0,
+    startTimeMs?: number,
+    endTimeMs?: number
   ): Promise<CopyTradeEvent[]> {
-    const result = await httpClient.get<{ events: CopyTradeEvent[] }>(
-      `${API_BASE}/copytrade/events?trader_id=${encodeURIComponent(traderId)}&limit=${limit}&offset=${offset}`
-    )
+    let url = `${API_BASE}/copytrade/events?trader_id=${encodeURIComponent(traderId)}&limit=${limit}&offset=${offset}`
+    if (startTimeMs) url += `&start_time=${startTimeMs}`
+    if (endTimeMs) url += `&end_time=${endTimeMs}`
+    const result = await httpClient.get<{ events: CopyTradeEvent[] }>(url)
     if (!result.success) throw new Error('Failed to fetch copy trade events')
     return result.data?.events ?? []
   },
 
-  async getCopyTradeEventsByTrace(traceId: string): Promise<CopyTradeEvent[]> {
-    const result = await httpClient.get<{ events: CopyTradeEvent[] }>(
-      `${API_BASE}/copytrade/events?trace_id=${encodeURIComponent(traceId)}`
-    )
-    if (!result.success) throw new Error('Failed to fetch trace events')
-    return result.data?.events ?? []
+  /**
+   * Downloads events or signals of a time range as a CSV file.
+   */
+  async exportCopyTradeCSV(
+    kind: 'events' | 'signals',
+    traderId: string,
+    startTimeMs?: number,
+    endTimeMs?: number
+  ): Promise<void> {
+    let url = `${API_BASE}/copytrade/${kind}?trader_id=${encodeURIComponent(traderId)}&format=csv`
+    if (startTimeMs) url += `&start_time=${startTimeMs}`
+    if (endTimeMs) url += `&end_time=${endTimeMs}`
+
+    const token = localStorage.getItem('auth_token')
+    const resp = await fetch(url, {
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    })
+    if (!resp.ok) throw new Error(`Export failed (${resp.status})`)
+    const blob = await resp.blob()
+    const objectUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = objectUrl
+    a.download = `copytrade_${kind}_${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(objectUrl)
   },
 
   async getCopyTradeSignals(
     traderId: string,
-    limit = 50
+    limit = 50,
+    startTimeMs?: number,
+    endTimeMs?: number
   ): Promise<CopyTradeSignal[]> {
-    const result = await httpClient.get<{ signals: CopyTradeSignal[] }>(
-      `${API_BASE}/copytrade/signals?trader_id=${encodeURIComponent(traderId)}&limit=${limit}`
-    )
+    let url = `${API_BASE}/copytrade/signals?trader_id=${encodeURIComponent(traderId)}&limit=${limit}`
+    if (startTimeMs) url += `&start_time=${startTimeMs}`
+    if (endTimeMs) url += `&end_time=${endTimeMs}`
+    const result = await httpClient.get<{ signals: CopyTradeSignal[] }>(url)
     if (!result.success) throw new Error('Failed to fetch copy trade signals')
     return result.data?.signals ?? []
   },

@@ -51,6 +51,20 @@ type DiscordMessage struct {
 
 func (DiscordMessage) TableName() string { return "discord_messages" }
 
+// DiscordChannelBaseline marks that a channel's pre-subscription history has
+// been fully persisted as baseline. The poller must ONLY trust this flag when
+// deciding between "establish baseline" and "incremental fetch" — presence of
+// stored rows is NOT sufficient (cross-channel message lookups can write
+// single rows into a channel that was never actually baselined, which would
+// otherwise cause the whole history window to be traded as fresh signals).
+type DiscordChannelBaseline struct {
+	ChannelID    string    `gorm:"column:channel_id;primaryKey" json:"channel_id"`
+	MessageCount int       `gorm:"column:message_count;default:0" json:"message_count"`
+	CompletedAt  time.Time `gorm:"column:completed_at" json:"completed_at"`
+}
+
+func (DiscordChannelBaseline) TableName() string { return "discord_channel_baselines" }
+
 // HashDiscordContent produces the content hash used for edit detection
 // (content + embeds; attachments rarely change on edit).
 func HashDiscordContent(content, embedsJSON string) string {
@@ -69,7 +83,7 @@ func NewDiscordMessageStore(db *gorm.DB) *DiscordMessageStore {
 }
 
 func (s *DiscordMessageStore) initTables() error {
-	return s.db.AutoMigrate(&DiscordMessage{})
+	return s.db.AutoMigrate(&DiscordMessage{}, &DiscordChannelBaseline{})
 }
 
 // UpsertResult describes what the upsert observed.
@@ -145,6 +159,8 @@ func (s *DiscordMessageStore) GetByMessageID(channelID, messageID string) (*Disc
 
 // NextPending claims the oldest pending message of a channel for processing
 // (single-consumer per channel; the engine serializes per channel by design).
+// The claim is revision-conditional: if the author edits the message between
+// read and claim, the claim fails and the caller re-reads the fresh revision.
 func (s *DiscordMessageStore) NextPending(channelID string) (*DiscordMessage, error) {
 	var msg DiscordMessage
 	err := s.db.Where("channel_id = ? AND processing_status = ?", channelID, DiscordMsgPending).
@@ -156,18 +172,42 @@ func (s *DiscordMessageStore) NextPending(channelID string) (*DiscordMessage, er
 		}
 		return nil, err
 	}
-	if err := s.SetStatus(msg.ID, DiscordMsgProcessing, ""); err != nil {
+	claimed, err := s.SetStatusIfRevision(msg.ID, msg.Revision, DiscordMsgProcessing, "")
+	if err != nil {
 		return nil, err
+	}
+	if !claimed {
+		// Edited between read and claim: not an error, just nothing claimed
+		// this round; the dispatcher loops and picks up the new revision.
+		return nil, nil
 	}
 	return &msg, nil
 }
 
-// SetStatus updates the processing status.
+// SetStatus updates the processing status unconditionally.
 func (s *DiscordMessageStore) SetStatus(id int64, status, processingError string) error {
 	return s.db.Model(&DiscordMessage{}).Where("id = ?", id).Updates(map[string]interface{}{
 		"processing_status": status,
 		"processing_error":  processingError,
 	}).Error
+}
+
+// SetStatusIfRevision updates the processing status only when the stored
+// revision still matches. Returns false (without error) when the row changed:
+// an edit during processing resets the status to pending, and that pending
+// must survive so the new revision is reprocessed (lifecycle updates like
+// "SL moved" or "closed" arrive as in-place edits).
+func (s *DiscordMessageStore) SetStatusIfRevision(id int64, revision int, status, processingError string) (bool, error) {
+	result := s.db.Model(&DiscordMessage{}).
+		Where("id = ? AND revision = ?", id, revision).
+		Updates(map[string]interface{}{
+			"processing_status": status,
+			"processing_error":  processingError,
+		})
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
 
 // ResetStuckProcessing returns messages stuck in "processing" (e.g. process
@@ -203,6 +243,29 @@ func (s *DiscordMessageStore) HasMessages(channelID string) (bool, error) {
 	return count > 0, err
 }
 
+// IsBaselineDone reports whether the channel's baseline has been fully
+// established (the only trusted signal for the poller's baseline decision).
+func (s *DiscordMessageStore) IsBaselineDone(channelID string) (bool, error) {
+	var n int64
+	err := s.db.Model(&DiscordChannelBaseline{}).Where("channel_id = ?", channelID).Count(&n).Error
+	return n > 0, err
+}
+
+// MarkBaselineDone records that the channel's history window was fully
+// persisted as baseline. Idempotent.
+func (s *DiscordMessageStore) MarkBaselineDone(channelID string, messageCount int) error {
+	rec := &DiscordChannelBaseline{
+		ChannelID:    channelID,
+		MessageCount: messageCount,
+		CompletedAt:  time.Now().UTC(),
+	}
+	err := s.db.Create(rec).Error
+	if err != nil && (errors.Is(err, gorm.ErrDuplicatedKey) || isUniqueViolation(err)) {
+		return nil
+	}
+	return err
+}
+
 // MarkBaseline stores messages as already-processed (skipped) — used on first
 // subscription so pre-existing channel history is never traded on.
 func (s *DiscordMessageStore) MarkBaseline(msg *DiscordMessage) error {
@@ -230,6 +293,18 @@ func (s *DiscordMessageStore) GetRecentByChannel(channelID string, since time.Ti
 	}
 	err := q.Order("message_timestamp DESC").Limit(limit).Find(&msgs).Error
 	return msgs, err
+}
+
+// CleanOldMessages removes terminal messages (done/skipped/failed) older than
+// the retention window. Pending/processing rows are never removed; channel
+// baselines are tracked in discord_channel_baselines, so deleting old skipped
+// baseline rows cannot cause a historical replay.
+func (s *DiscordMessageStore) CleanOldMessages(days int) (int64, error) {
+	cutoff := time.Now().AddDate(0, 0, -days)
+	result := s.db.Where("message_timestamp < ? AND processing_status IN ?", cutoff,
+		[]string{DiscordMsgDone, DiscordMsgSkipped, DiscordMsgFailed}).
+		Delete(&DiscordMessage{})
+	return result.RowsAffected, result.Error
 }
 
 func isUniqueViolation(err error) bool {

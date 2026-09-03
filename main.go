@@ -15,7 +15,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -111,6 +113,10 @@ func main() {
 		logger.Warnf("⚠️ Discord poller start failed: %v", err)
 	}
 
+	// Daily retention cleanup for copy-trading data (events/signals/AI runs/
+	// raw messages/media cache) so the tables never grow without bound.
+	go runCopyTradeRetentionLoop(st)
+
 	// Create TraderManager
 	traderManager := manager.NewTraderManager()
 
@@ -175,6 +181,69 @@ func main() {
 	// Stop Discord poller
 	discordPoller.Stop()
 	logger.Info("✅ System shut down safely")
+}
+
+// retentionDays reads a retention override from the environment, falling back
+// to the given default. Values <= 0 are rejected (retention is never "keep forever").
+func retentionDays(envKey string, def int) int {
+	if v := os.Getenv(envKey); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+		logger.Warnf("⚠️ Invalid %s=%q, using default %d days", envKey, v, def)
+	}
+	return def
+}
+
+// runCopyTradeRetentionLoop prunes copy-trading data daily. Retention windows
+// are configurable via environment variables; defaults:
+//   - execution events / signals: 90 days
+//   - AI runs (prompts + raw responses, the bulk of growth): 30 days
+//   - raw Discord messages in terminal state: 30 days
+//   - cached media files: 30 days
+func runCopyTradeRetentionLoop(st *store.Store) {
+	eventDays := retentionDays("COPYTRADE_EVENT_RETENTION_DAYS", 90)
+	signalDays := retentionDays("COPYTRADE_SIGNAL_RETENTION_DAYS", 90)
+	aiRunDays := retentionDays("COPYTRADE_AIRUN_RETENTION_DAYS", 30)
+	messageDays := retentionDays("DISCORD_MESSAGE_RETENTION_DAYS", 30)
+	mediaDays := retentionDays("DISCORD_MEDIA_RETENTION_DAYS", 30)
+
+	runOnce := func() {
+		if n, err := st.CopyTrade().CleanOldEvents(eventDays); err != nil {
+			logger.Warnf("⚠️ CopyTrade retention: events cleanup failed: %v", err)
+		} else if n > 0 {
+			logger.Infof("🧹 CopyTrade retention: removed %d events older than %d days", n, eventDays)
+		}
+		if n, err := st.CopyTrade().CleanOldSignals(signalDays); err != nil {
+			logger.Warnf("⚠️ CopyTrade retention: signals cleanup failed: %v", err)
+		} else if n > 0 {
+			logger.Infof("🧹 CopyTrade retention: removed %d signals older than %d days", n, signalDays)
+		}
+		if n, err := st.CopyTrade().CleanOldAIRuns(aiRunDays); err != nil {
+			logger.Warnf("⚠️ CopyTrade retention: AI runs cleanup failed: %v", err)
+		} else if n > 0 {
+			logger.Infof("🧹 CopyTrade retention: removed %d AI runs older than %d days", n, aiRunDays)
+		}
+		if n, err := st.DiscordMessage().CleanOldMessages(messageDays); err != nil {
+			logger.Warnf("⚠️ CopyTrade retention: messages cleanup failed: %v", err)
+		} else if n > 0 {
+			logger.Infof("🧹 CopyTrade retention: removed %d terminal messages older than %d days", n, messageDays)
+		}
+		if n, err := discord.CleanOldMedia(mediaDays); err != nil {
+			logger.Warnf("⚠️ CopyTrade retention: media cleanup failed: %v", err)
+		} else if n > 0 {
+			logger.Infof("🧹 CopyTrade retention: removed %d cached media files older than %d days", n, mediaDays)
+		}
+	}
+
+	// First pass shortly after boot (off the hot startup path), then daily.
+	time.Sleep(2 * time.Minute)
+	runOnce()
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		runOnce()
+	}
 }
 
 // initInstallationID initializes the anonymous installation ID for experience improvement
