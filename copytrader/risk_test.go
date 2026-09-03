@@ -114,6 +114,7 @@ func TestEffectiveRisk(t *testing.T) {
 func TestDecideEntryType(t *testing.T) {
 	tests := []struct {
 		name        string
+		direction   Direction
 		spec        PriceSpec
 		market      float64
 		threshold   float64
@@ -121,17 +122,37 @@ func TestDecideEntryType(t *testing.T) {
 		wantType    EntryPlanType
 		wantPrice   float64
 	}{
-		{"market within threshold", PriceSpec{Type: PriceMarket}, 100, 0.5, true, EntryPlanMarket, 100},
-		{"fixed within threshold converts to market", PriceSpec{Type: PriceFixed, Price: 100}, 100.2, 0.3, true, EntryPlanMarket, 100.2},
-		{"fixed within threshold stays limit when disabled", PriceSpec{Type: PriceFixed, Price: 100}, 100.2, 0.3, false, EntryPlanLimit, 100},
-		{"fixed beyond threshold stays limit", PriceSpec{Type: PriceFixed, Price: 100}, 102, 0.3, true, EntryPlanLimit, 100},
-		{"range inside is market", PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 61800, 1, true, EntryPlanMarket, 61800},
-		{"range below limits at low edge", PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 61000, 1, true, EntryPlanLimit, 61500},
-		{"range above limits at high edge", PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 63000, 1, true, EntryPlanLimit, 62000},
+		// Author-stated market entries.
+		{"market no reference", DirectionLong, PriceSpec{Type: PriceMarket}, 100, 0.5, true, EntryPlanMarket, 100},
+		{"market ref favorable beyond threshold", DirectionLong, PriceSpec{Type: PriceMarket, Price: 100}, 98, 0.5, true, EntryPlanMarket, 98},
+		{"market ref adverse within threshold", DirectionLong, PriceSpec{Type: PriceMarket, Price: 100}, 100.3, 0.5, true, EntryPlanMarket, 100.3},
+		{"market ref adverse beyond threshold waits", DirectionLong, PriceSpec{Type: PriceMarket, Price: 100}, 102, 0.5, true, EntryPlanLimit, 100},
+
+		// Fixed prices, long: favorable = market below reference.
+		{"long favorable within threshold", DirectionLong, PriceSpec{Type: PriceFixed, Price: 100}, 99.9, 0.3, true, EntryPlanMarket, 99.9},
+		{"long favorable beyond threshold still market", DirectionLong, PriceSpec{Type: PriceFixed, Price: 100}, 99, 0.3, true, EntryPlanMarket, 99},
+		{"long favorable ignores limitWithin toggle", DirectionLong, PriceSpec{Type: PriceFixed, Price: 100}, 99, 0.3, false, EntryPlanMarket, 99},
+		{"long adverse within threshold converts to market", DirectionLong, PriceSpec{Type: PriceFixed, Price: 100}, 100.2, 0.3, true, EntryPlanMarket, 100.2},
+		{"long adverse within threshold stays limit when toggle off", DirectionLong, PriceSpec{Type: PriceFixed, Price: 100}, 100.2, 0.3, false, EntryPlanLimit, 100},
+		{"long adverse beyond threshold stays limit", DirectionLong, PriceSpec{Type: PriceFixed, Price: 100}, 102, 0.3, true, EntryPlanLimit, 100},
+		{"long adverse with disabled threshold stays limit", DirectionLong, PriceSpec{Type: PriceFixed, Price: 100}, 100.1, 0, true, EntryPlanLimit, 100},
+		{"long favorable with disabled threshold is market", DirectionLong, PriceSpec{Type: PriceFixed, Price: 100}, 99.9, 0, true, EntryPlanMarket, 99.9},
+
+		// Fixed prices, short: favorable = market above reference.
+		{"short favorable beyond threshold still market", DirectionShort, PriceSpec{Type: PriceFixed, Price: 100}, 101, 0.3, true, EntryPlanMarket, 101},
+		{"short adverse within threshold converts to market", DirectionShort, PriceSpec{Type: PriceFixed, Price: 100}, 99.8, 0.3, true, EntryPlanMarket, 99.8},
+		{"short adverse beyond threshold stays limit", DirectionShort, PriceSpec{Type: PriceFixed, Price: 100}, 98, 0.3, true, EntryPlanLimit, 100},
+
+		// Ranges.
+		{"range inside is market", DirectionLong, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 61800, 1, true, EntryPlanMarket, 61800},
+		{"long below range is favorable market", DirectionLong, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 61000, 1, true, EntryPlanMarket, 61000},
+		{"long above range limits at high edge", DirectionLong, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 63000, 1, true, EntryPlanLimit, 62000},
+		{"short above range is favorable market", DirectionShort, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 63000, 1, true, EntryPlanMarket, 63000},
+		{"short below range limits at low edge", DirectionShort, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 61000, 1, true, EntryPlanLimit, 61500},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			planType, price, err := DecideEntryType(tt.spec, tt.market, tt.threshold, tt.limitWithin)
+			planType, price, err := DecideEntryType(tt.direction, tt.spec, tt.market, tt.threshold, tt.limitWithin)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

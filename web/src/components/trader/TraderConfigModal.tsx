@@ -667,10 +667,61 @@ export function TraderConfigModal({
                   </p>
                 </div>
 
+                {/* Entry price offset thresholds */}
+                <div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-sm text-nofx-text block mb-2">
+                        {t('copytrade.majorOffset', language)}
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={copyConfig.major_price_offset_pct || ''}
+                        onChange={(e) =>
+                          handleCopyConfigChange(
+                            'major_price_offset_pct',
+                            Number(e.target.value)
+                          )
+                        }
+                        className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
+                        placeholder="0.3"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm text-nofx-text block mb-2">
+                        {t('copytrade.altOffset', language)}
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={copyConfig.altcoin_price_offset_pct || ''}
+                        onChange={(e) =>
+                          handleCopyConfigChange(
+                            'altcoin_price_offset_pct',
+                            Number(e.target.value)
+                          )
+                        }
+                        className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
+                        placeholder="1"
+                      />
+                    </div>
+                  </div>
+                  <p className="text-xs text-nofx-text-muted mt-1">
+                    {t('copytrade.offsetHint', language)}
+                  </p>
+                </div>
+
                 {/* Toggles */}
                 <div className="grid grid-cols-2 gap-3">
                   {(
                     [
+                      [
+                        'limit_to_market_within_threshold',
+                        t('copytrade.limitToMarket', language),
+                      ],
                       ['parse_images', t('copytrade.parseImages', language)],
                       [
                         'auto_breakeven_after_tp',

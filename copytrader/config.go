@@ -153,6 +153,9 @@ func (c *CopyTradingConfig) Validate() error {
 	if c.ContextLookbackDays < 0 || c.ContextLookbackDays > 30 {
 		return fmt.Errorf("context_lookback_days must be within 0-30")
 	}
+	if c.MajorPriceOffsetPct < 0 || c.AltcoinPriceOffsetPct < 0 {
+		return fmt.Errorf("price offset thresholds must be >= 0 (0 disables the tolerance)")
+	}
 	if _, err := ParseTPRatios(c.DefaultTPRatios); err != nil {
 		return err
 	}

@@ -136,46 +136,62 @@ const (
 	EntryPlanSkip   EntryPlanType = "SKIP"
 )
 
-// DecideEntryType applies the price-deviation policy:
-//   - Signal wants market (CMP): execute market while |market-ref| <= threshold,
-//     otherwise fall back to a limit at the reference price (protects against
-//     late fills far from the author's intent). With no reference price the
-//     market order goes through as-is.
-//   - Signal gives a limit price: if limitToMarketWithin is on and the market
-//     is already within the threshold of that price, take market immediately
-//     (avoids missing fast moves); otherwise place the limit.
+// DecideEntryType applies the DIRECTION-AWARE price-deviation policy.
 //
-// thresholdPct <= 0 disables deviation checks.
-func DecideEntryType(spec PriceSpec, marketPrice, thresholdPct float64, limitToMarketWithin bool) (EntryPlanType, float64, error) {
+// "Favorable" means the live market is at or better than the author's
+// reference (long: market <= ref, short: market >= ref) — the follower's
+// R:R is then at least as good as the author's.
+//
+//   - Favorable => MARKET immediately. Never gated by the threshold or the
+//     limitToMarketWithin toggle: a limit at the reference would cross the
+//     book and fill as taker anyway, only through the slower limit path with
+//     delayed SL/TP placement. (The caller must still apply the stop-loss
+//     invalidation guard: a market already through the author's stop is a
+//     broken setup, not a bargain.)
+//   - Unfavorable within threshold => MARKET when the author asked for a
+//     market entry, or when limitToMarketWithin is enabled for fixed prices;
+//     otherwise LIMIT at the reference.
+//   - Unfavorable beyond threshold => LIMIT at the reference (never chase).
+//   - thresholdPct <= 0 disables the adverse tolerance entirely: only
+//     favorable prices enter at market, everything unfavorable rests as a
+//     limit at the reference.
+func DecideEntryType(direction Direction, spec PriceSpec, marketPrice, thresholdPct float64, limitToMarketWithin bool) (EntryPlanType, float64, error) {
 	if marketPrice <= 0 {
 		return EntryPlanSkip, 0, fmt.Errorf("market price unavailable")
 	}
-	deviationOK := func(ref float64) bool {
+	favorable := func(ref float64) bool {
+		if direction == DirectionShort {
+			return marketPrice >= ref
+		}
+		return marketPrice <= ref
+	}
+	// Adverse tolerance; a disabled threshold tolerates nothing.
+	withinThreshold := func(ref float64) bool {
 		if thresholdPct <= 0 || ref <= 0 {
-			return true
+			return false
 		}
 		return math.Abs(marketPrice-ref)/ref*100 <= thresholdPct
 	}
 
 	switch spec.Type {
 	case PriceMarket:
-		// Deviation circuit breaker: when the author stated a reference price
-		// alongside a market entry ("CMP ~62000") and the live market has
-		// already run away past the threshold, fall back to a limit at the
-		// reference instead of chasing the move. No reference => plain market.
-		if spec.Price > 0 && !deviationOK(spec.Price) {
-			return EntryPlanLimit, spec.Price, nil
+		// Author asked for market entry. Without a stated reference there is
+		// nothing to compare against: plain market. With one ("CMP ~62000"),
+		// enter while favorable or within tolerance; once the move has run
+		// away in the adverse direction, wait at the reference instead.
+		if spec.Price <= 0 || favorable(spec.Price) || withinThreshold(spec.Price) {
+			return EntryPlanMarket, marketPrice, nil
 		}
-		return EntryPlanMarket, marketPrice, nil
+		return EntryPlanLimit, spec.Price, nil
 	case PriceFixed:
 		if spec.Price <= 0 {
 			return EntryPlanSkip, 0, fmt.Errorf("fixed entry price missing")
 		}
-		if deviationOK(spec.Price) {
-			if limitToMarketWithin {
-				return EntryPlanMarket, marketPrice, nil
-			}
-			return EntryPlanLimit, spec.Price, nil
+		if favorable(spec.Price) {
+			return EntryPlanMarket, marketPrice, nil
+		}
+		if limitToMarketWithin && withinThreshold(spec.Price) {
+			return EntryPlanMarket, marketPrice, nil
 		}
 		return EntryPlanLimit, spec.Price, nil
 	case PriceRange:
@@ -186,15 +202,19 @@ func DecideEntryType(spec PriceSpec, marketPrice, thresholdPct float64, limitToM
 		if low <= 0 {
 			return EntryPlanSkip, 0, fmt.Errorf("entry range invalid")
 		}
-		// V1: market when already inside the range, otherwise limit at the
-		// range edge closest to the market.
 		if marketPrice >= low && marketPrice <= high {
 			return EntryPlanMarket, marketPrice, nil
 		}
-		if marketPrice < low {
-			return EntryPlanLimit, low, nil
+		if direction == DirectionShort {
+			if marketPrice > high { // better than the whole zone
+				return EntryPlanMarket, marketPrice, nil
+			}
+			return EntryPlanLimit, low, nil // adverse: wait at the near edge
 		}
-		return EntryPlanLimit, high, nil
+		if marketPrice < low { // long better than the whole zone
+			return EntryPlanMarket, marketPrice, nil
+		}
+		return EntryPlanLimit, high, nil // adverse: wait at the near edge
 	default:
 		return EntryPlanSkip, 0, fmt.Errorf("unsupported entry price spec %q", spec.Type)
 	}

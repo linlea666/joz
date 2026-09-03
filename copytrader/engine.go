@@ -635,9 +635,10 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 		return SkipNone, fmt.Errorf("market price unavailable for %s", canonical)
 	}
 
-	// Entry decision.
+	// Entry decision (direction-aware: favorable prices enter at market,
+	// adverse ones tolerate the configured threshold, then rest as limits).
 	entrySpec := interp.EntryOrders[0].Price
-	entryType, entryPrice, err := DecideEntryType(entrySpec, marketPrice,
+	entryType, entryPrice, err := DecideEntryType(interp.Direction, entrySpec, marketPrice,
 		e.cfg.PriceOffsetPctFor(canonical), e.cfg.LimitToMarketWithin)
 	if err != nil || entryType == EntryPlanSkip {
 		if err == nil {
@@ -650,6 +651,18 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 	slPrice := resolveHardPrice(interp.StopLossLevels[0].Price, entryPrice)
 	if slPrice <= 0 {
 		return SkipUnsupportedPriceSpec, nil
+	}
+
+	// Setup-invalidation guard: a market that has already traded through the
+	// author's stop is a broken setup, not a favorable entry — entering now
+	// would open a position whose stop triggers immediately.
+	if entryType == EntryPlanMarket {
+		if (interp.Direction == DirectionLong && marketPrice <= slPrice) ||
+			(interp.Direction == DirectionShort && marketPrice >= slPrice) {
+			e.events.Warn(traceID, signalID, msg.MessageID, EvSignalSkipped,
+				fmt.Sprintf("market %.8g already through stop loss %.8g — setup invalidated, not entering", marketPrice, slPrice), nil)
+			return SkipSanityCheck, nil
+		}
 	}
 	if interp.StopLossLevels[0].Conditional != "" {
 		e.events.Warn(traceID, signalID, msg.MessageID, EvSignalClassified,
