@@ -113,6 +113,11 @@ func main() {
 		logger.Warnf("⚠️ Discord poller start failed: %v", err)
 	}
 
+	// Token status monitor: probes quests/@me and emails the configured
+	// recipient when the token goes invalid (and again on recovery).
+	discordMonitor := discord.InitGlobalMonitor(st, discordPoller)
+	discordMonitor.Start()
+
 	// Daily retention cleanup for copy-trading data (events/signals/AI runs/
 	// raw messages/media cache) so the tables never grow without bound.
 	go runCopyTradeRetentionLoop(st)
@@ -178,7 +183,8 @@ func main() {
 	// Stop all traders
 	traderManager.StopAll()
 
-	// Stop Discord poller
+	// Stop Discord poller and token monitor
+	discordMonitor.Stop()
 	discordPoller.Stop()
 	logger.Info("✅ System shut down safely")
 }

@@ -21,11 +21,28 @@ export const discordApi = {
     token?: string
     poll_interval_seconds?: number
     enabled?: boolean
+    alert_email?: string
+    monitor_enabled?: boolean
+    monitor_interval_seconds?: number
   }): Promise<void> {
     const result = await httpClient.post(`${API_BASE}/discord`, params)
     if (!result.success) {
       throw new Error(result.message || 'Failed to save Discord config')
     }
+  },
+
+  async testDiscordAlertEmail(email?: string): Promise<{
+    ok: boolean
+    email?: string
+    error?: string
+  }> {
+    const result = await httpClient.post<{
+      ok: boolean
+      email?: string
+      error?: string
+    }>(`${API_BASE}/discord/test-email`, { email: email ?? '' })
+    if (!result.success) throw new Error('Failed to send test email')
+    return result.data!
   },
 
   async deleteDiscordToken(): Promise<void> {

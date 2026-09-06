@@ -18,8 +18,12 @@ type DiscordConfig struct {
 	Token               crypto.EncryptedString `gorm:"column:token;default:''"`
 	PollIntervalSeconds int                    `gorm:"column:poll_interval_seconds;default:6"`
 	Enabled             bool                   `gorm:"column:enabled;default:true"`
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	// Token status monitoring (email alert when the token goes 401/403).
+	AlertEmail             string `gorm:"column:alert_email;default:''"`
+	MonitorEnabled         bool   `gorm:"column:monitor_enabled;default:true"`
+	MonitorIntervalSeconds int    `gorm:"column:monitor_interval_seconds;default:60"`
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
 }
 
 func (DiscordConfig) TableName() string { return "discord_configs" }
@@ -63,9 +67,21 @@ func (s *DiscordConfigStore) Get() (*DiscordConfig, error) {
 	return &cfg, nil
 }
 
-// Save upserts the config. An empty token keeps the existing one
-// (same convention as AI model API keys).
-func (s *DiscordConfigStore) Save(token string, pollIntervalSeconds int, enabled bool) error {
+// DiscordConfigUpdate carries a partial update for Save.
+// Conventions: empty Token keeps the stored one (same as AI model API keys);
+// numeric fields <= 0 keep the stored value (or fall back to the default);
+// nil pointer fields keep the stored value.
+type DiscordConfigUpdate struct {
+	Token                  string
+	PollIntervalSeconds    int
+	Enabled                *bool
+	AlertEmail             *string
+	MonitorEnabled         *bool
+	MonitorIntervalSeconds int
+}
+
+// Save upserts the config, applying only the fields present in the update.
+func (s *DiscordConfigStore) Save(u DiscordConfigUpdate) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var cfg DiscordConfig
@@ -73,16 +89,35 @@ func (s *DiscordConfigStore) Save(token string, pollIntervalSeconds int, enabled
 	if result.Error != nil && !errors.Is(result.Error, gorm.ErrRecordNotFound) {
 		return result.Error
 	}
-	cfg.ID = 1
-	if token != "" {
-		cfg.Token = crypto.EncryptedString(token)
+	isNew := errors.Is(result.Error, gorm.ErrRecordNotFound)
+	if isNew {
+		// First-time defaults (gorm zero values would disable everything).
+		cfg.Enabled = true
+		cfg.MonitorEnabled = true
 	}
-	if pollIntervalSeconds > 0 {
-		cfg.PollIntervalSeconds = pollIntervalSeconds
+	cfg.ID = 1
+	if u.Token != "" {
+		cfg.Token = crypto.EncryptedString(u.Token)
+	}
+	if u.PollIntervalSeconds > 0 {
+		cfg.PollIntervalSeconds = u.PollIntervalSeconds
 	} else if cfg.PollIntervalSeconds <= 0 {
 		cfg.PollIntervalSeconds = 6
 	}
-	cfg.Enabled = enabled
+	if u.Enabled != nil {
+		cfg.Enabled = *u.Enabled
+	}
+	if u.AlertEmail != nil {
+		cfg.AlertEmail = *u.AlertEmail
+	}
+	if u.MonitorEnabled != nil {
+		cfg.MonitorEnabled = *u.MonitorEnabled
+	}
+	if u.MonitorIntervalSeconds > 0 {
+		cfg.MonitorIntervalSeconds = u.MonitorIntervalSeconds
+	} else if cfg.MonitorIntervalSeconds <= 0 {
+		cfg.MonitorIntervalSeconds = 60
+	}
 	return s.db.Save(&cfg).Error
 }
 

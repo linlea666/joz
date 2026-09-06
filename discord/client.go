@@ -157,6 +157,14 @@ func (c *Client) GetCurrentUser() (*User, error) {
 	return &u, nil
 }
 
+// CheckQuests probes token validity via `GET /quests/@me` (the endpoint the
+// official client hits, so it looks like normal user traffic). Only the HTTP
+// status matters: nil = token valid, StatusError 401/403 = invalid/logged-out
+// (detect with IsAuthError), anything else = transient failure.
+func (c *Client) CheckQuests() error {
+	return c.do(http.MethodGet, "/quests/@me", nil)
+}
+
 // GetMessages fetches the most recent messages of a channel (newest first).
 func (c *Client) GetMessages(channelID string, limit int) ([]*Message, error) {
 	if limit <= 0 || limit > 100 {

@@ -329,12 +329,15 @@ Both fields are required. After saving, the user must send /start in Telegram to
 
 			// Discord copy-trading configuration (global token shared by all copy-trading traders)
 			s.routeWithSchema(protected, "GET", "/discord", "Get global Discord copy-trading configuration",
-				`Returns: {"configured":<bool>,"token_masked":"<masked>","poll_interval_seconds":<int>,"enabled":<bool>,"channels":[...poller status...]}`,
+				`Returns: {"configured":<bool>,"token_masked":"<masked>","poll_interval_seconds":<int>,"enabled":<bool>,"alert_email":"<string>","monitor_enabled":<bool>,"monitor_interval_seconds":<int>,"smtp_configured":<bool>,"monitor_status":{...},"channels":[...poller status...]}`,
 				s.handleGetDiscordConfig)
 			s.routeWithSchema(protected, "POST", "/discord", "Set global Discord token and polling options",
-				`Body: {"token":"<Discord token; empty keeps the stored one>","poll_interval_seconds":<3-300, optional>,"enabled":<bool, optional>}
-The token is validated against the Discord API before saving and stored encrypted.`,
+				`Body: {"token":"<Discord token; empty keeps the stored one>","poll_interval_seconds":<3-300, optional>,"enabled":<bool, optional>,"alert_email":"<optional>","monitor_enabled":<bool, optional>,"monitor_interval_seconds":<30-600, optional>}
+The token is validated against the Discord API before saving and stored encrypted. Monitor fields control the token-status email alert.`,
 				s.handleUpdateDiscordConfig)
+			s.routeWithSchema(protected, "POST", "/discord/test-email", "Send a test alert email",
+				`Body: {"email":"<optional; omit to use the saved alert email>"}. Returns {"ok":<bool>,"error":"<string>"}. Verifies the SMTP setup used for Discord token-invalid alerts.`,
+				s.handleTestDiscordAlertEmail)
 			s.route(protected, "DELETE", "/discord/token", "Clear the stored Discord token", s.handleDeleteDiscordToken)
 			s.routeWithSchema(protected, "POST", "/discord/test", "Test Discord token validity",
 				`Body: {"token":"<optional; omit to test the stored token>"}. Returns {"ok":<bool>,"username":"<string>"}`,

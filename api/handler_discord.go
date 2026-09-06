@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +12,7 @@ import (
 	"nofx/copytrader"
 	"nofx/discord"
 	"nofx/logger"
+	"nofx/notify"
 	"nofx/store"
 )
 
@@ -33,19 +35,33 @@ func (s *Server) handleGetDiscordConfig(c *gin.Context) {
 		return
 	}
 	resp := gin.H{
-		"configured":            false,
-		"token_masked":          "",
-		"poll_interval_seconds": 6,
-		"enabled":               true,
+		"configured":               false,
+		"token_masked":             "",
+		"poll_interval_seconds":    6,
+		"enabled":                  true,
+		"alert_email":              "",
+		"monitor_enabled":          true,
+		"monitor_interval_seconds": 60,
+		"smtp_configured":          notify.EmailConfigured(),
 	}
 	if cfg != nil {
 		resp["configured"] = cfg.Token != ""
 		resp["token_masked"] = maskToken(string(cfg.Token))
 		resp["poll_interval_seconds"] = cfg.PollIntervalSeconds
 		resp["enabled"] = cfg.Enabled
+		resp["alert_email"] = cfg.AlertEmail
+		resp["monitor_enabled"] = cfg.MonitorEnabled
+		monitorInterval := cfg.MonitorIntervalSeconds
+		if monitorInterval <= 0 {
+			monitorInterval = 60
+		}
+		resp["monitor_interval_seconds"] = monitorInterval
 	}
 	if poller := discord.Global(); poller != nil {
 		resp["channels"] = poller.Status()
+	}
+	if monitor := discord.GlobalMonitor(); monitor != nil {
+		resp["monitor_status"] = monitor.Status()
 	}
 	c.JSON(http.StatusOK, resp)
 }
@@ -55,25 +71,32 @@ func (s *Server) handleGetDiscordConfig(c *gin.Context) {
 // re-entering the secret).
 func (s *Server) handleUpdateDiscordConfig(c *gin.Context) {
 	var req struct {
-		Token               string `json:"token"`
-		PollIntervalSeconds int    `json:"poll_interval_seconds"`
-		Enabled             *bool  `json:"enabled"`
+		Token                  string  `json:"token"`
+		PollIntervalSeconds    int     `json:"poll_interval_seconds"`
+		Enabled                *bool   `json:"enabled"`
+		AlertEmail             *string `json:"alert_email"`
+		MonitorEnabled         *bool   `json:"monitor_enabled"`
+		MonitorIntervalSeconds int     `json:"monitor_interval_seconds"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
-	// enabled omitted => preserve the stored value (never silently re-enable a
-	// deliberately disabled poller). First-time setup defaults to enabled.
-	enabled := true
-	if req.Enabled != nil {
-		enabled = *req.Enabled
-	} else if existing, gerr := s.store.DiscordConfig().Get(); gerr == nil && existing != nil {
-		enabled = existing.Enabled
-	}
 	if req.PollIntervalSeconds != 0 && (req.PollIntervalSeconds < 3 || req.PollIntervalSeconds > 300) {
 		SafeBadRequest(c, "poll_interval_seconds must be between 3 and 300")
 		return
+	}
+	if req.MonitorIntervalSeconds != 0 && (req.MonitorIntervalSeconds < 30 || req.MonitorIntervalSeconds > 600) {
+		SafeBadRequest(c, "monitor_interval_seconds must be between 30 and 600")
+		return
+	}
+	if req.AlertEmail != nil {
+		email := strings.TrimSpace(*req.AlertEmail)
+		if email != "" && (!strings.Contains(email, "@") || strings.ContainsAny(email, " \r\n")) {
+			SafeBadRequest(c, "alert_email is not a valid email address")
+			return
+		}
+		req.AlertEmail = &email
 	}
 
 	// Validate a newly provided token before persisting it.
@@ -85,7 +108,16 @@ func (s *Server) handleUpdateDiscordConfig(c *gin.Context) {
 		}
 	}
 
-	if err := s.store.DiscordConfig().Save(req.Token, req.PollIntervalSeconds, enabled); err != nil {
+	// Omitted fields (nil / zero) preserve stored values — never silently
+	// re-enable a deliberately disabled poller or monitor.
+	if err := s.store.DiscordConfig().Save(store.DiscordConfigUpdate{
+		Token:                  req.Token,
+		PollIntervalSeconds:    req.PollIntervalSeconds,
+		Enabled:                req.Enabled,
+		AlertEmail:             req.AlertEmail,
+		MonitorEnabled:         req.MonitorEnabled,
+		MonitorIntervalSeconds: req.MonitorIntervalSeconds,
+	}); err != nil {
 		SafeInternalError(c, "Failed to save Discord configuration", err)
 		return
 	}
@@ -94,8 +126,41 @@ func (s *Server) handleUpdateDiscordConfig(c *gin.Context) {
 			logger.Warnf("Discord poller reload failed: %v", err)
 		}
 	}
-	logger.Infof("✓ Discord configuration updated (enabled=%v)", enabled)
+	logger.Infof("✓ Discord configuration updated")
 	c.JSON(http.StatusOK, gin.H{"message": "Discord configuration saved"})
+}
+
+// handleTestDiscordAlertEmail sends a test email so the user can verify the
+// SMTP setup and recipient before relying on token-invalid alerts.
+func (s *Server) handleTestDiscordAlertEmail(c *gin.Context) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	email := strings.TrimSpace(req.Email)
+	if email == "" {
+		cfg, err := s.store.DiscordConfig().Get()
+		if err != nil || cfg == nil || cfg.AlertEmail == "" {
+			SafeBadRequest(c, "No alert email configured")
+			return
+		}
+		email = cfg.AlertEmail
+	}
+	if !notify.EmailConfigured() {
+		c.JSON(http.StatusOK, gin.H{"ok": false, "error": "SMTP not configured on the server (SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS)"})
+		return
+	}
+	body := "这是一封来自 NOFX 的测试邮件。\n\n" +
+		"收到本邮件说明 Discord Token 状态监控的邮件通知链路工作正常：\n" +
+		"当 Discord Token 失效或退出登录时，告警会发送到本邮箱。\n\n" +
+		"发送时间：" + time.Now().Format("2006-01-02 15:04:05 MST")
+	if err := notify.SendEmail(email, "【NOFX 测试】邮件通知配置成功", body); err != nil {
+		logger.Warnf("[DiscordMonitor] test email to %s failed: %v", email, err)
+		c.JSON(http.StatusOK, gin.H{"ok": false, "error": SanitizeError(err, "email send failed")})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "email": email})
 }
 
 // handleDeleteDiscordToken clears the stored token and stops polling.

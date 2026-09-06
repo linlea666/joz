@@ -8,11 +8,25 @@ export interface DiscordChannelStatus {
   paused_until?: string
 }
 
+export interface DiscordMonitorStatus {
+  status: 'unknown' | 'ok' | 'invalid'
+  last_checked_at?: string
+  last_error?: string
+  invalid_since?: string
+  last_alert_at?: string
+  alerts_sent: number
+}
+
 export interface DiscordConfig {
   configured: boolean
   token_masked: string
   poll_interval_seconds: number
   enabled: boolean
+  alert_email: string
+  monitor_enabled: boolean
+  monitor_interval_seconds: number
+  smtp_configured: boolean
+  monitor_status?: DiscordMonitorStatus
   channels?: DiscordChannelStatus[]
 }
 

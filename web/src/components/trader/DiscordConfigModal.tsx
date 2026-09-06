@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { MessageSquare, Trash2, PlugZap, RefreshCw } from 'lucide-react'
+import { MessageSquare, Trash2, PlugZap, RefreshCw, Mail } from 'lucide-react'
 import { toast } from 'sonner'
 import { api } from '../../lib/api'
 import type { DiscordConfig } from '../../types'
@@ -23,6 +23,11 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
   const [testChannelId, setTestChannelId] = useState('')
   const [isTestingChannel, setIsTestingChannel] = useState(false)
   const [channelPreview, setChannelPreview] = useState<string[]>([])
+  // Token status monitoring (email alerts)
+  const [monitorEnabled, setMonitorEnabled] = useState(true)
+  const [monitorInterval, setMonitorInterval] = useState(60)
+  const [alertEmail, setAlertEmail] = useState('')
+  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false)
 
   const loadConfig = async () => {
     try {
@@ -30,6 +35,9 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
       setConfig(cfg)
       setPollInterval(cfg.poll_interval_seconds || 6)
       setEnabled(cfg.enabled)
+      setMonitorEnabled(cfg.monitor_enabled ?? true)
+      setMonitorInterval(cfg.monitor_interval_seconds || 60)
+      setAlertEmail(cfg.alert_email || '')
     } catch {
       // First load may 404 before any config exists — keep defaults
     } finally {
@@ -49,6 +57,9 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
         token: token.trim(),
         poll_interval_seconds: pollInterval,
         enabled,
+        alert_email: alertEmail.trim(),
+        monitor_enabled: monitorEnabled,
+        monitor_interval_seconds: monitorInterval,
       })
       toast.success(t('discord.saved', language))
       setToken('')
@@ -93,6 +104,25 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
       toast.error(t('discord.clearFailed', language))
     } finally {
       setIsClearing(false)
+    }
+  }
+
+  const handleTestEmail = async () => {
+    if (isSendingTestEmail) return
+    const email = alertEmail.trim()
+    if (!email) return
+    setIsSendingTestEmail(true)
+    try {
+      const res = await api.testDiscordAlertEmail(email)
+      if (res.ok) {
+        toast.success(`${t('discord.testEmailOk', language)} (${res.email})`)
+      } else {
+        toast.error(`${t('discord.testEmailFailed', language)}: ${res.error || ''}`)
+      }
+    } catch {
+      toast.error(t('discord.testEmailFailed', language))
+    } finally {
+      setIsSendingTestEmail(false)
     }
   }
 
@@ -251,6 +281,143 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                       {t('discord.off', language)}
                     </button>
                   </div>
+                </div>
+              </div>
+
+              {/* Token status monitor (email alerts) */}
+              <div className="space-y-3 pt-3" style={{ borderTop: '1px solid rgba(26,24,19,0.1)' }}>
+                <div>
+                  <div className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                    {t('discord.monitorTitle', language)}
+                  </div>
+                  <div className="text-xs mt-1" style={{ color: '#8A8478' }}>
+                    {t('discord.monitorHint', language)}
+                  </div>
+                </div>
+
+                {/* Current token status */}
+                {config?.monitor_status && (
+                  <div
+                    className="p-3 rounded-xl flex items-center gap-3"
+                    style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)' }}
+                  >
+                    <div
+                      className="w-2 h-2 rounded-full flex-shrink-0"
+                      style={{
+                        background:
+                          config.monitor_status.status === 'ok'
+                            ? '#2E8B57'
+                            : config.monitor_status.status === 'invalid'
+                              ? '#D6433A'
+                              : '#8A8478',
+                      }}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-xs font-mono" style={{ color: '#8A8478' }}>
+                        {t('discord.tokenStatus', language)}
+                      </div>
+                      <div className="text-sm" style={{ color: '#1A1813' }}>
+                        {config.monitor_status.status === 'ok'
+                          ? t('discord.statusOk', language)
+                          : config.monitor_status.status === 'invalid'
+                            ? t('discord.statusInvalid', language)
+                            : t('discord.statusUnknown', language)}
+                        {config.monitor_status.last_checked_at && (
+                          <span className="text-xs ml-2" style={{ color: '#8A8478' }}>
+                            {t('discord.lastChecked', language)}:{' '}
+                            {new Date(config.monitor_status.last_checked_at).toLocaleString()}
+                          </span>
+                        )}
+                      </div>
+                      {config.monitor_status.status === 'invalid' && config.monitor_status.last_error && (
+                        <div className="text-xs font-mono truncate mt-0.5" style={{ color: '#D6433A' }}>
+                          {config.monitor_status.last_error}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* Monitor toggle + interval */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                      {t('discord.monitorEnable', language)}
+                    </label>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setMonitorEnabled(true)}
+                        className="flex-1 px-3 py-3 rounded-xl text-sm font-semibold"
+                        style={{
+                          background: monitorEnabled ? '#2E8B57' : '#E8E2D5',
+                          color: monitorEnabled ? '#fff' : '#8A8478',
+                        }}
+                      >
+                        {t('discord.on', language)}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setMonitorEnabled(false)}
+                        className="flex-1 px-3 py-3 rounded-xl text-sm font-semibold"
+                        style={{
+                          background: !monitorEnabled ? '#D6433A' : '#E8E2D5',
+                          color: !monitorEnabled ? '#fff' : '#8A8478',
+                        }}
+                      >
+                        {t('discord.off', language)}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                      {t('discord.monitorInterval', language)}
+                    </label>
+                    <input
+                      type="number"
+                      min={30}
+                      max={600}
+                      value={monitorInterval}
+                      onChange={(e) => {
+                        const v = Number(e.target.value)
+                        setMonitorInterval(Number.isFinite(v) ? v : 60)
+                      }}
+                      className="w-full px-4 py-3 rounded-xl text-sm"
+                      style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)', color: '#1A1813' }}
+                    />
+                  </div>
+                </div>
+
+                {/* Alert email + test send */}
+                <div className="space-y-2">
+                  <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                    {t('discord.alertEmail', language)}
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="email"
+                      value={alertEmail}
+                      onChange={(e) => setAlertEmail(e.target.value)}
+                      placeholder={t('discord.alertEmailPlaceholder', language)}
+                      className="flex-1 px-4 py-2.5 rounded-xl text-sm"
+                      style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)', color: '#1A1813' }}
+                    />
+                    <button
+                      onClick={handleTestEmail}
+                      disabled={isSendingTestEmail || !alertEmail.trim()}
+                      className="px-4 py-2.5 rounded-xl text-sm font-bold disabled:opacity-50 flex items-center gap-1.5"
+                      style={{ background: '#2E8B57', color: '#fff' }}
+                      title={t('discord.sendTestEmail', language)}
+                    >
+                      {isSendingTestEmail ? '...' : <Mail className="w-4 h-4" />}
+                      {!isSendingTestEmail && t('discord.sendTestEmail', language)}
+                    </button>
+                  </div>
+                  {config && !config.smtp_configured && (
+                    <div className="text-xs" style={{ color: '#D6433A' }}>
+                      {t('discord.smtpNotConfigured', language)}
+                    </div>
+                  )}
                 </div>
               </div>
 
