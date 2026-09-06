@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"nofx/store"
+	"nofx/trader/types"
 )
 
 const reconcileInterval = 45 * time.Second
@@ -72,6 +73,16 @@ func (e *Engine) reconcileEntryPending(ctx *store.CopyTradeContext) {
 				e.handleEntryFill(traceID, ctx, status)
 				return
 			case "CANCELED", "CANCELLED", "EXPIRED", "REJECTED":
+				// A cancelled order can still carry partial fills (manual
+				// cancel or timeout cancel racing a fill). That quantity is
+				// a LIVE position — it must get its protections, not be
+				// orphaned by marking the context cancelled.
+				if q := executedQtyOf(status); q > 0 {
+					e.events.Warn(traceID, "", "", EvReconcile,
+						fmt.Sprintf("%s entry order %s after partial fill qty=%.8g — opening with protections", ctx.Symbol, st, q), nil)
+					e.handleEntryFill(traceID, ctx, status)
+					return
+				}
 				e.exec.markContext(ctx, StateCancelled, map[string]interface{}{"last_action": "ENTRY_" + st})
 				e.events.Info(traceID, "", "", EvTradeCancelled,
 					fmt.Sprintf("%s entry order %s on exchange", ctx.Symbol, st), nil)
@@ -91,11 +102,37 @@ func (e *Engine) reconcileEntryPending(ctx *store.CopyTradeContext) {
 					fmt.Sprintf("entry timeout cancel failed, retrying next cycle: %v", err), nil)
 				return
 			}
+			// The cancel may have raced a partial fill; re-check before
+			// declaring the entry dead. If the status read fails, retry the
+			// whole path next cycle rather than risk orphaning a fill (the
+			// CANCELED branch above will then settle it).
+			status, err := e.exec.ex.GetOrderStatus(ctx.Symbol, ctx.EntryOrderID)
+			if err != nil {
+				e.events.Warn(traceID, "", "", EvExecutionError,
+					fmt.Sprintf("post-cancel status check failed, retrying next cycle: %v", err), nil)
+				return
+			}
+			if q := executedQtyOf(status); q > 0 {
+				e.events.Warn(traceID, "", "", EvReconcile,
+					fmt.Sprintf("%s entry partially filled qty=%.8g before timeout cancel — opening with protections", ctx.Symbol, q), nil)
+				e.handleEntryFill(traceID, ctx, status)
+				return
+			}
 		}
 		e.exec.markContext(ctx, StateExpired, map[string]interface{}{"last_action": "ENTRY_TIMEOUT"})
 		e.events.Info(traceID, "", "", EvTradeExpired,
 			fmt.Sprintf("%s entry not filled within %dm, cancelled", ctx.Symbol, e.cfg.EntryTimeoutMinutes), nil)
 	}
+}
+
+// executedQtyOf extracts the filled quantity from a GetOrderStatus result,
+// sanitized like confirmFill's path: contract-denominated exchanges convert
+// fills with contracts*ctVal, whose float artifacts must not be persisted.
+func executedQtyOf(status map[string]interface{}) float64 {
+	if q, ok := status["executedQty"].(float64); ok && q > 0 {
+		return types.SanitizeBaseQuantity(q)
+	}
+	return 0
 }
 
 // handleEntryFill promotes an ENTRY_PENDING context to OPEN and places
@@ -106,7 +143,7 @@ func (e *Engine) handleEntryFill(traceID string, ctx *store.CopyTradeContext, st
 	if p, ok := status["avgPrice"].(float64); ok && p > 0 {
 		avgPrice = p
 	}
-	if q, ok := status["executedQty"].(float64); ok && q > 0 {
+	if q := executedQtyOf(status); q > 0 {
 		filledQty = q
 	}
 	now := time.Now().UTC()
