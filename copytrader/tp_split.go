@@ -3,9 +3,49 @@ package copytrader
 import (
 	"fmt"
 	"math"
+	"sort"
 
 	"nofx/trader/types"
 )
+
+// MaxTPLevels is the executor's take-profit ladder capacity (V1).
+const MaxTPLevels = 3
+
+// CapTPLadder orders resolved take-profit levels nearest-first for the trade
+// direction (long: ascending price, short: descending) and keeps at most
+// MaxTPLevels of them. Authors usually list targets nearest-first already;
+// sorting makes the cap deterministic when they don't. A signal with more
+// levels than the executor supports keeps its nearest, most-likely-to-fill
+// targets — the far ones are dropped (returned for event logging) instead of
+// rejecting the whole trade. A dropped level's explicit ratio simply stays
+// unallocated, which AllocateTPRatios treats as an intentional runner.
+//
+// prices and levels are aligned pairs (prices[i] resolved from levels[i]).
+func CapTPLadder(prices []float64, levels []TPLevel, direction Direction) (keptPrices []float64, keptLevels []TPLevel, droppedPrices []float64) {
+	n := len(prices)
+	if n == 0 {
+		return nil, nil, nil
+	}
+	idx := make([]int, n)
+	for i := range idx {
+		idx[i] = i
+	}
+	sort.SliceStable(idx, func(a, b int) bool {
+		if direction == DirectionShort {
+			return prices[idx[a]] > prices[idx[b]]
+		}
+		return prices[idx[a]] < prices[idx[b]]
+	})
+	for rank, i := range idx {
+		if rank < MaxTPLevels {
+			keptPrices = append(keptPrices, prices[i])
+			keptLevels = append(keptLevels, levels[i])
+		} else {
+			droppedPrices = append(droppedPrices, prices[i])
+		}
+	}
+	return keptPrices, keptLevels, droppedPrices
+}
 
 // AllocateTPRatios decides the position percentage per TP level.
 //

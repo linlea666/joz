@@ -207,6 +207,19 @@ func TestValidateInterpretationOpen(t *testing.T) {
 		t.Error("long TP below entry must error")
 	}
 
+	// More than 3 TP levels must NOT be rejected: the router caps the ladder
+	// to the nearest MaxTPLevels (the GKS 4-TP incident rejected the trade).
+	manyTP := base()
+	manyTP.TakeProfitLevels = []TPLevel{
+		{Price: PriceSpec{Type: PriceFixed, Price: 77500}},
+		{Price: PriceSpec{Type: PriceFixed, Price: 77700}},
+		{Price: PriceSpec{Type: PriceFixed, Price: 77900}},
+		{Price: PriceSpec{Type: PriceFixed, Price: 78100}},
+	}
+	if skip, err := ValidateInterpretation(manyTP, 77000); skip != SkipNone || err != nil {
+		t.Errorf("4-TP open must pass validation: skip=%s err=%v", skip, err)
+	}
+
 	// OCR digit error (entry 7700 vs market 77000) => sanity skip
 	ocr := base()
 	ocr.EntryOrders = []EntryOrder{{OrderType: EntryLimit, Price: PriceSpec{Type: PriceFixed, Price: 7700}}}

@@ -39,6 +39,84 @@ func TestAllocateTPRatios(t *testing.T) {
 	}
 }
 
+func TestCapTPLadder(t *testing.T) {
+	tests := []struct {
+		name        string
+		prices      []float64
+		direction   Direction
+		wantKept    []float64
+		wantDropped []float64
+	}{
+		// The GKS incident: ETH long with 4 TPs — keep the 3 nearest,
+		// drop the far runner instead of rejecting the trade.
+		{"long 4 TPs drops farthest", []float64{2418, 2448, 2488, 2888}, DirectionLong,
+			[]float64{2418, 2448, 2488}, []float64{2888}},
+		{"short 4 TPs drops farthest (lowest)", []float64{2492, 2458, 2388, 2200}, DirectionShort,
+			[]float64{2492, 2458, 2388}, []float64{2200}},
+		{"unsorted input gets nearest-first order", []float64{2888, 2418, 2488, 2448}, DirectionLong,
+			[]float64{2418, 2448, 2488}, []float64{2888}},
+		{"three levels unchanged", []float64{2418, 2448, 2488}, DirectionLong,
+			[]float64{2418, 2448, 2488}, nil},
+		{"single level unchanged", []float64{2418}, DirectionShort,
+			[]float64{2418}, nil},
+		{"five TPs drops two farthest", []float64{10, 20, 30, 40, 50}, DirectionLong,
+			[]float64{10, 20, 30}, []float64{40, 50}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			levels := make([]TPLevel, len(tt.prices))
+			for i := range levels {
+				levels[i] = TPLevel{Ratio: ratio(float64(i + 1))} // marker to verify pairing
+			}
+			kept, keptLevels, dropped := CapTPLadder(tt.prices, levels, tt.direction)
+			if !floatSliceEq(kept, tt.wantKept) {
+				t.Fatalf("kept = %v, want %v", kept, tt.wantKept)
+			}
+			if !floatSliceEq(dropped, tt.wantDropped) {
+				t.Fatalf("dropped = %v, want %v", dropped, tt.wantDropped)
+			}
+			// Levels must stay paired with their prices after sorting/capping.
+			if len(keptLevels) != len(kept) {
+				t.Fatalf("kept levels len %d != kept prices len %d", len(keptLevels), len(kept))
+			}
+			for i, p := range kept {
+				orig := indexOfFloat(tt.prices, p)
+				if orig < 0 || keptLevels[i].Ratio == nil || *keptLevels[i].Ratio != float64(orig+1) {
+					t.Fatalf("level pairing broken at %d (price %v)", i, p)
+				}
+			}
+		})
+	}
+}
+
+func TestCapTPLadderEmpty(t *testing.T) {
+	kept, levels, dropped := CapTPLadder(nil, nil, DirectionLong)
+	if kept != nil || levels != nil || dropped != nil {
+		t.Fatalf("empty input must return nils, got %v %v %v", kept, levels, dropped)
+	}
+}
+
+func floatSliceEq(a, b []float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if math.Abs(a[i]-b[i]) > 1e-9 {
+			return false
+		}
+	}
+	return true
+}
+
+func indexOfFloat(s []float64, v float64) int {
+	for i, x := range s {
+		if x == v {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestAllocateTPRatiosErrors(t *testing.T) {
 	if _, err := AllocateTPRatios([]TPLevel{{}, {}, {}, {}}, nil); err == nil {
 		t.Error("expected error for >3 levels")

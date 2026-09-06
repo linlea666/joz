@@ -668,7 +668,12 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 		e.events.Warn(traceID, signalID, msg.MessageID, EvSignalClassified,
 			"author uses a conditional stop ("+interp.StopLossLevels[0].Conditional+"); executing the hard price", nil)
 	}
+	// Resolve TP levels keeping prices paired with their level structs (a
+	// skipped middle spec must not misalign explicit ratios), then cap the
+	// ladder at the executor's capacity: the nearest targets are kept, the
+	// far ones dropped — never reject the whole trade over extra TP levels.
 	var tpPrices []float64
+	var tpLevels []TPLevel
 	for _, tp := range interp.TakeProfitLevels {
 		p := resolveHardPrice(tp.Price, entryPrice)
 		if p <= 0 {
@@ -677,9 +682,17 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 			continue
 		}
 		tpPrices = append(tpPrices, p)
+		tpLevels = append(tpLevels, tp)
+	}
+	var droppedTPs []float64
+	tpPrices, tpLevels, droppedTPs = CapTPLadder(tpPrices, tpLevels, interp.Direction)
+	if len(droppedTPs) > 0 {
+		e.events.Warn(traceID, signalID, msg.MessageID, EvSignalClassified,
+			fmt.Sprintf("signal has %d TP levels, keeping the %d nearest and dropping %v (executor cap)",
+				len(tpPrices)+len(droppedTPs), MaxTPLevels, droppedTPs), nil)
 	}
 	defaults, _ := ParseTPRatios(e.cfg.DefaultTPRatios)
-	tpRatios, err := AllocateTPRatios(interp.TakeProfitLevels[:len(tpPrices)], defaults)
+	tpRatios, err := AllocateTPRatios(tpLevels, defaults)
 	if err != nil {
 		return SkipNone, fmt.Errorf("TP allocation failed: %w", err)
 	}
@@ -853,16 +866,25 @@ func (e *Engine) routeUpdateTP(traceID, signalID string, msg *store.DiscordMessa
 	}
 	entryRef := ctx.AvgFillPrice
 	var prices []float64
+	var levels []TPLevel
 	for _, tp := range interp.TakeProfitLevels {
 		if p := resolveHardPrice(tp.Price, entryRef); p > 0 {
 			prices = append(prices, p)
+			levels = append(levels, tp)
 		}
 	}
 	if len(prices) == 0 {
 		return SkipUnsupportedPriceSpec, nil
 	}
+	var droppedTPs []float64
+	prices, levels, droppedTPs = CapTPLadder(prices, levels, Direction(ctx.Direction))
+	if len(droppedTPs) > 0 {
+		e.events.Warn(traceID, signalID, msg.MessageID, EvSignalClassified,
+			fmt.Sprintf("TP update has %d levels, keeping the %d nearest and dropping %v (executor cap)",
+				len(prices)+len(droppedTPs), MaxTPLevels, droppedTPs), nil)
+	}
 	defaults, _ := ParseTPRatios(e.cfg.DefaultTPRatios)
-	ratios, err := AllocateTPRatios(interp.TakeProfitLevels[:len(prices)], defaults)
+	ratios, err := AllocateTPRatios(levels, defaults)
 	if err != nil {
 		return SkipNone, err
 	}

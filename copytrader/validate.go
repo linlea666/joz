@@ -74,11 +74,10 @@ func validateOpen(si *SourceInterpretation, marketPrice float64) (SkipReason, er
 		return SkipNone, fmt.Errorf("OPEN without entry orders")
 	}
 	// Require SL: live copy trading never opens unprotected positions.
+	// (No cap on TP level count here: the router keeps the nearest
+	// MaxTPLevels and drops the rest — see CapTPLadder.)
 	if len(si.StopLossLevels) == 0 {
 		return SkipRiskRejected, nil
-	}
-	if len(si.TakeProfitLevels) > 3 {
-		return SkipNone, fmt.Errorf("more than 3 TP levels not supported in V1")
 	}
 
 	entryRef := entryReferencePrice(si.EntryOrders[0].Price, marketPrice)
@@ -144,9 +143,8 @@ func validateSLSpecs(si *SourceInterpretation, marketPrice float64) (SkipReason,
 }
 
 func validateTPSpecs(si *SourceInterpretation, marketPrice float64) (SkipReason, error) {
-	if len(si.TakeProfitLevels) > 3 {
-		return SkipNone, fmt.Errorf("more than 3 TP levels not supported in V1")
-	}
+	// No cap on TP level count: the router keeps the nearest MaxTPLevels
+	// and drops the rest (see CapTPLadder).
 	for _, tp := range si.TakeProfitLevels {
 		switch tp.Price.Type {
 		case PriceFixed:
