@@ -37,6 +37,7 @@ var (
 		"upstream_empty_output",
 		"status 502", // Bad Gateway
 		"status 503", // Service Unavailable
+		"status 504", // Gateway Timeout
 		"status 520", // Cloudflare origin error
 		"status 524", // Cloudflare timeout
 	}
