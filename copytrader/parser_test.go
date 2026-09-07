@@ -119,6 +119,7 @@ func TestParseInterpretation_Rejections(t *testing.T) {
 		{"unknown classification", `{"classification": "MAYBE"}`, "unknown classification"},
 		{"signal without action", `{"classification": "SIGNAL"}`, "SIGNAL without action"},
 		{"bad close ratio", `{"classification": "SIGNAL", "action": "REDUCE", "close_ratio": 150}`, "close_ratio"},
+		{"negative close ratio", `{"classification": "SIGNAL", "action": "REDUCE", "close_ratio": -5}`, "close_ratio"},
 		{"fixed without price", `{"classification": "SIGNAL", "action": "OPEN",
 			"entry_orders": [{"order_type": "limit", "price": {"type": "fixed"}}]}`, "FIXED price"},
 	}
@@ -132,6 +133,29 @@ func TestParseInterpretation_Rejections(t *testing.T) {
 				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+// Models sometimes emit 0 for "ratio not specified" (seen live in the
+// PUMPFUN incident: {"action": "CLOSE", "close_ratio": 0}). Zero has no
+// trade meaning, so the parser must degrade it to nil instead of rejecting
+// the whole interpretation.
+func TestParseInterpretation_ZeroRatiosMeanUnspecified(t *testing.T) {
+	raw := `{"classification": "SIGNAL", "action": "CLOSE", "symbol": "PUMPFUN",
+		"close_ratio": 0,
+		"take_profit_levels": [{"price": {"type": "fixed", "price": 0.004}, "ratio": 0}]}`
+	interp, err := ParseInterpretation(raw)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if interp.CloseRatio != nil {
+		t.Errorf("close_ratio 0 should degrade to nil, got %v", *interp.CloseRatio)
+	}
+	if len(interp.TakeProfitLevels) != 1 {
+		t.Fatalf("expected 1 TP level, got %d", len(interp.TakeProfitLevels))
+	}
+	if interp.TakeProfitLevels[0].Ratio != nil {
+		t.Errorf("TP ratio 0 should degrade to nil, got %v", *interp.TakeProfitLevels[0].Ratio)
 	}
 }
 

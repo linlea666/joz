@@ -22,6 +22,10 @@ func TestResolveInstrument(t *testing.T) {
 		{"EIGEN", "EIGENUSDT", false},
 		{"$SOL", "SOLUSDT", false},
 		{"eth_usdt", "ETHUSDT", false},
+		// Community-name aliases (the PUMPFUN incident: perp is listed as PUMP)
+		{"PUMPFUN", "PUMPUSDT", false},
+		{"pumpfun/usdt", "PUMPUSDT", false},
+		{"$PUMPFUN", "PUMPUSDT", false},
 		// TradFi must never reach the exchange (reference project hit these)
 		{"NQ", "", true},
 		{"NQ/USDT:USDT", "", true},

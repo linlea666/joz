@@ -34,6 +34,13 @@ var nonCryptoSymbols = map[string]string{
 	"GOLD": "metal", "SILVER": "metal", "USOIL": "commodity", "UKOIL": "commodity",
 }
 
+// symbolAliases maps community/project names that authors post to the base
+// asset the perp is actually listed under (e.g. Trader Bamp posts "PUMPFUN",
+// but Binance/OKX list the pump.fun token as PUMP).
+var symbolAliases = map[string]string{
+	"PUMPFUN": "PUMP",
+}
+
 // forexPairPattern matches classic 6-letter fiat pairs (EURUSD, GBPJPY...).
 var forexPairPattern = regexp.MustCompile(`^(EUR|GBP|USD|JPY|AUD|NZD|CAD|CHF|CNH|SGD|HKD|MXN|ZAR|TRY|SEK|NOK)(EUR|GBP|USD|JPY|AUD|NZD|CAD|CHF|CNH|SGD|HKD|MXN|ZAR|TRY|SEK|NOK)$`)
 
@@ -88,6 +95,9 @@ func ResolveInstrument(raw string) (string, error) {
 	}
 	if base == "" {
 		return "", &ErrUnsupportedInstrument{Raw: raw, Reason: "empty base asset"}
+	}
+	if alias, ok := symbolAliases[base]; ok {
+		base = alias
 	}
 
 	return base + "USDT", nil

@@ -313,6 +313,14 @@ func (e *Engine) processInstruction(traceID, signalID string, msg *store.Discord
 			canonical = c
 			if mp, perr := e.exec.ex.GetMarketPrice(canonical); perr == nil {
 				marketPrice = mp
+			} else if interp.IsActionable() {
+				// Surface the real cause: validation below will skip market
+				// entries as UNSUPPORTED_PRICE_SPEC when there is no market
+				// price, which reads like an AI problem when it is actually
+				// an unlisted symbol or a price API failure (the PUMPFUN
+				// incident: "PUMPFUN" resolved but the perp is PUMPUSDT).
+				e.events.Warn(traceID, signalID, msg.MessageID, EvSignalSkipped,
+					fmt.Sprintf("market price unavailable for %s (unlisted symbol or price API failure): %v", canonical, perr), nil)
 			}
 		} else if interp.IsActionable() {
 			return SkipUnsupportedInstrument, rerr.Error(), nil

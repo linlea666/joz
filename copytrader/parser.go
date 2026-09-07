@@ -149,7 +149,13 @@ func normalizeInstructionFields(si *SourceInterpretation) error {
 	if si.CloseMode != "" && si.CloseMode != CloseModeFull && si.CloseMode != CloseModePartial {
 		return fmt.Errorf("unknown close_mode %q", si.CloseMode)
 	}
-	if si.CloseRatio != nil && (*si.CloseRatio <= 0 || *si.CloseRatio > 100) {
+	// Models emit 0 for "not specified" despite the prompt asking to omit the
+	// field; zero has no trade meaning, so treat it as unset (full close /
+	// default ratios) instead of failing the whole interpretation.
+	if si.CloseRatio != nil && *si.CloseRatio == 0 {
+		si.CloseRatio = nil
+	}
+	if si.CloseRatio != nil && (*si.CloseRatio < 0 || *si.CloseRatio > 100) {
 		return fmt.Errorf("close_ratio %v out of range (0, 100]", *si.CloseRatio)
 	}
 
@@ -163,7 +169,11 @@ func normalizeInstructionFields(si *SourceInterpretation) error {
 		if err := normalizePriceSpec(&si.TakeProfitLevels[i].Price, "take_profit"); err != nil {
 			return err
 		}
-		if r := si.TakeProfitLevels[i].Ratio; r != nil && (*r <= 0 || *r > 100) {
+		// Ratio 0 means "not specified" (same model behavior as close_ratio).
+		if r := si.TakeProfitLevels[i].Ratio; r != nil && *r == 0 {
+			si.TakeProfitLevels[i].Ratio = nil
+		}
+		if r := si.TakeProfitLevels[i].Ratio; r != nil && (*r < 0 || *r > 100) {
 			return fmt.Errorf("TP ratio %v out of range (0, 100]", *r)
 		}
 	}
