@@ -146,9 +146,13 @@ func TestDecideEntryType(t *testing.T) {
 		// Ranges.
 		{"range inside is market", DirectionLong, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 61800, 1, true, EntryPlanMarket, 61800},
 		{"long below range is favorable market", DirectionLong, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 61000, 1, true, EntryPlanMarket, 61000},
-		{"long above range limits at high edge", DirectionLong, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 63000, 1, true, EntryPlanLimit, 62000},
+		{"long above range limits at midpoint", DirectionLong, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 63000, 1, true, EntryPlanLimit, 61750},
 		{"short above range is favorable market", DirectionShort, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 63000, 1, true, EntryPlanMarket, 63000},
-		{"short below range limits at low edge", DirectionShort, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 61000, 1, true, EntryPlanLimit, 61500},
+		{"short below range limits at midpoint", DirectionShort, PriceSpec{Type: PriceRange, RangeLow: 61500, RangeHigh: 62000}, 61000, 1, true, EntryPlanLimit, 61750},
+		// The 九域三市 ETH short: zone 2570-2610, market at ~2500 (adverse
+		// for a short) => rest at the zone midpoint 2590, not the near edge.
+		{"short adverse zone rests at midpoint", DirectionShort, PriceSpec{Type: PriceRange, RangeLow: 2570, RangeHigh: 2610}, 2500, 1, true, EntryPlanLimit, 2590},
+		{"reversed bounds normalize before midpoint", DirectionLong, PriceSpec{Type: PriceRange, RangeLow: 62000, RangeHigh: 61500}, 63000, 1, true, EntryPlanLimit, 61750},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

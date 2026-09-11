@@ -205,16 +205,17 @@ func DecideEntryType(direction Direction, spec PriceSpec, marketPrice, threshold
 		if marketPrice >= low && marketPrice <= high {
 			return EntryPlanMarket, marketPrice, nil
 		}
-		if direction == DirectionShort {
-			if marketPrice > high { // better than the whole zone
-				return EntryPlanMarket, marketPrice, nil
-			}
-			return EntryPlanLimit, low, nil // adverse: wait at the near edge
-		}
-		if marketPrice < low { // long better than the whole zone
+		if direction == DirectionShort && marketPrice > high { // better than the whole zone
 			return EntryPlanMarket, marketPrice, nil
 		}
-		return EntryPlanLimit, high, nil // adverse: wait at the near edge
+		if direction != DirectionShort && marketPrice < low { // long better than the whole zone
+			return EntryPlanMarket, marketPrice, nil
+		}
+		// Adverse: rest a limit at the zone midpoint — a balance between the
+		// near edge (fills first, worst price of the zone) and the far edge
+		// (best price, may never fill). Matches how authors mean a zone:
+		// an average entry around its middle.
+		return EntryPlanLimit, (low + high) / 2, nil
 	default:
 		return EntryPlanSkip, 0, fmt.Errorf("unsupported entry price spec %q", spec.Type)
 	}
