@@ -54,6 +54,16 @@ type Engine struct {
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 
+	// posMissSeen records trade context IDs whose position was not found on
+	// the previous reconcile cycle. A trade is only declared closed after two
+	// consecutive misses: exchange GetPositions results are cached (~15s), so
+	// a single miss can be a stale snapshot taken before the entry filled
+	// (the Binance BTCUSDT short incident: reconcile closed a 1-second-old
+	// trade and cancelled its fresh SL/TP). Guarded by mu (reconcileOnce and
+	// message handling both hold it). Lost on restart, which only means one
+	// extra 45s confirmation cycle — the conservative direction.
+	posMissSeen map[string]bool
+
 	// Recognition replay (dry-run accuracy testing); own mutex domain so a
 	// running replay never blocks live message handling.
 	replayMu sync.Mutex
@@ -75,6 +85,8 @@ func NewEngine(p EngineParams) *Engine {
 		poller:     p.Poller,
 		exec:       NewExecutor(p.TraderID, p.Exchange, p.Store, events),
 		events:     events,
+
+		posMissSeen: make(map[string]bool),
 	}
 }
 

@@ -337,7 +337,7 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 	}
 	if pos == nil || pos.qty <= 0 {
 		// Nothing on the exchange: reconcile the context.
-		x.cancelAllQuiet(ctx.Symbol)
+		x.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
 		x.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "CLOSE(noop)"})
 		x.events.Info(traceID, signalID, "", EvTradeClosed, "position already flat (NOOP_ALREADY_FLAT)", nil)
 		return SkipAlreadyFlat, nil
@@ -365,7 +365,7 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 
 	if full {
 		// Cancel protection orders first so reduce-only orders don't fight the close.
-		x.cancelAllQuiet(ctx.Symbol)
+		x.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
 	}
 
 	start := time.Now()
@@ -528,7 +528,7 @@ func (x *Executor) ExecuteCancel(traceID, signalID string, ctx *store.CopyTradeC
 			}
 		}
 	} else {
-		x.cancelAllQuiet(ctx.Symbol)
+		x.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
 	}
 	x.markContext(ctx, StateCancelled, map[string]interface{}{"last_action": "CANCEL"})
 	x.events.Success(traceID, signalID, "", EvTradeCancelled, fmt.Sprintf("pending entry for %s cancelled", ctx.Symbol), 0, nil)
@@ -661,6 +661,33 @@ func (x *Executor) cancelAllQuiet(symbol string) {
 	if err := x.ex.CancelAllOrders(symbol); err != nil {
 		x.events.Warn("", "", "", EvOrderCancelled, fmt.Sprintf("cancel orders for %s failed: %v", symbol, err), nil)
 	}
+}
+
+// sideAwareCanceller is implemented by exchanges that can cancel only the
+// orders belonging to one hedge-mode position side.
+type sideAwareCanceller interface {
+	CancelOrdersBySide(symbol, positionSide string) error
+}
+
+// cancelTradeOrdersQuiet cancels the pending orders belonging to ONE trade
+// (symbol + direction). In hedge mode both directions of a symbol can be live
+// at once, each as its own trade context; a blanket CancelAllOrders would
+// also kill the sibling direction's SL/TP (seen live: closing a BTCUSDT
+// short cancelled the BTCUSDT long's stop loss, leaving it naked until the
+// SL guard restored it a cycle later). Falls back to CancelAllOrders when the
+// exchange cannot filter by side or the filtered cancel fails: a mistakenly
+// cancelled sibling SL is restored by the SL guard, while an orphaned
+// reduce-only order would fight future trades indefinitely.
+func (x *Executor) cancelTradeOrdersQuiet(symbol, direction string) {
+	if c, ok := x.ex.(sideAwareCanceller); ok {
+		err := c.CancelOrdersBySide(symbol, positionSideOf(direction))
+		if err == nil {
+			return
+		}
+		x.events.Warn("", "", "", EvOrderCancelled,
+			fmt.Sprintf("side-filtered cancel for %s %s failed, falling back to cancel-all: %v", symbol, direction, err), nil)
+	}
+	x.cancelAllQuiet(symbol)
 }
 
 // updateContext persists updates ignoring version conflicts (engine is the

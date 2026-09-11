@@ -178,13 +178,31 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 	}
 
 	if pos == nil || pos.qty <= 0 {
+		// Position not found. Do NOT close on the first miss: GetPositions is
+		// served from a short-lived cache, so a snapshot taken just before
+		// the entry filled makes a brand-new position invisible for one
+		// cycle. Closing on that stale read cancels a freshly placed SL/TP
+		// and permanently abandons a live position. Require two consecutive
+		// cycles (45s apart, far beyond any cache TTL) before declaring the
+		// trade closed.
+		if !e.posMissSeen[ctx.ID] {
+			if e.posMissSeen == nil {
+				e.posMissSeen = make(map[string]bool)
+			}
+			e.posMissSeen[ctx.ID] = true
+			e.events.Info(traceID, "", "", EvReconcile,
+				fmt.Sprintf("%s position not found on exchange; re-checking next cycle before closing", ctx.Symbol), nil)
+			return
+		}
+		delete(e.posMissSeen, ctx.ID)
 		// Position gone: SL hit, TP ladder completed, or closed manually.
-		e.exec.cancelAllQuiet(ctx.Symbol)
+		e.exec.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
 		e.exec.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "RECONCILE_CLOSED"})
 		e.events.Info(traceID, "", "", EvTradeClosed,
 			fmt.Sprintf("%s position no longer on exchange (SL/TP hit or manual close); trade closed", ctx.Symbol), nil)
 		return
 	}
+	delete(e.posMissSeen, ctx.ID)
 
 	// TP partial-fill detection: position shrank relative to our record.
 	if ctx.Quantity > 0 && pos.qty < ctx.Quantity*0.999 {
@@ -202,7 +220,12 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 		// (the breakeven path below re-places the SL itself).
 		if !e.breakevenWanted(ctx) && ctx.StopLossPrice > 0 {
 			if err := e.exec.ex.CancelStopLossOrders(ctx.Symbol); err == nil {
-				_ = e.exec.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), pos.qty, ctx.StopLossPrice)
+				if serr := e.exec.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), pos.qty, ctx.StopLossPrice); serr != nil {
+					// Old SL is already cancelled: the position is naked
+					// until the SL guard below (or next cycle) restores it.
+					e.events.Warn(traceID, "", "", EvExecutionError,
+						fmt.Sprintf("%s SL resize after TP fill failed (SL guard will restore): %v", ctx.Symbol, serr), nil)
+				}
 			}
 		}
 	}
@@ -281,7 +304,7 @@ func (e *Engine) reconcileClosePending(ctx *store.CopyTradeContext) {
 		return
 	}
 	if pos == nil || pos.qty <= 0 {
-		e.exec.cancelAllQuiet(ctx.Symbol)
+		e.exec.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
 		e.exec.markContext(ctx, StateClosed, nil)
 		return
 	}

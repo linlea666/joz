@@ -11,8 +11,9 @@ import (
 
 // OpenLong opens long position
 func (t *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
-	// Cancel old orders
-	if err := t.CancelAllOrders(symbol); err != nil {
+	// Clean up this side's stale SL/TP only: in hedge mode a live SHORT can
+	// coexist on the same symbol and must keep its protections.
+	if err := t.CancelOrdersBySide(symbol, "LONG"); err != nil {
 		logger.Infof("  ⚠ Failed to cancel old pending orders (may not have any): %v", err)
 	}
 
@@ -80,6 +81,7 @@ func (t *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
 		return nil, fmt.Errorf("failed to open long position: %s", msg)
 	}
 
+	t.InvalidatePositionCache()
 	logger.Infof("✓ OKX opened long position successfully: %s size: %s", symbol, szStr)
 	logger.Infof("  Order ID: %s", orders[0].OrdId)
 
@@ -92,8 +94,9 @@ func (t *OKXTrader) OpenLong(symbol string, quantity float64, leverage int) (map
 
 // OpenShort opens short position
 func (t *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
-	// Cancel old orders
-	if err := t.CancelAllOrders(symbol); err != nil {
+	// Clean up this side's stale SL/TP only: in hedge mode a live LONG can
+	// coexist on the same symbol and must keep its protections.
+	if err := t.CancelOrdersBySide(symbol, "SHORT"); err != nil {
 		logger.Infof("  ⚠ Failed to cancel old pending orders (may not have any): %v", err)
 	}
 
@@ -161,6 +164,7 @@ func (t *OKXTrader) OpenShort(symbol string, quantity float64, leverage int) (ma
 		return nil, fmt.Errorf("failed to open short position: %s", msg)
 	}
 
+	t.InvalidatePositionCache()
 	logger.Infof("✓ OKX opened short position successfully: %s size: %s", symbol, szStr)
 	logger.Infof("  Order ID: %s", orders[0].OrdId)
 
@@ -270,10 +274,12 @@ func (t *OKXTrader) CloseLong(symbol string, quantity float64) (map[string]inter
 		return nil, fmt.Errorf("failed to close long position: %s", msg)
 	}
 
+	t.InvalidatePositionCache()
 	logger.Infof("✓ OKX closed long position successfully: %s", symbol)
 
-	// Cancel pending orders after closing position
-	if err := t.CancelAllOrders(symbol); err != nil {
+	// Cancel this side's SL/TP after closing; a hedge-mode SHORT on the same
+	// symbol must keep its protections.
+	if err := t.CancelOrdersBySide(symbol, "LONG"); err != nil {
 		logger.Infof("  ⚠ Failed to cancel pending orders: %v", err)
 	}
 
@@ -386,10 +392,12 @@ func (t *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]inte
 		return nil, fmt.Errorf("failed to close short position: %s", msg)
 	}
 
+	t.InvalidatePositionCache()
 	logger.Infof("✓ OKX closed short position successfully: %s, ordId=%s", symbol, orders[0].OrdId)
 
-	// Cancel pending orders after closing position
-	if err := t.CancelAllOrders(symbol); err != nil {
+	// Cancel this side's SL/TP after closing; a hedge-mode LONG on the same
+	// symbol must keep its protections.
+	if err := t.CancelOrdersBySide(symbol, "SHORT"); err != nil {
 		logger.Infof("  ⚠ Failed to cancel pending orders: %v", err)
 	}
 
@@ -590,6 +598,74 @@ func (t *OKXTrader) CancelAllOrders(symbol string) error {
 // CancelStopOrders cancels stop loss and take profit orders
 func (t *OKXTrader) CancelStopOrders(symbol string) error {
 	return t.cancelAlgoOrders(symbol, "")
+}
+
+// CancelOrdersBySide cancels all pending orders (regular + algo) that belong
+// to ONE hedge-mode position side, leaving the sibling direction's orders
+// untouched (closing a short must not cancel the long's stop loss).
+// positionSide is "LONG" or "SHORT"; orders with posSide "net"/empty (one-way
+// mode) always match, because net mode cannot hold two directions at once.
+func (t *OKXTrader) CancelOrdersBySide(symbol, positionSide string) error {
+	instId := t.convertSymbol(symbol)
+	want := strings.ToLower(positionSide)
+	matches := func(ps string) bool {
+		ps = strings.ToLower(ps)
+		return ps == "" || ps == "net" || ps == want
+	}
+	var cancelErrors []error
+
+	// 1. Regular pending orders (limit TP ladder, pending limit entries).
+	path := fmt.Sprintf("%s?instType=SWAP&instId=%s", okxPendingOrdersPath, instId)
+	data, err := t.doRequest("GET", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get pending orders for %s: %w", symbol, err)
+	}
+	var orders []struct {
+		OrdId   string `json:"ordId"`
+		InstId  string `json:"instId"`
+		PosSide string `json:"posSide"`
+	}
+	if err := json.Unmarshal(data, &orders); err != nil {
+		return fmt.Errorf("failed to parse pending orders for %s: %w", symbol, err)
+	}
+	for _, order := range orders {
+		if !matches(order.PosSide) {
+			continue
+		}
+		body := map[string]interface{}{"instId": order.InstId, "ordId": order.OrdId}
+		if _, err := t.doRequest("POST", okxCancelOrderPath, body); err != nil {
+			cancelErrors = append(cancelErrors, fmt.Errorf("order %s: %w", order.OrdId, err))
+		}
+	}
+
+	// 2. Algo orders (stop-loss / trigger take-profits).
+	path = fmt.Sprintf("%s?instType=SWAP&instId=%s&ordType=conditional", okxAlgoPendingPath, instId)
+	data, err = t.doRequest("GET", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get pending algo orders for %s: %w", symbol, err)
+	}
+	var algoOrders []struct {
+		AlgoId  string `json:"algoId"`
+		InstId  string `json:"instId"`
+		PosSide string `json:"posSide"`
+	}
+	if err := json.Unmarshal(data, &algoOrders); err != nil {
+		return fmt.Errorf("failed to parse pending algo orders for %s: %w", symbol, err)
+	}
+	for _, order := range algoOrders {
+		if !matches(order.PosSide) {
+			continue
+		}
+		body := []map[string]interface{}{{"algoId": order.AlgoId, "instId": order.InstId}}
+		if _, err := t.doRequest("POST", okxCancelAlgoPath, body); err != nil {
+			cancelErrors = append(cancelErrors, fmt.Errorf("algo %s: %w", order.AlgoId, err))
+		}
+	}
+
+	if len(cancelErrors) > 0 {
+		return fmt.Errorf("failed to cancel %d order(s) for %s %s: %v", len(cancelErrors), symbol, want, cancelErrors)
+	}
+	return nil
 }
 
 // GetOrderStatus gets order status

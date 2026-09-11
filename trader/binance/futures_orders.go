@@ -13,8 +13,10 @@ import (
 
 // OpenLong opens a long position
 func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
-	// First cancel all pending orders for this symbol (clean up old stop-loss and take-profit orders)
-	if err := t.CancelAllOrders(symbol); err != nil {
+	// Clean up this side's stale SL/TP only: in hedge mode a live SHORT can
+	// coexist on the same symbol, and cancelling all symbol orders here would
+	// strip that position's protections.
+	if err := t.CancelOrdersBySide(symbol, "LONG"); err != nil {
 		logger.Infof("  ⚠ Failed to cancel old pending orders (may not have any): %v", err)
 	}
 
@@ -55,6 +57,7 @@ func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) 
 	if err != nil {
 		return nil, fmt.Errorf("failed to open long position: %w", err)
 	}
+	t.InvalidatePositionCache()
 
 	logger.Infof("✓ Opened long position successfully: %s quantity: %s", symbol, quantityStr)
 	logger.Infof("  Order ID: %d", order.OrderID)
@@ -68,8 +71,10 @@ func (t *FuturesTrader) OpenLong(symbol string, quantity float64, leverage int) 
 
 // OpenShort opens a short position
 func (t *FuturesTrader) OpenShort(symbol string, quantity float64, leverage int) (map[string]interface{}, error) {
-	// First cancel all pending orders for this symbol (clean up old stop-loss and take-profit orders)
-	if err := t.CancelAllOrders(symbol); err != nil {
+	// Clean up this side's stale SL/TP only: in hedge mode a live LONG can
+	// coexist on the same symbol, and cancelling all symbol orders here would
+	// strip that position's protections.
+	if err := t.CancelOrdersBySide(symbol, "SHORT"); err != nil {
 		logger.Infof("  ⚠ Failed to cancel old pending orders (may not have any): %v", err)
 	}
 
@@ -110,6 +115,7 @@ func (t *FuturesTrader) OpenShort(symbol string, quantity float64, leverage int)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open short position: %w", err)
 	}
+	t.InvalidatePositionCache()
 
 	logger.Infof("✓ Opened short position successfully: %s quantity: %s", symbol, quantityStr)
 	logger.Infof("  Order ID: %d", order.OrderID)
@@ -161,11 +167,13 @@ func (t *FuturesTrader) CloseLong(symbol string, quantity float64) (map[string]i
 	if err != nil {
 		return nil, fmt.Errorf("failed to close long position: %w", err)
 	}
+	t.InvalidatePositionCache()
 
 	logger.Infof("✓ Closed long position successfully: %s quantity: %s", symbol, quantityStr)
 
-	// After closing position, cancel all pending orders for this symbol (stop-loss and take-profit orders)
-	if err := t.CancelAllOrders(symbol); err != nil {
+	// Cancel this side's SL/TP after closing; a hedge-mode SHORT on the same
+	// symbol must keep its protections.
+	if err := t.CancelOrdersBySide(symbol, "LONG"); err != nil {
 		logger.Infof("  ⚠ Failed to cancel pending orders: %v", err)
 	}
 
@@ -216,11 +224,13 @@ func (t *FuturesTrader) CloseShort(symbol string, quantity float64) (map[string]
 	if err != nil {
 		return nil, fmt.Errorf("failed to close short position: %w", err)
 	}
+	t.InvalidatePositionCache()
 
 	logger.Infof("✓ Closed short position successfully: %s quantity: %s", symbol, quantityStr)
 
-	// After closing position, cancel all pending orders for this symbol (stop-loss and take-profit orders)
-	if err := t.CancelAllOrders(symbol); err != nil {
+	// Cancel this side's SL/TP after closing; a hedge-mode LONG on the same
+	// symbol must keep its protections.
+	if err := t.CancelOrdersBySide(symbol, "SHORT"); err != nil {
 		logger.Infof("  ⚠ Failed to cancel pending orders: %v", err)
 	}
 
@@ -411,6 +421,68 @@ func (t *FuturesTrader) CancelAllOrders(symbol string) error {
 		logger.Infof("  ✓ Canceled all Algo orders for %s", symbol)
 	}
 
+	return nil
+}
+
+// CancelOrdersBySide cancels all pending orders (legacy + Algo) that belong
+// to ONE hedge-mode position side, leaving the sibling direction's orders
+// untouched. Closing a short must not cancel the long's stop loss: with
+// CancelAllOrders that SL was killed and stayed missing for up to a reconcile
+// cycle until the SL guard restored it. Orders with an empty/BOTH position
+// side (one-way mode) always match, because one-way mode cannot hold two
+// directions at once.
+func (t *FuturesTrader) CancelOrdersBySide(symbol, positionSide string) error {
+	want := strings.ToUpper(positionSide)
+	matches := func(ps string) bool {
+		ps = strings.ToUpper(ps)
+		return ps == "" || ps == "BOTH" || ps == want
+	}
+	var cancelErrors []error
+
+	// 1. Legacy orders (limit TP ladder, pending limit entries).
+	orders, err := t.client.NewListOpenOrdersService().
+		Symbol(symbol).
+		Do(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to list open orders: %w", err)
+	}
+	for _, order := range orders {
+		if !matches(string(order.PositionSide)) {
+			continue
+		}
+		if _, err := t.client.NewCancelOrderService().
+			Symbol(symbol).
+			OrderID(order.OrderID).
+			Do(context.Background()); err != nil {
+			cancelErrors = append(cancelErrors, fmt.Errorf("order %d: %w", order.OrderID, err))
+			continue
+		}
+		logger.Infof("  ✓ Canceled %s order %d (%s %s)", symbol, order.OrderID, order.Type, order.PositionSide)
+	}
+
+	// 2. Algo orders (stop-loss / trigger take-profits).
+	algoOrders, err := t.client.NewListOpenAlgoOrdersService().
+		Symbol(symbol).
+		Do(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to list algo orders: %w", err)
+	}
+	for _, algoOrder := range algoOrders {
+		if !matches(string(algoOrder.PositionSide)) {
+			continue
+		}
+		if _, err := t.client.NewCancelAlgoOrderService().
+			AlgoID(algoOrder.AlgoId).
+			Do(context.Background()); err != nil {
+			cancelErrors = append(cancelErrors, fmt.Errorf("algo %d: %w", algoOrder.AlgoId, err))
+			continue
+		}
+		logger.Infof("  ✓ Canceled %s algo order %d (%s %s)", symbol, algoOrder.AlgoId, algoOrder.OrderType, algoOrder.PositionSide)
+	}
+
+	if len(cancelErrors) > 0 {
+		return fmt.Errorf("failed to cancel %d order(s) for %s %s: %v", len(cancelErrors), symbol, want, cancelErrors)
+	}
 	return nil
 }
 
@@ -640,28 +712,32 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 		})
 	}
 
-	// 2. Get Algo orders (new API for stop-loss/take-profit)
+	// 2. Get Algo orders (new API for stop-loss/take-profit). A failure here
+	// must fail the whole call: silently returning only the legacy orders
+	// makes callers like the copytrader SL guard conclude "no stop-loss
+	// order" and place a duplicate.
 	algoOrders, err := t.client.NewListOpenAlgoOrdersService().
 		Symbol(symbol).
 		Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("failed to get algo orders: %w", err)
+	}
 
-	if err == nil {
-		for _, algoOrder := range algoOrders {
-			triggerPrice, _ := strconv.ParseFloat(algoOrder.TriggerPrice, 64)
-			quantity, _ := strconv.ParseFloat(algoOrder.Quantity, 64)
+	for _, algoOrder := range algoOrders {
+		triggerPrice, _ := strconv.ParseFloat(algoOrder.TriggerPrice, 64)
+		quantity, _ := strconv.ParseFloat(algoOrder.Quantity, 64)
 
-			result = append(result, types.OpenOrder{
-				OrderID:      fmt.Sprintf("%d", algoOrder.AlgoId),
-				Symbol:       algoOrder.Symbol,
-				Side:         string(algoOrder.Side),
-				PositionSide: string(algoOrder.PositionSide),
-				Type:         string(algoOrder.OrderType),
-				Price:        0, // Algo orders use stop price
-				StopPrice:    triggerPrice,
-				Quantity:     quantity,
-				Status:       "NEW",
-			})
-		}
+		result = append(result, types.OpenOrder{
+			OrderID:      fmt.Sprintf("%d", algoOrder.AlgoId),
+			Symbol:       algoOrder.Symbol,
+			Side:         string(algoOrder.Side),
+			PositionSide: string(algoOrder.PositionSide),
+			Type:         string(algoOrder.OrderType),
+			Price:        0, // Algo orders use stop price
+			StopPrice:    triggerPrice,
+			Quantity:     quantity,
+			Status:       "NEW",
+		})
 	}
 
 	return result, nil
