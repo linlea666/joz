@@ -668,6 +668,55 @@ func (t *OKXTrader) CancelOrdersBySide(symbol, positionSide string) error {
 	return nil
 }
 
+// CancelStopLossOrdersBySide cancels only stop-loss algo orders belonging to
+// the given position side ("LONG"/"SHORT"). In hedge mode a symbol-wide
+// cancel would also remove the opposite direction's stop; this variant leaves
+// sibling positions' protections intact. A stop-loss is identified by a
+// non-empty slTriggerPx (matching what SetStopLoss places), so take-profit
+// trigger orders are never touched. Orders with an empty or "net" position
+// side (one-way mode) always match.
+func (t *OKXTrader) CancelStopLossOrdersBySide(symbol, positionSide string) error {
+	instId := t.convertSymbol(symbol)
+	want := strings.ToLower(positionSide)
+	matches := func(ps string) bool {
+		ps = strings.ToLower(ps)
+		return ps == "" || ps == "net" || ps == want
+	}
+
+	path := fmt.Sprintf("%s?instType=SWAP&instId=%s&ordType=conditional", okxAlgoPendingPath, instId)
+	data, err := t.doRequest("GET", path, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get pending algo orders for %s: %w", symbol, err)
+	}
+	var algoOrders []struct {
+		AlgoId      string `json:"algoId"`
+		InstId      string `json:"instId"`
+		PosSide     string `json:"posSide"`
+		SlTriggerPx string `json:"slTriggerPx"`
+	}
+	if err := json.Unmarshal(data, &algoOrders); err != nil {
+		return fmt.Errorf("failed to parse pending algo orders for %s: %w", symbol, err)
+	}
+
+	var cancelErrors []error
+	for _, order := range algoOrders {
+		if order.SlTriggerPx == "" {
+			continue // not a stop-loss (e.g. take-profit trigger order)
+		}
+		if !matches(order.PosSide) {
+			continue
+		}
+		body := []map[string]interface{}{{"algoId": order.AlgoId, "instId": order.InstId}}
+		if _, err := t.doRequest("POST", okxCancelAlgoPath, body); err != nil {
+			cancelErrors = append(cancelErrors, fmt.Errorf("algo %s: %w", order.AlgoId, err))
+		}
+	}
+	if len(cancelErrors) > 0 {
+		return fmt.Errorf("failed to cancel %d stop-loss order(s) for %s %s: %v", len(cancelErrors), symbol, want, cancelErrors)
+	}
+	return nil
+}
+
 // GetOrderStatus gets order status
 func (t *OKXTrader) GetOrderStatus(symbol string, orderID string) (map[string]interface{}, error) {
 	instId := t.convertSymbol(symbol)

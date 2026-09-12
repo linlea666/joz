@@ -486,6 +486,73 @@ func (t *FuturesTrader) CancelOrdersBySide(symbol, positionSide string) error {
 	return nil
 }
 
+// CancelStopLossOrdersBySide cancels only stop-loss orders belonging to the
+// given position side ("LONG"/"SHORT"). In hedge mode a symbol-wide
+// CancelStopLossOrders would also remove the opposite direction's stop; this
+// variant leaves sibling positions' protections intact. Orders with an empty
+// or "BOTH" position side (one-way mode) always match.
+func (t *FuturesTrader) CancelStopLossOrdersBySide(symbol, positionSide string) error {
+	want := strings.ToUpper(positionSide)
+	matches := func(ps string) bool {
+		ps = strings.ToUpper(ps)
+		return ps == "" || ps == "BOTH" || ps == want
+	}
+	var cancelErrors []error
+
+	// 1. Legacy stop-loss orders.
+	orders, err := t.client.NewListOpenOrdersService().
+		Symbol(symbol).
+		Do(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to list open orders: %w", err)
+	}
+	for _, order := range orders {
+		orderType := string(order.Type)
+		if orderType != "STOP_MARKET" && orderType != "STOP" {
+			continue
+		}
+		if !matches(string(order.PositionSide)) {
+			continue
+		}
+		if _, err := t.client.NewCancelOrderService().
+			Symbol(symbol).
+			OrderID(order.OrderID).
+			Do(context.Background()); err != nil {
+			cancelErrors = append(cancelErrors, fmt.Errorf("order %d: %w", order.OrderID, err))
+			continue
+		}
+		logger.Infof("  ✓ Canceled %s stop-loss order %d (%s %s)", symbol, order.OrderID, orderType, order.PositionSide)
+	}
+
+	// 2. Algo stop-loss orders.
+	algoOrders, err := t.client.NewListOpenAlgoOrdersService().
+		Symbol(symbol).
+		Do(context.Background())
+	if err != nil {
+		return fmt.Errorf("failed to list algo orders: %w", err)
+	}
+	for _, algoOrder := range algoOrders {
+		if algoOrder.OrderType != futures.AlgoOrderTypeStopMarket && algoOrder.OrderType != futures.AlgoOrderTypeStop {
+			continue
+		}
+		if !matches(string(algoOrder.PositionSide)) {
+			continue
+		}
+		if _, err := t.client.NewCancelAlgoOrderService().
+			AlgoID(algoOrder.AlgoId).
+			Do(context.Background()); err != nil {
+			cancelErrors = append(cancelErrors, fmt.Errorf("algo %d: %w", algoOrder.AlgoId, err))
+			continue
+		}
+		logger.Infof("  ✓ Canceled %s algo stop-loss order %d (%s %s)", symbol, algoOrder.AlgoId, algoOrder.OrderType, algoOrder.PositionSide)
+	}
+
+	if len(cancelErrors) > 0 {
+		return fmt.Errorf("failed to cancel %d stop-loss order(s) for %s %s: %v", len(cancelErrors), symbol, want, cancelErrors)
+	}
+	return nil
+}
+
 // PlaceLimitOrder places a limit order for grid trading
 // This implements the GridTrader interface for FuturesTrader
 func (t *FuturesTrader) PlaceLimitOrder(req *types.LimitOrderRequest) (*types.LimitOrderResult, error) {
