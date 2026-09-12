@@ -64,6 +64,16 @@ type Engine struct {
 	// extra 45s confirmation cycle — the conservative direction.
 	posMissSeen map[string]bool
 
+	// closedRecheck maps context IDs that reconcile just closed
+	// (RECONCILE_CLOSED) to the number of confirmation cycles left. If the
+	// position reappears within that window the close was spurious (stale
+	// data): the context is resurrected to OPEN so the SL guard re-arms its
+	// protections — without this, a wrongly-closed trade leaves a live
+	// position permanently untracked and unprotected (the BTCUSDT 0.007 and
+	// SNDKUSDT 0.15 incidents). Guarded by mu; lost on restart (acceptable:
+	// the debounce makes new spurious closes very unlikely to begin with).
+	closedRecheck map[string]int
+
 	// Recognition replay (dry-run accuracy testing); own mutex domain so a
 	// running replay never blocks live message handling.
 	replayMu sync.Mutex
@@ -86,7 +96,8 @@ func NewEngine(p EngineParams) *Engine {
 		exec:       NewExecutor(p.TraderID, p.Exchange, p.Store, events),
 		events:     events,
 
-		posMissSeen: make(map[string]bool),
+		posMissSeen:   make(map[string]bool),
+		closedRecheck: make(map[string]int),
 	}
 }
 

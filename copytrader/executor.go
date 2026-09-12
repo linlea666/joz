@@ -390,7 +390,7 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 		x.updateContext(ctx, map[string]interface{}{"quantity": remaining, "last_action": "REDUCE"})
 		// Re-issue SL for the remaining quantity so protection matches the position.
 		if ctx.StopLossPrice > 0 {
-			if cerr := x.ex.CancelStopLossOrders(ctx.Symbol); cerr != nil {
+			if cerr := x.cancelStopLossOrders(ctx.Symbol, ctx.Direction); cerr != nil {
 				x.events.Warn(traceID, signalID, "", EvExecutionError,
 					fmt.Sprintf("partial close: cancel old SL failed: %v", cerr), nil)
 			}
@@ -419,7 +419,7 @@ func (x *Executor) ExecuteUpdateSL(traceID, signalID string, ctx *store.CopyTrad
 		return SkipNoPosition, nil
 	}
 
-	if err := x.ex.CancelStopLossOrders(ctx.Symbol); err != nil {
+	if err := x.cancelStopLossOrders(ctx.Symbol, ctx.Direction); err != nil {
 		x.events.Warn(traceID, signalID, "", EvExecutionError,
 			fmt.Sprintf("cancel old SL failed (may not exist): %v", err), nil)
 	}
@@ -688,6 +688,30 @@ func (x *Executor) cancelTradeOrdersQuiet(symbol, direction string) {
 			fmt.Sprintf("side-filtered cancel for %s %s failed, falling back to cancel-all: %v", symbol, direction, err), nil)
 	}
 	x.cancelAllQuiet(symbol)
+}
+
+// sideAwareSLCanceller is satisfied by exchanges that can cancel only the
+// stop-loss orders of one position side (currently Binance futures and OKX).
+type sideAwareSLCanceller interface {
+	CancelStopLossOrdersBySide(symbol, positionSide string) error
+}
+
+// cancelStopLossOrders cancels the stop-loss orders of ONE trade
+// (symbol + direction). In hedge mode a symbol-wide CancelStopLossOrders
+// also removes the opposite direction's stop, leaving that sibling position
+// naked until the SL guard restores it a cycle later. Falls back to the
+// symbol-wide cancel when the exchange cannot filter by side or the filtered
+// cancel fails (leaving a stale SL behind would fire at the wrong size).
+func (x *Executor) cancelStopLossOrders(symbol, direction string) error {
+	if c, ok := x.ex.(sideAwareSLCanceller); ok {
+		err := c.CancelStopLossOrdersBySide(symbol, positionSideOf(direction))
+		if err == nil {
+			return nil
+		}
+		x.events.Warn("", "", "", EvOrderCancelled,
+			fmt.Sprintf("side-filtered SL cancel for %s %s failed, falling back to symbol-wide: %v", symbol, direction, err), nil)
+	}
+	return x.ex.CancelStopLossOrders(symbol)
 }
 
 // updateContext persists updates ignoring version conflicts (engine is the

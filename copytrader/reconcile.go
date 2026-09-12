@@ -56,6 +56,60 @@ func (e *Engine) reconcileOnce() {
 			}
 		}
 	}
+	e.recheckClosedTrades()
+}
+
+// closedRecheckCycles is how many reconcile cycles a RECONCILE_CLOSED trade
+// stays on the watch list waiting for its position to (not) reappear.
+const closedRecheckCycles = 3
+
+// recheckClosedTrades resurrects trades that reconcile closed on stale data.
+// A genuinely closed position stays gone; if it is visible again within the
+// watch window, the close verdict was wrong — the exchange still holds a live
+// position whose protections were cancelled by the close cleanup and which no
+// guard covers while the context is CLOSED. Restoring the context to OPEN
+// puts it back under reconcile management; the SL guard re-places the stop
+// on the same pass.
+func (e *Engine) recheckClosedTrades() {
+	for id, left := range e.closedRecheck {
+		ctx, err := e.st.CopyTrade().GetContext(id)
+		if err != nil {
+			continue // transient read failure: retry next cycle
+		}
+		if ctx == nil || ctx.State != string(StateClosed) {
+			delete(e.closedRecheck, id)
+			continue
+		}
+		pos, err := e.exec.findPosition(ctx.Symbol, ctx.Direction)
+		if err != nil {
+			continue // transient exchange failure: retry, do not consume a cycle
+		}
+		if pos == nil || pos.qty <= 0 {
+			if left <= 1 {
+				delete(e.closedRecheck, id) // confirmed gone, normal close
+			} else {
+				e.closedRecheck[id] = left - 1
+			}
+			continue
+		}
+
+		// Position is back: spurious close. Resurrect and re-protect.
+		delete(e.closedRecheck, id)
+		e.events.Error("reconcile-"+ctx.ID, "", "", EvExecutionError,
+			fmt.Sprintf("%s %s position reappeared after RECONCILE_CLOSED (qty %.8g) — close was spurious, resurrecting trade and restoring protections",
+				ctx.Symbol, ctx.Direction, pos.qty), nil)
+		e.exec.updateContext(ctx, map[string]interface{}{
+			"state":       string(StateOpen),
+			"quantity":    pos.qty,
+			"last_action": "RECOVERED_SPURIOUS_CLOSE",
+			"closed_at":   nil,
+		})
+		ctx.State = string(StateOpen)
+		ctx.Quantity = pos.qty
+		// Run the open-trade pass immediately so the SL guard restores the
+		// stop loss now instead of one cycle later.
+		e.reconcileOpenTrade(ctx)
+	}
 }
 
 // reconcileEntryPending handles limit entries: fill detection and timeout.
@@ -200,6 +254,12 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 		e.exec.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "RECONCILE_CLOSED"})
 		e.events.Info(traceID, "", "", EvTradeClosed,
 			fmt.Sprintf("%s position no longer on exchange (SL/TP hit or manual close); trade closed", ctx.Symbol), nil)
+		// Keep watching for a few cycles: if the position reappears the close
+		// was based on stale data and the trade must be resurrected.
+		if e.closedRecheck == nil {
+			e.closedRecheck = make(map[string]int)
+		}
+		e.closedRecheck[ctx.ID] = closedRecheckCycles
 		return
 	}
 	delete(e.posMissSeen, ctx.ID)
@@ -219,12 +279,33 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 		// Resize the SL to the remaining quantity so protection stays exact
 		// (the breakeven path below re-places the SL itself).
 		if !e.breakevenWanted(ctx) && ctx.StopLossPrice > 0 {
-			if err := e.exec.ex.CancelStopLossOrders(ctx.Symbol); err == nil {
+			if err := e.exec.cancelStopLossOrders(ctx.Symbol, ctx.Direction); err == nil {
 				if serr := e.exec.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), pos.qty, ctx.StopLossPrice); serr != nil {
 					// Old SL is already cancelled: the position is naked
 					// until the SL guard below (or next cycle) restores it.
 					e.events.Warn(traceID, "", "", EvExecutionError,
 						fmt.Sprintf("%s SL resize after TP fill failed (SL guard will restore): %v", ctx.Symbol, serr), nil)
+				}
+			}
+		}
+	}
+
+	// Position grew relative to our record: a second open on the same
+	// symbol+direction merged into this position, or an orphaned remnant from
+	// an earlier incident got absorbed (SNDKUSDT: 0.27 on the exchange, SL
+	// sized for 0.12). Adopt the exchange quantity and resize the SL so the
+	// whole position is protected — over-protecting is the safe direction.
+	if ctx.Quantity > 0 && pos.qty > ctx.Quantity*1.001 {
+		e.events.Warn(traceID, "", "", EvExecutionError,
+			fmt.Sprintf("%s position (%.8g) larger than tracked quantity (%.8g) — adopting exchange size and resizing SL to cover it",
+				ctx.Symbol, pos.qty, ctx.Quantity), nil)
+		e.exec.updateContext(ctx, map[string]interface{}{"quantity": pos.qty})
+		ctx.Quantity = pos.qty
+		if ctx.StopLossPrice > 0 {
+			if err := e.exec.cancelStopLossOrders(ctx.Symbol, ctx.Direction); err == nil {
+				if serr := e.exec.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), pos.qty, ctx.StopLossPrice); serr != nil {
+					e.events.Warn(traceID, "", "", EvExecutionError,
+						fmt.Sprintf("%s SL resize to grown position failed (SL guard will restore): %v", ctx.Symbol, serr), nil)
 				}
 			}
 		}
@@ -268,7 +349,7 @@ func (e *Engine) applyBreakeven(traceID string, ctx *store.CopyTradeContext, qty
 	if entry <= 0 {
 		return
 	}
-	if err := e.exec.ex.CancelStopLossOrders(ctx.Symbol); err != nil {
+	if err := e.exec.cancelStopLossOrders(ctx.Symbol, ctx.Direction); err != nil {
 		e.events.Warn(traceID, "", "", EvExecutionError, fmt.Sprintf("breakeven: cancel old SL failed: %v", err), nil)
 	}
 	if err := e.exec.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), qty, entry); err != nil {

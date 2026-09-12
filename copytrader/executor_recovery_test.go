@@ -34,10 +34,12 @@ type mockExchange struct {
 	cancelOrderErr error
 	setStopLossErr error
 	closeLongErr   error
-	setStopLossLog []float64 // stop prices passed to SetStopLoss
-	cancelOrderLog []string
-	closeCalled    int
-	cancelAllLog   []string // symbols passed to CancelAllOrders
+	setStopLossLog    []float64 // stop prices passed to SetStopLoss
+	setStopLossQtyLog []float64 // quantities passed to SetStopLoss
+	cancelOrderLog    []string
+	closeCalled       int
+	cancelAllLog      []string // symbols passed to CancelAllOrders
+	cancelSLLog       []string // symbols passed to CancelStopLossOrders
 }
 
 func (m *mockExchange) GetBalance() (map[string]interface{}, error) { return nil, nil }
@@ -61,15 +63,19 @@ func (m *mockExchange) CloseShort(string, float64) (map[string]interface{}, erro
 func (m *mockExchange) SetLeverage(string, int) error          { return nil }
 func (m *mockExchange) SetMarginMode(string, bool) error       { return nil }
 func (m *mockExchange) GetMarketPrice(string) (float64, error) { return 100, nil }
-func (m *mockExchange) SetStopLoss(_ string, _ string, _ float64, stopPrice float64) error {
+func (m *mockExchange) SetStopLoss(_ string, _ string, qty float64, stopPrice float64) error {
 	if m.setStopLossErr != nil {
 		return m.setStopLossErr
 	}
 	m.setStopLossLog = append(m.setStopLossLog, stopPrice)
+	m.setStopLossQtyLog = append(m.setStopLossQtyLog, qty)
 	return nil
 }
 func (m *mockExchange) SetTakeProfit(string, string, float64, float64) error { return nil }
-func (m *mockExchange) CancelStopLossOrders(string) error                    { return nil }
+func (m *mockExchange) CancelStopLossOrders(symbol string) error {
+	m.cancelSLLog = append(m.cancelSLLog, symbol)
+	return nil
+}
 func (m *mockExchange) CancelTakeProfitOrders(string) error                  { return nil }
 func (m *mockExchange) CancelAllOrders(symbol string) error {
 	m.cancelAllLog = append(m.cancelAllLog, symbol)
