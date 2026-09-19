@@ -124,6 +124,8 @@ export interface CopyTradeSignal {
   message_revision: number
   ai_run_id: number
   trade_context_id: string
+  // Current state of a uniquely linked trade; signal.status is processing only.
+  trade_state?: string
   classification: string
   action: string
   symbol: string

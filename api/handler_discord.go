@@ -360,7 +360,12 @@ func (s *Server) handleGetCopyTradeSignals(c *gin.Context) {
 		writeSignalsCSV(c, signals)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"signals": signals})
+	views, err := s.store.CopyTrade().SignalViews(traderID, signals)
+	if err != nil {
+		SafeInternalError(c, "Failed to read linked trade states", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"signals": views})
 }
 
 // writeEventsCSV streams events as a CSV attachment.

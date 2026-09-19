@@ -669,14 +669,21 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 	// Entry decision (direction-aware: favorable prices enter at market,
 	// adverse ones tolerate the configured threshold, then rest as limits).
 	entrySpec := interp.EntryOrders[0].Price
-	entryType, entryPrice, err := DecideEntryType(interp.Direction, entrySpec, marketPrice,
+	decision, err := decideEntry(interp.Direction, entrySpec, marketPrice,
 		e.cfg.PriceOffsetPctFor(canonical), e.cfg.LimitToMarketWithin)
-	if err != nil || entryType == EntryPlanSkip {
+	if err != nil || decision.OrderType == EntryPlanSkip {
 		if err == nil {
 			err = fmt.Errorf("no executable entry")
 		}
 		return SkipUnsupportedPriceSpec, nil
 	}
+	entryType, entryPrice := decision.OrderType, decision.EntryPrice
+	e.events.Info(traceID, signalID, msg.MessageID, EvEntryDecision,
+		fmt.Sprintf("%s %s: author=%s/%s reference=%.8g market=%.8g threshold=%.8g%% limit_conversion=%t -> %s @ %.8g (%s)",
+			canonical, interp.Direction, interp.EntryOrders[0].OrderType, entrySpec.Type,
+			decision.ReferencePrice, decision.MarketPrice, decision.ThresholdPct,
+			decision.LimitToMarketWithin, entryType, entryPrice, decision.Reason),
+		map[string]interface{}{"symbol": canonical, "source_order_type": interp.EntryOrders[0].OrderType, "decision": decision})
 
 	// Resolve SL / TP hard prices against the entry reference.
 	slPrice := resolveHardPrice(interp.StopLossLevels[0].Price, entryPrice)

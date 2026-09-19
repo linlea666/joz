@@ -12,6 +12,7 @@ import type {
 } from '../../types'
 import { t, type Language } from '../../i18n/translations'
 import { formatQuantity } from '../../utils/format'
+import { CopyTradeExecutionDetails, tradeStateLabel } from './CopyTradeExecutionDetails'
 
 type LogTab = 'events' | 'signals' | 'contexts' | 'aistats' | 'replay'
 type TimeRange = 'all' | 'today' | '7d' | '30d' | 'custom'
@@ -97,6 +98,7 @@ export function CopyTradeLogModal({
   const [openReplayId, setOpenReplayId] = useState<string | null>(null)
   const [openSignalId, setOpenSignalId] = useState<string | null>(null)
   const [signalRuns, setSignalRuns] = useState<Record<string, CopyTradeAIRun | 'loading' | 'missing'>>({})
+  const [signalEvents, setSignalEvents] = useState<Record<string, CopyTradeEvent[] | 'loading' | 'error'>>({})
 
   const load = useCallback(async () => {
     setIsLoading(true)
@@ -143,18 +145,24 @@ export function CopyTradeLogModal({
       return
     }
     setOpenSignalId(sig.id)
-    if (!sig.ai_run_id) {
-      setSignalRuns((prev) => ({ ...prev, [sig.id]: 'missing' }))
-      return
-    }
-    if (signalRuns[sig.id] && signalRuns[sig.id] !== 'loading') return
     setSignalRuns((prev) => ({ ...prev, [sig.id]: 'loading' }))
-    try {
-      const run = await api.getCopyTradeAIRun(traderId, sig.ai_run_id)
-      setSignalRuns((prev) => ({ ...prev, [sig.id]: run }))
-    } catch {
-      setSignalRuns((prev) => ({ ...prev, [sig.id]: 'missing' }))
-    }
+    setSignalEvents((prev) => ({ ...prev, [sig.id]: 'loading' }))
+    // The reconciler records fills/timeouts under reconcile-<context ID>.
+    // Only join it when the API established a unique trade association.
+    const traces = [sig.id]
+    if (sig.trade_state && sig.trade_context_id) traces.push(`reconcile-${sig.trade_context_id}`)
+    const [run, execution] = await Promise.allSettled([
+      sig.ai_run_id ? api.getCopyTradeAIRun(traderId, sig.ai_run_id) : Promise.resolve(null),
+      Promise.all(traces.map((trace) => api.getCopyTradeEvents(traderId, 100, 0, undefined, undefined, trace))),
+    ])
+    setSignalRuns((prev) => ({ ...prev, [sig.id]: run.status === 'fulfilled' && run.value ? run.value : 'missing' }))
+    setSignalEvents((prev) => ({
+      ...prev,
+      [sig.id]: execution.status === 'fulfilled'
+        ? [...new Map(execution.value.flat().map((event) => [event.id, event])).values()]
+          .sort((a, b) => Date.parse(a.occurred_at) - Date.parse(b.occurred_at) || a.id - b.id)
+        : 'error',
+    }))
   }
 
   const handleExport = async () => {
@@ -174,9 +182,9 @@ export function CopyTradeLogModal({
     load()
   }, [load])
 
-  // Auto-refresh events every 10s while open
+  // Lifecycle state can change after a signal has finished processing.
   useEffect(() => {
-    if (tab !== 'events') return
+    if (tab !== 'events' && tab !== 'signals' && tab !== 'contexts') return
     const timer = setInterval(load, 10000)
     return () => clearInterval(timer)
   }, [tab, load])
@@ -377,6 +385,7 @@ export function CopyTradeLogModal({
                       <td className="py-2 pr-2 font-mono">{sig.symbol || '-'}</td>
                       <td className="py-2 pr-2">
                         <span
+                          title={sig.status === 'executed' ? t('copytrade.processedHint', language) : undefined}
                           style={{
                             color:
                               sig.status === 'executed'
@@ -388,9 +397,14 @@ export function CopyTradeLogModal({
                                     : '#8A8478',
                           }}
                         >
-                          {sig.status}
+                          {sig.status === 'executed' ? t('copytrade.processed', language) : sig.status}
                           {sig.skip_reason ? ` (${sig.skip_reason})` : ''}
                         </span>
+                        {sig.trade_state && (
+                          <div className="text-nofx-text mt-1">
+                            {t('copytrade.linkedTradeState', language)}: {tradeStateLabel(sig.trade_state, language)}
+                          </div>
+                        )}
                       </td>
                       <td className="py-2 pr-2 text-right font-mono">
                         {sig.llm_request_ms > 0 ? sig.llm_request_ms : '-'}
@@ -405,14 +419,19 @@ export function CopyTradeLogModal({
                           className="text-nofx-gold hover:underline whitespace-nowrap"
                         >
                           {openSignalId === sig.id
-                            ? t('copytrade.hideIO', language)
-                            : t('copytrade.showIO', language)}
+                            ? t('copytrade.hideDetails', language)
+                            : t('copytrade.showDetails', language)}
                         </button>
                       </td>
                     </tr>
                     {openSignalId === sig.id && (
                       <tr key={`${sig.id}-io`} className="border-b border-nofx-gold/10">
                         <td colSpan={7} className="py-2">
+                          <CopyTradeExecutionDetails
+                            events={signalEvents[sig.id]}
+                            language={language}
+                            expectsEntry={sig.action === 'OPEN' || sig.action === 'ADD'}
+                          />
                           {signalRuns[sig.id] === 'loading' && (
                             <div className="text-nofx-text-muted text-xs px-2">
                               {t('copytrade.loadingIO', language)}

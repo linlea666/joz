@@ -136,6 +136,26 @@ const (
 	EntryPlanSkip   EntryPlanType = "SKIP"
 )
 
+// entryDecision is the policy result and its input snapshot. The executor and
+// audit event consume the SAME result, so explaining a decision cannot drift
+// from the order actually planned. Deviations are percentage points, not ratios.
+type entryDecision struct {
+	Direction           Direction     `json:"direction"`
+	SourcePriceSpec     PriceSpec     `json:"source_price_spec"`
+	MarketPrice         float64       `json:"market_price"`
+	ReferencePrice      float64       `json:"reference_price,omitempty"`
+	AdverseDeviationPct *float64      `json:"adverse_deviation_pct,omitempty"`
+	ThresholdPct        float64       `json:"threshold_pct"`
+	LimitToMarketWithin bool          `json:"limit_to_market_within_threshold"`
+	OrderType           EntryPlanType `json:"order_type"`
+	EntryPrice          float64       `json:"entry_price"`
+	Reason              string        `json:"reason"`
+}
+
+// Only absorbs floating-point rounding at the inclusive threshold boundary.
+// A zero threshold is handled separately and never gains any tolerance.
+const entryThresholdEpsilon = 1e-9
+
 // DecideEntryType applies the DIRECTION-AWARE price-deviation policy.
 //
 // "Favorable" means the live market is at or better than the author's
@@ -156,8 +176,25 @@ const (
 //     favorable prices enter at market, everything unfavorable rests as a
 //     limit at the reference.
 func DecideEntryType(direction Direction, spec PriceSpec, marketPrice, thresholdPct float64, limitToMarketWithin bool) (EntryPlanType, float64, error) {
-	if marketPrice <= 0 {
-		return EntryPlanSkip, 0, fmt.Errorf("market price unavailable")
+	d, err := decideEntry(direction, spec, marketPrice, thresholdPct, limitToMarketWithin)
+	return d.OrderType, d.EntryPrice, err
+}
+
+func decideEntry(direction Direction, spec PriceSpec, marketPrice, thresholdPct float64, limitToMarketWithin bool) (entryDecision, error) {
+	d := entryDecision{
+		Direction: direction, SourcePriceSpec: spec, MarketPrice: marketPrice,
+		ThresholdPct: thresholdPct, LimitToMarketWithin: limitToMarketWithin,
+		OrderType: EntryPlanSkip,
+	}
+	finish := func(kind EntryPlanType, price float64, reason string) (entryDecision, error) {
+		d.OrderType, d.EntryPrice, d.Reason = kind, price, reason
+		return d, nil
+	}
+	if marketPrice <= 0 || math.IsNaN(marketPrice) || math.IsInf(marketPrice, 0) {
+		return d, fmt.Errorf("market price unavailable")
+	}
+	if math.IsNaN(thresholdPct) || math.IsInf(thresholdPct, 0) {
+		return d, fmt.Errorf("price offset threshold must be finite")
 	}
 	favorable := func(ref float64) bool {
 		if direction == DirectionShort {
@@ -165,59 +202,82 @@ func DecideEntryType(direction Direction, spec PriceSpec, marketPrice, threshold
 		}
 		return marketPrice <= ref
 	}
-	// Adverse tolerance; a disabled threshold tolerates nothing.
-	withinThreshold := func(ref float64) bool {
-		if thresholdPct <= 0 || ref <= 0 {
-			return false
+	setReference := func(ref float64) {
+		d.ReferencePrice = ref
+		deviation := (marketPrice - ref) / ref * 100
+		if direction == DirectionShort {
+			deviation = -deviation
 		}
-		return math.Abs(marketPrice-ref)/ref*100 <= thresholdPct
+		deviation = math.Max(0, deviation)
+		d.AdverseDeviationPct = &deviation
+	}
+	withinThreshold := func() bool {
+		return thresholdPct > 0 && d.AdverseDeviationPct != nil &&
+			*d.AdverseDeviationPct <= thresholdPct+entryThresholdEpsilon
 	}
 
 	switch spec.Type {
 	case PriceMarket:
-		// Author asked for market entry. Without a stated reference there is
-		// nothing to compare against: plain market. With one ("CMP ~62000"),
-		// enter while favorable or within tolerance; once the move has run
-		// away in the adverse direction, wait at the reference instead.
-		if spec.Price <= 0 || favorable(spec.Price) || withinThreshold(spec.Price) {
-			return EntryPlanMarket, marketPrice, nil
+		if spec.Price < 0 || math.IsNaN(spec.Price) || math.IsInf(spec.Price, 0) {
+			return d, fmt.Errorf("market entry reference must be non-negative and finite")
 		}
-		return EntryPlanLimit, spec.Price, nil
-	case PriceFixed:
-		if spec.Price <= 0 {
-			return EntryPlanSkip, 0, fmt.Errorf("fixed entry price missing")
+		if spec.Price == 0 {
+			return finish(EntryPlanMarket, marketPrice, "market_without_reference")
 		}
+		setReference(spec.Price)
 		if favorable(spec.Price) {
-			return EntryPlanMarket, marketPrice, nil
+			return finish(EntryPlanMarket, marketPrice, "favorable_price")
 		}
-		if limitToMarketWithin && withinThreshold(spec.Price) {
-			return EntryPlanMarket, marketPrice, nil
+		if withinThreshold() {
+			return finish(EntryPlanMarket, marketPrice, "adverse_within_threshold")
 		}
-		return EntryPlanLimit, spec.Price, nil
+		if thresholdPct <= 0 {
+			return finish(EntryPlanLimit, spec.Price, "adverse_tolerance_disabled")
+		}
+		return finish(EntryPlanLimit, spec.Price, "adverse_beyond_threshold")
+	case PriceFixed:
+		if spec.Price <= 0 || math.IsNaN(spec.Price) || math.IsInf(spec.Price, 0) {
+			return d, fmt.Errorf("fixed entry price missing or invalid")
+		}
+		setReference(spec.Price)
+		if favorable(spec.Price) {
+			return finish(EntryPlanMarket, marketPrice, "favorable_price")
+		}
+		if withinThreshold() {
+			if limitToMarketWithin {
+				return finish(EntryPlanMarket, marketPrice, "adverse_within_threshold")
+			}
+			return finish(EntryPlanLimit, spec.Price, "limit_conversion_disabled")
+		}
+		if thresholdPct <= 0 {
+			return finish(EntryPlanLimit, spec.Price, "adverse_tolerance_disabled")
+		}
+		return finish(EntryPlanLimit, spec.Price, "adverse_beyond_threshold")
 	case PriceRange:
 		low, high := spec.RangeLow, spec.RangeHigh
 		if low > high {
 			low, high = high, low
 		}
-		if low <= 0 {
-			return EntryPlanSkip, 0, fmt.Errorf("entry range invalid")
+		if low <= 0 || math.IsNaN(low) || math.IsNaN(high) || math.IsInf(low, 0) || math.IsInf(high, 0) {
+			return d, fmt.Errorf("entry range invalid")
 		}
+		setReference((low + high) / 2)
 		if marketPrice >= low && marketPrice <= high {
-			return EntryPlanMarket, marketPrice, nil
+			return finish(EntryPlanMarket, marketPrice, "inside_entry_range")
 		}
 		if direction == DirectionShort && marketPrice > high { // better than the whole zone
-			return EntryPlanMarket, marketPrice, nil
+			return finish(EntryPlanMarket, marketPrice, "favorable_price")
 		}
 		if direction != DirectionShort && marketPrice < low { // long better than the whole zone
-			return EntryPlanMarket, marketPrice, nil
+			return finish(EntryPlanMarket, marketPrice, "favorable_price")
 		}
 		// Adverse: rest a limit at the zone midpoint — a balance between the
 		// near edge (fills first, worst price of the zone) and the far edge
 		// (best price, may never fill). Matches how authors mean a zone:
 		// an average entry around its middle.
-		return EntryPlanLimit, (low + high) / 2, nil
+		return finish(EntryPlanLimit, d.ReferencePrice, "adverse_range_midpoint")
 	default:
-		return EntryPlanSkip, 0, fmt.Errorf("unsupported entry price spec %q", spec.Type)
+		return d, fmt.Errorf("unsupported entry price spec %q", spec.Type)
 	}
 }
 

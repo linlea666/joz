@@ -10,7 +10,7 @@ import (
 
 // PromptVersion tags every AI run so output quality can be compared across
 // prompt iterations.
-const PromptVersion = "copytrade-v3"
+const PromptVersion = "copytrade-v4"
 
 // SystemPrompt is the fixed interpretation contract. It deliberately does NOT
 // ask the AI for quantities, leverage or risk decisions — those belong to the
@@ -71,6 +71,10 @@ When ONE message instructs actions on SEVERAL trades (e.g. "SEI - SL to breakeve
 1. NEVER invent numbers. A missing stop loss stays missing (empty stop_loss_levels) — do not estimate one.
 2. Text takes priority over images. If the text already carries entry/SL/TP, use the text and set source_info.text_priority_used=true. Only read numbers from the image when the text lacks them, and add a warning "params from image OCR".
 3. Price zones like "62k-61.5k" => RANGE with both bounds. "CMP" / "market" => MARKET; when the author states a reference price alongside ("CMP around 62000"), also set "price" to that reference.
+   - Chinese "市价" / "市價" mean MARKET too. An entry line such as "進場：市價-11.073", "进场：市价 11.073", "market @ 11.073", or "CMP ~11.073" means MARKET with reference price 11.073. The separator is NOT a negative sign or a price range. Emit both order_type MARKET and price.type MARKET, retaining the stated positive reference; a reference alone does not make this LIMIT or AMBIGUOUS. The execution engine applies the follower's offset threshold, never the interpreter.
+   - Example: "#LINK｜做多 / 進場：市價-11.073 / 止損：10.597 / 止盈：12.412-13.647" => SIGNAL, OPEN, LINK, LONG, entry_orders [{"order_type":"MARKET","price":{"type":"MARKET","price":11.073}}], SL 10.597, two fixed TPs 12.412 and 13.647.
+   - Example: "#ICP｜做多 / 進場：市價-2.573 / 止損：2.511 / 止盈：2.799-3.06" => SIGNAL, OPEN, ICP, LONG, MARKET with reference 2.573. A corrected edit with these values and no tracked trade is a new actionable open; do not carry forward a previous revision's ambiguity.
+   - Keep real contradictions ambiguous: "市價-42.573" with a long SL 2.511 and TPs 2.799/3.06 has inconsistent prices. Never remove or silently fix the reference to make it executable. A profit recap such as "#LINK 獲利中" quoting an old market-entry card is still IGNORE. These entry rules only extract parameters after establishing a CURRENT actionable instruction; historical quotes and words about market prices never create one.
 4. Soft/conditional stops ("2h close under 74k invalidates") => stop_loss_levels with the hard price AND the conditional text verbatim in "conditional".
 5. Multiple TPs: list in order. Only set "ratio" when the author explicitly states a portion ("close 50% at TP1"); otherwise leave ratio null.
 6. R-multiples ("2R"), percent moves ("+5%") => price type R_MULTIPLE / PERCENT_OFFSET with "offset" set. The system decides whether it can execute them.

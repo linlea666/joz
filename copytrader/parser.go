@@ -203,7 +203,11 @@ func normalizePriceSpec(p *PriceSpec, field string) error {
 		if p.RangeLow <= 0 || p.RangeHigh <= 0 {
 			return fmt.Errorf("%s: RANGE requires both bounds", field)
 		}
-	case PriceMarket, PriceEntry, PriceBreakeven, PriceRMultiple, PricePercentOffset, PriceUnknown:
+	case PriceMarket:
+		if p.Price < 0 {
+			return fmt.Errorf("%s: MARKET reference price must not be negative", field)
+		}
+	case PriceEntry, PriceBreakeven, PriceRMultiple, PricePercentOffset, PriceUnknown:
 	case "":
 		p.Type = PriceUnknown
 	default:

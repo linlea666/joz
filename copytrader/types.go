@@ -74,7 +74,7 @@ const (
 // PriceSpec is a structured price expression.
 type PriceSpec struct {
 	Type      PriceSpecType `json:"type"`
-	Price     float64       `json:"price,omitempty"`      // FIXED
+	Price     float64       `json:"price,omitempty"`      // FIXED price, or optional MARKET reference
 	RangeLow  float64       `json:"range_low,omitempty"`  // RANGE (lower bound)
 	RangeHigh float64       `json:"range_high,omitempty"` // RANGE (upper bound)
 	Offset    float64       `json:"offset,omitempty"`     // R_MULTIPLE multiplier or percent offset

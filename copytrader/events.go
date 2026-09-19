@@ -19,6 +19,7 @@ const (
 	EvSignalSkipped    = "copytrade.signal.skipped"
 	EvQuantityPlan     = "copytrade.risk.quantity_plan"
 	EvRiskRejected     = "copytrade.risk.rejected"
+	EvEntryDecision    = "copytrade.entry.decision"
 	EvEntrySubmitted   = "copytrade.order.entry_submitted"
 	EvEntryFilled      = "copytrade.order.entry_filled"
 	EvSLSet            = "copytrade.order.sl_set"

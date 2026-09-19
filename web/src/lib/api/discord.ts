@@ -87,9 +87,11 @@ export const discordApi = {
     limit = 100,
     offset = 0,
     startTimeMs?: number,
-    endTimeMs?: number
+    endTimeMs?: number,
+    traceId?: string
   ): Promise<CopyTradeEvent[]> {
     let url = `${API_BASE}/copytrade/events?trader_id=${encodeURIComponent(traderId)}&limit=${limit}&offset=${offset}`
+    if (traceId) url += `&trace_id=${encodeURIComponent(traceId)}`
     if (startTimeMs) url += `&start_time=${startTimeMs}`
     if (endTimeMs) url += `&end_time=${endTimeMs}`
     const result = await httpClient.get<{ events: CopyTradeEvent[] }>(url)

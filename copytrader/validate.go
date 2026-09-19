@@ -79,6 +79,23 @@ func validateOpen(si *SourceInterpretation, marketPrice float64) (SkipReason, er
 	if len(si.StopLossLevels) == 0 {
 		return SkipRiskRejected, nil
 	}
+	// A MARKET price may also carry the author's reference ("市價-2.573").
+	// entryReferencePrice intentionally uses the live price for market SL/TP
+	// validation, so check the stated reference separately instead of silently
+	// losing its digit-error protection. Zero still means no reference.
+	for _, entry := range si.EntryOrders {
+		if entry.Price.Type != PriceMarket {
+			continue
+		}
+		if entry.Price.Price < 0 {
+			return SkipNone, fmt.Errorf("market entry reference must not be negative")
+		}
+		if entry.Price.Price > 0 {
+			if err := SanityCheckPrice("market entry reference", entry.Price.Price, marketPrice, sanityPct(marketPrice)); err != nil {
+				return SkipSanityCheck, nil
+			}
+		}
+	}
 
 	entryRef := entryReferencePrice(si.EntryOrders[0].Price, marketPrice)
 	if entryRef <= 0 {

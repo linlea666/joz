@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -132,6 +133,14 @@ type CopyTradeSignal struct {
 }
 
 func (CopyTradeSignal) TableName() string { return "copytrade_signals" }
+
+// CopyTradeSignalView adds the current lifecycle state of a uniquely linked
+// trade without changing persisted signal statuses (also used for dedup).
+// It is a read-only response DTO, never a migrated database model.
+type CopyTradeSignalView struct {
+	*CopyTradeSignal
+	TradeState string `json:"trade_state,omitempty"`
+}
 
 // ---------------------------------------------------------------------------
 // Execution events: full trace waterfall (mirrors the reference project)
@@ -363,6 +372,56 @@ func (s *CopyTradeStore) GetRecentSignals(traderID string, start, end time.Time,
 	}
 	err := q.Order("message_timestamp DESC").Limit(limit).Find(&sigs).Error
 	return sigs, err
+}
+
+// SignalViews joins lifecycle state in one bounded query. A multi-instruction
+// signal can link only its last opened context in legacy data; that is not a
+// unique state for the whole signal. Unknown/malformed interpretations also
+// omit the state rather than claiming that an order filled.
+func (s *CopyTradeStore) SignalViews(traderID string, signals []*CopyTradeSignal) ([]*CopyTradeSignalView, error) {
+	views := make([]*CopyTradeSignalView, 0, len(signals))
+	eligible := make(map[string][]*CopyTradeSignalView)
+	for _, sig := range signals {
+		view := &CopyTradeSignalView{CopyTradeSignal: sig}
+		views = append(views, view)
+		if sig.TraderID != traderID || sig.TradeContextID == "" {
+			continue
+		}
+		var interpretation struct {
+			Action       string            `json:"action"`
+			Instructions []json.RawMessage `json:"instructions"`
+		}
+		if err := json.Unmarshal([]byte(sig.InterpretationJSON), &interpretation); err != nil ||
+			(interpretation.Action == "" && len(interpretation.Instructions) == 0) || len(interpretation.Instructions) > 1 {
+			continue
+		}
+		if len(interpretation.Instructions) == 1 {
+			var instruction struct {
+				Action string `json:"action"`
+			}
+			if err := json.Unmarshal(interpretation.Instructions[0], &instruction); err != nil || instruction.Action == "" {
+				continue
+			}
+		}
+		eligible[sig.TradeContextID] = append(eligible[sig.TradeContextID], view)
+	}
+	if len(eligible) == 0 {
+		return views, nil
+	}
+	ids := make([]string, 0, len(eligible))
+	for id := range eligible {
+		ids = append(ids, id)
+	}
+	var contexts []CopyTradeContext
+	if err := s.db.Select("id", "state").Where("trader_id = ? AND id IN ?", traderID, ids).Find(&contexts).Error; err != nil {
+		return nil, err
+	}
+	for _, ctx := range contexts {
+		for _, view := range eligible[ctx.ID] {
+			view.TradeState = ctx.State
+		}
+	}
+	return views, nil
 }
 
 // GetContextSignals returns recent interpreted signals of a channel for prompt
