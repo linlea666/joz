@@ -227,12 +227,12 @@ func TestParseInterpretation_MultiInstructionRejections(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := ParseInterpretation(tc.raw)
-			if err == nil {
-				t.Fatal("expected error, got nil")
+			parsed, err := ParseInterpretation(tc.raw)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("error %q does not contain %q", err.Error(), tc.want)
+			if len(parsed.Instructions) != 1 || parsed.Instructions[0].Classification != ClassificationAmbiguous || !strings.Contains(parsed.Instructions[0].Reasoning, tc.want) {
+				t.Fatalf("bad child must be isolated: %+v", parsed.Instructions)
 			}
 		})
 	}

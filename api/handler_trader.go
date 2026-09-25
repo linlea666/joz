@@ -501,6 +501,16 @@ func (s *Server) handleCreateTrader(c *gin.Context) {
 		return
 	}
 
+	if traderType == string(copytrader.TraderTypeCopy) {
+		cfg, err := copytrader.ParseCopyTradingConfig(req.CopyTradingConfig)
+		if err == nil {
+			err = cfg.ValidateExchange(exchangeCfg.ExchangeType)
+		}
+		if err != nil {
+			SafeBadRequest(c, "Copy trading configuration: "+err.Error())
+			return
+		}
+	}
 	{
 		tempTrader, createErr := buildExchangeProbeTrader(exchangeCfg, userID)
 		if createErr != nil {
@@ -698,17 +708,28 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 	// Copy trading config update (trader_type itself never changes after creation)
 	copyTradingConfig := existingTrader.CopyTradingConfig
 	primaryChannelID := existingTrader.PrimaryChannelID
-	if existingTrader.TraderType == string(copytrader.TraderTypeCopy) && req.CopyTradingConfig != "" {
-		ctCfg, cfgErr := copytrader.ParseCopyTradingConfig(req.CopyTradingConfig)
-		if cfgErr == nil {
-			cfgErr = ctCfg.Validate()
+	if existingTrader.TraderType == string(copytrader.TraderTypeCopy) {
+		if req.CopyTradingConfig != "" {
+			copyTradingConfig = req.CopyTradingConfig
 		}
-		if cfgErr != nil {
-			SafeBadRequest(c, fmt.Sprintf("Copy trading configuration is invalid: %s", cfgErr.Error()))
+		ctCfg, cfgErr := copytrader.ParseCopyTradingConfig(copyTradingConfig)
+		exchangeID := req.ExchangeID
+		if exchangeID == "" {
+			exchangeID = existingTrader.ExchangeID
+		}
+		exchange, exErr := s.store.Exchange().GetByID(userID, exchangeID)
+		if exErr != nil || exchange == nil {
+			SafeBadRequest(c, "Exchange account not found")
 			return
 		}
-		encoded, _ := ctCfg.Encode()
-		copyTradingConfig = encoded
+		if cfgErr == nil {
+			cfgErr = ctCfg.ValidateExchange(exchange.ExchangeType)
+		}
+		if cfgErr != nil {
+			SafeBadRequest(c, "Copy trading configuration is invalid: "+cfgErr.Error())
+			return
+		}
+		copyTradingConfig, _ = ctCfg.Encode()
 		primaryChannelID = ctCfg.PrimaryChannelID
 	}
 

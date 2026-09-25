@@ -73,32 +73,37 @@ func extractJSONObject(raw string) (string, error) {
 
 // normalizeInterpretation canonicalizes enums and rejects invalid values.
 func normalizeInterpretation(si *SourceInterpretation) error {
-	si.Classification = Classification(strings.ToUpper(strings.TrimSpace(string(si.Classification))))
-	switch si.Classification {
-	case ClassificationSignal, ClassificationIgnore, ClassificationNeedsContext,
-		ClassificationAmbiguous, ClassificationUnsupported:
-	case "":
-		return fmt.Errorf("missing classification")
-	default:
-		return fmt.Errorf("unknown classification %q", si.Classification)
+	if err := normalizeClassification(si); err != nil {
+		return err
 	}
 
-	// Multi-instruction message: every element inherits the message-level
-	// classification and provenance, is normalized like a standalone
-	// instruction, and may not nest further. The top-level per-trade fields
-	// then act only as a summary for storage/UI.
+	// Older responses put classification only at the message level. Keep that
+	// inheritance, but do not overwrite a child's explicit unsupported/ambiguous
+	// outcome when a message contains several independent actions.
 	if len(si.Instructions) > 0 {
 		symbols := make([]string, 0, len(si.Instructions))
 		seen := map[string]bool{}
 		for i, ins := range si.Instructions {
 			if ins == nil {
-				return fmt.Errorf("instructions[%d] is null", i)
+				si.Instructions[i] = &SourceInterpretation{Classification: ClassificationAmbiguous, Action: ActionIgnore, Reasoning: "instruction is null"}
+				continue
 			}
 			ins.Instructions = nil
-			ins.Classification = si.Classification
-			ins.SourceInfo = si.SourceInfo
+			if ins.Classification == "" {
+				ins.Classification = si.Classification
+			}
+			if err := normalizeClassification(ins); err != nil {
+				ins.Classification = ClassificationAmbiguous
+				ins.Reasoning = err.Error()
+				continue
+			}
+			if ins.SourceInfo == (SourceInfo{}) {
+				ins.SourceInfo = si.SourceInfo
+			}
 			if err := normalizeInstructionFields(ins); err != nil {
-				return fmt.Errorf("instructions[%d]: %w", i, err)
+				ins.Classification = ClassificationAmbiguous
+				ins.Reasoning = err.Error()
+				continue
 			}
 			if s := ins.Symbol; s != "" && !seen[s] {
 				seen[s] = true
@@ -112,8 +117,24 @@ func normalizeInterpretation(si *SourceInterpretation) error {
 			si.Symbol = strings.Join(symbols, ", ")
 		}
 	}
-
+	if len(si.Instructions) > 0 {
+		return nil
+	}
 	return normalizeInstructionFields(si)
+}
+
+func normalizeClassification(si *SourceInterpretation) error {
+	si.Classification = Classification(strings.ToUpper(strings.TrimSpace(string(si.Classification))))
+	switch si.Classification {
+	case ClassificationSignal, ClassificationIgnore, ClassificationNeedsContext,
+		ClassificationAmbiguous, ClassificationUnsupported:
+	case "":
+		return fmt.Errorf("missing classification")
+	default:
+		return fmt.Errorf("unknown classification %q", si.Classification)
+	}
+
+	return nil
 }
 
 // normalizeInstructionFields canonicalizes the per-trade fields shared by the
@@ -183,6 +204,9 @@ func normalizeInstructionFields(si *SourceInterpretation) error {
 		}
 	}
 	for i := range si.ConditionalRules {
+		if si.ConditionalRules[i].ConditionLevel < 0 {
+			return fmt.Errorf("negative condition level")
+		}
 		si.ConditionalRules[i].Action = Action(strings.ToUpper(string(si.ConditionalRules[i].Action)))
 		si.ConditionalRules[i].Condition = ConditionType(strings.ToUpper(string(si.ConditionalRules[i].Condition)))
 		if err := normalizePriceSpec(&si.ConditionalRules[i].Price, "conditional"); err != nil {
@@ -206,6 +230,10 @@ func normalizePriceSpec(p *PriceSpec, field string) error {
 	case PriceMarket:
 		if p.Price < 0 {
 			return fmt.Errorf("%s: MARKET reference price must not be negative", field)
+		}
+	case PriceTPLevel:
+		if p.Level < 1 {
+			return fmt.Errorf("%s: TP_LEVEL requires a positive level", field)
 		}
 	case PriceEntry, PriceBreakeven, PriceRMultiple, PricePercentOffset, PriceUnknown:
 	case "":

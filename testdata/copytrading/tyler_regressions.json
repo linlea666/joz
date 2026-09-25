@@ -1,0 +1,321 @@
+[
+  {
+    "name": "fil_distinct_message",
+    "source": "screenshot_transcription",
+    "content": "#FIL｜做多\n\n進場：市價-0.9385\n止損：0.9006\n\n止盈：1.0520-1.1295\n\n2%～3% 倉位｜10-25x",
+    "market_price": 0.9863,
+    "response": {
+      "classification": "SIGNAL",
+      "action": "OPEN",
+      "symbol": "FIL",
+      "direction": "LONG",
+      "entry_orders": [
+        {
+          "order_type": "MARKET",
+          "price": {
+            "type": "MARKET",
+            "price": 0.9385
+          }
+        }
+      ],
+      "stop_loss_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.9006
+          }
+        }
+      ],
+      "take_profit_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 1.052
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 1.1295
+          }
+        }
+      ]
+    },
+    "expected_classification": "SIGNAL",
+    "expected_action": "OPEN",
+    "expected_entry_type": "LIMIT"
+  },
+  {
+    "name": "flock_distinct_message",
+    "source": "screenshot_transcription",
+    "content": "#FLOCK｜做多🚀🚀🚀\n\n進場：市價\n止損：0.067\n\n止盈：0.07507 - 0.07785 - 0.08324\n\n2%～3% 倉位｜20x",
+    "market_price": 0.0713,
+    "response": {
+      "classification": "SIGNAL",
+      "action": "OPEN",
+      "symbol": "FLOCK",
+      "direction": "LONG",
+      "entry_orders": [
+        {
+          "order_type": "MARKET",
+          "price": {
+            "type": "MARKET"
+          }
+        }
+      ],
+      "stop_loss_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.067
+          }
+        }
+      ],
+      "take_profit_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.07507
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.07785
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.08324
+          }
+        }
+      ]
+    },
+    "expected_classification": "SIGNAL",
+    "expected_action": "OPEN",
+    "expected_entry_type": "MARKET"
+  },
+  {
+    "name": "sndk_stock_contract",
+    "source": "screenshot_transcription",
+    "content": "#SNDK｜做空【股票合約】\n\n進場：市價-1821.35\n止損：1845.68\n\n止盈：1730.14-1686.55-1641.82\n\n2%～3% 倉位｜20-35x",
+    "market_price": 1821.35,
+    "response": {
+      "classification": "SIGNAL",
+      "action": "OPEN",
+      "symbol": "SNDK",
+      "direction": "SHORT",
+      "entry_orders": [
+        {
+          "order_type": "MARKET",
+          "price": {
+            "type": "MARKET",
+            "price": 1821.35
+          }
+        }
+      ],
+      "stop_loss_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 1845.68
+          }
+        }
+      ],
+      "take_profit_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 1730.14
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 1686.55
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 1641.82
+          }
+        }
+      ]
+    },
+    "expected_classification": "SIGNAL",
+    "expected_action": "OPEN",
+    "expected_entry_type": "MARKET"
+  },
+  {
+    "name": "flock_pnl_recap",
+    "source": "screenshot_transcription",
+    "content": "沒開玩笑，10分鐘不到2倍",
+    "embeds_json": "[{\"type\": \"rich\", \"description\": \"#FLOCK｜做多🚀🚀🚀\\n\\n進場：市價\\n止損：0.067\\n\\n止盈：0.07507 - 0.07785 - 0.08324\\n\\n2%～3% 倉位｜20x\", \"timestamp\": \"2026-09-24T06:59:00Z\", \"author\": {\"name\": \"TYLER source\"}}]",
+    "market_price": 0.08145,
+    "response": {
+      "classification": "SIGNAL",
+      "action": "OPEN",
+      "symbol": "FLOCK",
+      "direction": "LONG",
+      "entry_orders": [
+        {
+          "order_type": "MARKET",
+          "price": {
+            "type": "MARKET"
+          }
+        }
+      ],
+      "stop_loss_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.067
+          }
+        }
+      ],
+      "take_profit_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.07507
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.07785
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.08324
+          }
+        }
+      ]
+    },
+    "expected_classification": "IGNORE",
+    "expected_action": "IGNORE"
+  },
+  {
+    "name": "flock_quoted_recap",
+    "source": "screenshot_transcription",
+    "content": "#FLOCK 起飛，跟不上自己反思",
+    "embeds_json": "[{\"type\": \"rich\", \"description\": \"#FLOCK｜做多🚀🚀🚀\\n\\n進場：市價\\n止損：0.067\\n\\n止盈：0.07507 - 0.07785 - 0.08324\\n\\n2%～3% 倉位｜20x\", \"timestamp\": \"2026-09-24T06:59:00Z\", \"author\": {\"name\": \"TYLER source\"}}]",
+    "market_price": 0.08145,
+    "response": {
+      "classification": "SIGNAL",
+      "action": "OPEN",
+      "symbol": "FLOCK",
+      "direction": "LONG",
+      "entry_orders": [
+        {
+          "order_type": "MARKET",
+          "price": {
+            "type": "MARKET"
+          }
+        }
+      ],
+      "stop_loss_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.067
+          }
+        }
+      ],
+      "take_profit_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.07507
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.07785
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.08324
+          }
+        }
+      ]
+    },
+    "expected_classification": "IGNORE",
+    "expected_action": "IGNORE"
+  },
+  {
+    "name": "flock_quoted_reduce",
+    "source": "screenshot_transcription",
+    "content": "#FLOCK 2X，止盈或者減倉給套",
+    "embeds_json": "[{\"type\": \"rich\", \"description\": \"#FLOCK｜做多🚀🚀🚀\\n\\n進場：市價\\n止損：0.067\\n\\n止盈：0.07507 - 0.07785 - 0.08324\\n\\n2%～3% 倉位｜20x\", \"timestamp\": \"2026-09-24T06:59:00Z\", \"author\": {\"name\": \"TYLER source\"}}]",
+    "market_price": 0.08145,
+    "response": {
+      "classification": "SIGNAL",
+      "action": "OPEN",
+      "symbol": "FLOCK",
+      "direction": "LONG",
+      "entry_orders": [
+        {
+          "order_type": "MARKET",
+          "price": {
+            "type": "MARKET"
+          }
+        }
+      ],
+      "stop_loss_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.067
+          }
+        }
+      ],
+      "take_profit_levels": [
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.07507
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.07785
+          }
+        },
+        {
+          "price": {
+            "type": "FIXED",
+            "price": 0.08324
+          }
+        }
+      ]
+    },
+    "expected_classification": "SIGNAL",
+    "expected_action": "REDUCE"
+  },
+  {
+    "name": "zec_add_only",
+    "source": "sanitized_audit_text",
+    "content": "#ZEC 有補倉的自行提前作Tp1",
+    "market_price": 100,
+    "response": {
+      "classification": "SIGNAL",
+      "action": "REDUCE",
+      "symbol": "ZEC",
+      "warnings": [
+        "only if added"
+      ]
+    },
+    "expected_classification": "SIGNAL",
+    "expected_action": "REDUCE",
+    "requires_add_fill": true
+  }
+]

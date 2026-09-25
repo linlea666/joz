@@ -16,10 +16,18 @@ import (
 
 // TPPlanEntry is one planned take-profit order (persisted on the context).
 type TPPlanEntry struct {
-	Price    float64 `json:"price"`
-	Quantity float64 `json:"quantity"`
-	OrderID  string  `json:"order_id,omitempty"`
-	Filled   bool    `json:"filled,omitempty"`
+	DesiredQuantity     *float64 `json:"desired_quantity,omitempty"`
+	Ordinal             int      `json:"ordinal,omitempty"`
+	Price               float64  `json:"price"`
+	Quantity            float64  `json:"quantity"`
+	OrderID             string   `json:"order_id,omitempty"`
+	Filled              bool     `json:"filled,omitempty"`
+	FilledQuantity      float64  `json:"filled_quantity,omitempty"`
+	PriorFilledQuantity float64  `json:"prior_filled_quantity,omitempty"`
+	Generation          int      `json:"generation,omitempty"`
+	OrderKind           string   `json:"order_kind,omitempty"`
+	ClientID            string   `json:"client_id,omitempty"`
+	Status              string   `json:"status,omitempty"`
 }
 
 // Executor turns validated instructions into idempotent exchange operations.
@@ -55,23 +63,35 @@ func positionSideOf(direction string) string {
 
 // OpenPlan is the fully resolved, deterministic plan for an OPEN.
 type OpenPlan struct {
-	Symbol     string // canonical
-	RawSymbol  string
-	Direction  Direction
-	EntryType  EntryPlanType
-	EntryPrice float64 // limit price (LIMIT) or market reference (MARKET)
-	Quantity   float64
-	Leverage   int
-	StopLoss   float64
-	TPPrices   []float64
-	TPRatios   []float64
-	Sizing     *SizingResult
-	RootMsgID  string
-	ChannelID  string
+	Symbol           string // canonical
+	RawSymbol        string
+	Direction        Direction
+	EntryType        EntryPlanType
+	EntryPrice       float64 // limit price (LIMIT) or market reference (MARKET)
+	Quantity         float64
+	Leverage         int
+	StopLoss         float64
+	TPPrices         []float64
+	TPRatios         []float64
+	TPOrdinals       []int
+	TPOriginalPrices []float64
+	Sizing           *SizingResult
+	RootMsgID        string
+	ChannelID        string
+	SplitReference   float64
+	RiskBudget       float64
+	MaxNotional      float64
+	AvailableMargin  float64
+	EntryTimeout     time.Duration
+	SignalExpiresAt  time.Time
+	BreakevenTPLevel int
 }
 
 // ExecuteOpen runs the OPEN saga and returns the created trade context.
 func (x *Executor) ExecuteOpen(traceID, signalID string, plan *OpenPlan) (*store.CopyTradeContext, error) {
+	if _, ok := x.ex.(types.ManagedOrderTrader); ok {
+		return x.executeManagedOpen(traceID, signalID, plan)
+	}
 	// Best-effort account setup; failures here are tolerable on most exchanges.
 	if err := x.ex.SetLeverage(plan.Symbol, plan.Leverage); err != nil {
 		x.events.Warn(traceID, signalID, "", EvExecutionError,
@@ -112,6 +132,9 @@ func (x *Executor) ExecuteOpen(traceID, signalID string, plan *OpenPlan) (*store
 		Quantity:          plan.Quantity,
 		Leverage:          plan.Leverage,
 		StopLossPrice:     plan.StopLoss,
+		TPRecipeJSON:      planRecipeJSON(plan),
+		BreakevenAfterTP:  plan.BreakevenTPLevel > 0,
+		BreakevenTPLevel:  plan.BreakevenTPLevel,
 	}
 	if err := x.st.CopyTrade().CreateContext(ctx); err != nil {
 		return nil, fmt.Errorf("failed to persist trade context: %w", err)
@@ -206,20 +229,13 @@ func (x *Executor) executeLimitOpen(traceID, signalID string, plan *OpenPlan, ct
 		x.events.Error(traceID, signalID, "", EvExecutionError, fmt.Sprintf("limit entry failed: %v", err), nil)
 		return ctx, fmt.Errorf("limit entry failed: %w", err)
 	}
-	// Persist the TP plan for post-fill placement by the reconciler.
-	tpPlan := make([]TPPlanEntry, 0, len(plan.TPPrices))
-	for i, p := range plan.TPPrices {
-		ratio := 0.0
-		if i < len(plan.TPRatios) {
-			ratio = plan.TPRatios[i]
-		}
-		tpPlan = append(tpPlan, TPPlanEntry{Price: p, Quantity: ratio}) // quantity resolved at fill time from ratio
-	}
-	tpJSON, _ := json.Marshal(tpPlan)
+	// Ratios already live in the versioned TPRecipe. TPPlan contains actual
+	// order quantities only, and is created when the entry starts filling.
 	x.updateContext(ctx, map[string]interface{}{
 		"state":          string(StateEntryPending),
+		"entry_working":  true,
 		"entry_order_id": res.OrderID,
-		"tp_plan_json":   string(tpJSON),
+		"tp_plan_json":   "",
 	})
 	ctx.State = string(StateEntryPending)
 	ctx.EntryOrderID = res.OrderID
@@ -294,7 +310,7 @@ func (x *Executor) placeTPLadder(traceID, signalID string, plan *OpenPlan, fille
 		if i >= len(quantities) || quantities[i] <= 0 {
 			continue
 		}
-		entry := TPPlanEntry{Price: price, Quantity: quantities[i]}
+		entry := TPPlanEntry{Ordinal: planOrdinal(plan, i), Price: price, Quantity: quantities[i]}
 		if x.gridEx != nil {
 			res, err := x.gridEx.PlaceLimitOrder(&types.LimitOrderRequest{
 				Symbol:       plan.Symbol,
@@ -331,7 +347,14 @@ func (x *Executor) placeTPLadder(traceID, signalID string, plan *OpenPlan, fille
 // ExecuteClose closes a trade (full or partial). Idempotent: closing an
 // already-flat position is a NOOP.
 func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeContext, closeRatio float64) (SkipReason, error) {
-	pos, err := x.findPosition(ctx.Symbol, ctx.Direction)
+	if err := x.closeEntryEligibility(traceID, ctx, "EXIT_REQUESTED"); err != nil {
+		return SkipNone, err
+	}
+	x.refreshTPProgress(traceID, ctx)
+	if _, ok := x.ex.(types.ManagedOrderTrader); ok {
+		return x.executeManagedClose(traceID, signalID, ctx, closeRatio)
+	}
+	pos, err := x.freshPosition(ctx.Symbol, ctx.Direction)
 	if err != nil {
 		return SkipNone, fmt.Errorf("position lookup failed: %w", err)
 	}
@@ -388,17 +411,8 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 	} else {
 		remaining := pos.qty - closeQty
 		x.updateContext(ctx, map[string]interface{}{"quantity": remaining, "last_action": "REDUCE"})
-		// Re-issue SL for the remaining quantity so protection matches the position.
-		if ctx.StopLossPrice > 0 {
-			if cerr := x.cancelStopLossOrders(ctx.Symbol, ctx.Direction); cerr != nil {
-				x.events.Warn(traceID, signalID, "", EvExecutionError,
-					fmt.Sprintf("partial close: cancel old SL failed: %v", cerr), nil)
-			}
-			if serr := x.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), remaining, ctx.StopLossPrice); serr != nil {
-				// Reconciler's SL guard re-places it next cycle; log loudly.
-				x.events.Error(traceID, signalID, "", EvExecutionError,
-					fmt.Sprintf("partial close: re-issue SL failed (reconciler will retry): %v", serr), nil)
-			}
+		if err := x.restoreRemainingProtections(traceID, signalID, ctx, remaining); err != nil {
+			return SkipNone, fmt.Errorf("reduction filled; remaining protections need reconciliation: %w", err)
 		}
 		x.events.Success(traceID, signalID, "", EvTradeUpdated,
 			fmt.Sprintf("partial close done, remaining %.8g", remaining), 0, nil)
@@ -406,10 +420,17 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 	return SkipNone, nil
 }
 
-// ExecuteUpdateSL replaces the stop loss. newPrice must already be resolved
-// (ENTRY/BREAKEVEN mapped to the fill price by the caller).
+// ExecuteUpdateSL preserves the existing fixed-price execution interface.
 func (x *Executor) ExecuteUpdateSL(traceID, signalID string, ctx *store.CopyTradeContext, newPrice float64) (SkipReason, error) {
-	pos, err := x.findPosition(ctx.Symbol, ctx.Direction)
+	return x.ExecuteUpdateSLSpec(traceID, signalID, ctx, PriceSpec{Type: PriceFixed, Price: newPrice})
+}
+
+// Resolve entry-relative stops after cancellation settles any racing fills.
+func (x *Executor) ExecuteUpdateSLSpec(traceID, signalID string, ctx *store.CopyTradeContext, spec PriceSpec) (SkipReason, error) {
+	if err := x.closeEntryEligibility(traceID, ctx, "STOP_UPDATE"); err != nil {
+		return SkipNone, err
+	}
+	pos, err := x.freshPosition(ctx.Symbol, ctx.Direction)
 	if err != nil {
 		return SkipNone, fmt.Errorf("position lookup failed: %w", err)
 	}
@@ -417,6 +438,22 @@ func (x *Executor) ExecuteUpdateSL(traceID, signalID string, ctx *store.CopyTrad
 		x.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "UPDATE_SL(skipped)"})
 		x.events.Info(traceID, signalID, "", EvSignalSkipped, "UPDATE_SL skipped: no live position (SKIPPED_NO_POSITION)", nil)
 		return SkipNoPosition, nil
+	}
+	entry := ctx.AvgFillPrice
+	if ctx.ExecutionVersion == 0 && pos.entryPrice > 0 {
+		entry = pos.entryPrice
+	}
+	newPrice := resolveContextPrice(spec, ctx, entry)
+	if newPrice <= 0 {
+		return SkipUnsupportedPriceSpec, nil
+	}
+	if spec.Type == PriceEntry || spec.Type == PriceBreakeven {
+		if err := x.ensureStopProtection(traceID, signalID, ctx, pos.qty); err != nil {
+			return SkipNone, err
+		}
+		if tighterStop(ctx.Direction, ctx.StopLossPrice, newPrice) {
+			newPrice = ctx.StopLossPrice
+		}
 	}
 
 	if err := x.cancelStopLossOrders(ctx.Symbol, ctx.Direction); err != nil {
@@ -449,7 +486,6 @@ func (x *Executor) ExecuteUpdateSL(traceID, signalID string, ctx *store.CopyTrad
 
 	updates := map[string]interface{}{"stop_loss_price": newPrice, "last_action": "UPDATE_SL"}
 	// Moving the stop to (or past) entry makes the trade risk-free.
-	entry := ctx.AvgFillPrice
 	if entry > 0 {
 		if (ctx.Direction == string(DirectionLong) && newPrice >= entry) ||
 			(ctx.Direction == string(DirectionShort) && newPrice <= entry) {
@@ -459,7 +495,9 @@ func (x *Executor) ExecuteUpdateSL(traceID, signalID string, ctx *store.CopyTrad
 			}
 		}
 	}
-	x.updateContext(ctx, updates)
+	if err := x.persistContext(ctx, updates); err != nil {
+		return SkipNone, err
+	}
 	x.events.Success(traceID, signalID, "", EvSLSet,
 		fmt.Sprintf("stop loss moved to %.8g (qty %.8g)", newPrice, pos.qty), 0, nil)
 	return SkipNone, nil
@@ -467,7 +505,7 @@ func (x *Executor) ExecuteUpdateSL(traceID, signalID string, ctx *store.CopyTrad
 
 // ExecuteUpdateTP replaces the take-profit ladder for the remaining position.
 func (x *Executor) ExecuteUpdateTP(traceID, signalID string, ctx *store.CopyTradeContext, prices, ratios []float64) (SkipReason, error) {
-	pos, err := x.findPosition(ctx.Symbol, ctx.Direction)
+	pos, err := x.freshPosition(ctx.Symbol, ctx.Direction)
 	if err != nil {
 		return SkipNone, fmt.Errorf("position lookup failed: %w", err)
 	}
@@ -475,16 +513,52 @@ func (x *Executor) ExecuteUpdateTP(traceID, signalID string, ctx *store.CopyTrad
 		x.events.Info(traceID, signalID, "", EvSignalSkipped, "UPDATE_TP skipped: no live position", nil)
 		return SkipNoPosition, nil
 	}
-	if err := x.ex.CancelTakeProfitOrders(ctx.Symbol); err != nil {
-		x.events.Warn(traceID, signalID, "", EvExecutionError, fmt.Sprintf("cancel old TPs failed: %v", err), nil)
+	if err := x.cancelTrackedTPs(ctx); err != nil {
+		return SkipNone, err
 	}
-	plan := &OpenPlan{
-		Symbol: ctx.Symbol, Direction: Direction(ctx.Direction),
-		TPPrices: prices, TPRatios: ratios,
+	x.refreshTPProgress(traceID, ctx)
+	old := readTPPlan(ctx)
+	quantities, err := SplitTPQuantities(pos.qty, ratios, x.detectStepSize(ctx.Symbol, pos.qty), 0)
+	if err != nil {
+		return SkipNone, err
 	}
-	tpPlan := x.placeTPLadder(traceID, signalID, plan, pos.qty)
+	tpPlan := make([]TPPlanEntry, 0, len(prices))
+	for i, p := range prices {
+		prior := TPPlanEntry{Ordinal: i + 1, Generation: 1}
+		for _, tp := range old {
+			if tp.Ordinal == i+1 {
+				prior = tp
+				prior.Generation++
+				break
+			}
+		}
+		if prior.Filled {
+			tpPlan = append(tpPlan, prior)
+			continue
+		}
+		prior.PriorFilledQuantity += prior.FilledQuantity
+		prior.FilledQuantity = 0
+		prior.Price = p
+		prior.Quantity = quantities[i]
+		prior.DesiredQuantity = &quantities[i]
+		prior.Status = "PLANNED"
+		prior.OrderID = ""
+		prior.ClientID = ""
+		tpPlan = append(tpPlan, prior)
+	}
+	// Preserve completed ordinals even when the author supplies fewer new targets.
+	for _, tp := range old {
+		if tp.Filled && tp.Ordinal > len(prices) {
+			tpPlan = append(tpPlan, tp)
+		}
+	}
 	tpJSON, _ := json.Marshal(tpPlan)
-	x.updateContext(ctx, map[string]interface{}{"tp_plan_json": string(tpJSON), "last_action": "UPDATE_TP"})
+	if err = x.persistContext(ctx, map[string]interface{}{"tp_plan_json": string(tpJSON), "tp_position_quantity": pos.qty, "last_action": "UPDATE_TP"}); err != nil {
+		return SkipNone, err
+	}
+	if err = x.restoreRemainingProtections(traceID, signalID, ctx, pos.qty); err != nil {
+		return SkipNone, err
+	}
 	return SkipNone, nil
 }
 
@@ -493,45 +567,13 @@ func (x *Executor) ExecuteUpdateTP(traceID, signalID string, ctx *store.CopyTrad
 // order stays ENTRY_PENDING so the reconciler converts it to OPEN and places
 // protections instead of orphaning the position.
 func (x *Executor) ExecuteCancel(traceID, signalID string, ctx *store.CopyTradeContext) (SkipReason, error) {
-	if ctx.State != string(StateEntryPending) && ctx.State != string(StateNew) {
-		return SkipAlreadyFlat, nil
+	if err := x.closeEntryEligibility(traceID, ctx, "CANCEL"); err != nil {
+		return SkipNone, err
 	}
-	if ctx.EntryOrderID != "" && x.gridEx != nil {
-		// Race check: the entry may have filled before the cancel arrives.
-		if status, serr := x.ex.GetOrderStatus(ctx.Symbol, ctx.EntryOrderID); serr == nil {
-			if st, _ := status["status"].(string); st == "FILLED" {
-				x.events.Warn(traceID, signalID, "", EvExecutionError,
-					fmt.Sprintf("cancel requested but entry %s already FILLED; keeping trade active for reconciliation", ctx.EntryOrderID), nil)
-				return SkipNone, fmt.Errorf("entry order filled before cancel; position will be protected by the reconciler")
-			}
-		}
-		if err := x.gridEx.CancelOrder(ctx.Symbol, ctx.EntryOrderID); err != nil {
-			// Cancel failed: verify against exchange truth before deciding.
-			if status, serr := x.ex.GetOrderStatus(ctx.Symbol, ctx.EntryOrderID); serr == nil {
-				st, _ := status["status"].(string)
-				switch st {
-				case "FILLED":
-					x.events.Warn(traceID, signalID, "", EvExecutionError,
-						"cancel failed because entry already filled; keeping trade active for reconciliation", nil)
-					return SkipNone, fmt.Errorf("entry order filled before cancel; position will be protected by the reconciler")
-				case "CANCELED", "CANCELLED", "EXPIRED", "REJECTED":
-					// Already gone on the exchange: safe to finalize below.
-				default:
-					x.events.Warn(traceID, signalID, "", EvExecutionError,
-						fmt.Sprintf("cancel entry order failed (status %s), will retry: %v", st, err), nil)
-					return SkipNone, fmt.Errorf("cancel entry order failed: %w", err)
-				}
-			} else {
-				x.events.Warn(traceID, signalID, "", EvExecutionError,
-					fmt.Sprintf("cancel entry order failed and status unknown, will retry: %v", err), nil)
-				return SkipNone, fmt.Errorf("cancel entry order failed: %w", err)
-			}
-		}
-	} else {
-		x.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
+	if ctx.Quantity > 0 && ctx.OpenedAt != nil {
+		return SkipNone, x.restoreRemainingProtections(traceID, signalID, ctx, ctx.Quantity)
 	}
 	x.markContext(ctx, StateCancelled, map[string]interface{}{"last_action": "CANCEL"})
-	x.events.Success(traceID, signalID, "", EvTradeCancelled, fmt.Sprintf("pending entry for %s cancelled", ctx.Symbol), 0, nil)
 	return SkipNone, nil
 }
 
@@ -566,6 +608,10 @@ func (x *Executor) findPosition(symbol, direction string) (*positionInfo, error)
 	if err != nil {
 		return nil, err
 	}
+	return positionFromRows(positions, symbol, direction), nil
+}
+
+func positionFromRows(positions []map[string]interface{}, symbol, direction string) *positionInfo {
 	wantSide := strings.ToLower(direction) // "long"/"short"
 	for _, pos := range positions {
 		s, _ := pos["symbol"].(string)
@@ -582,10 +628,10 @@ func (x *Executor) findPosition(symbol, direction string) (*positionInfo, error)
 		}
 		entry, _ := pos["entryPrice"].(float64)
 		if qty > 0 {
-			return &positionInfo{qty: qty, entryPrice: entry}, nil
+			return &positionInfo{qty: qty, entryPrice: entry}
 		}
 	}
-	return nil, nil
+	return nil
 }
 
 // hasStopLossOrder reports whether a live stop-loss style order exists for the
@@ -716,12 +762,25 @@ func (x *Executor) cancelStopLossOrders(symbol, direction string) error {
 
 // updateContext persists updates ignoring version conflicts (engine is the
 // only writer per trader; versioning guards the reconciler races).
-func (x *Executor) updateContext(ctx *store.CopyTradeContext, updates map[string]interface{}) {
+func (x *Executor) persistContext(ctx *store.CopyTradeContext, updates map[string]interface{}) error {
 	if err := x.st.CopyTrade().UpdateContextVersioned(ctx.ID, ctx.Version, updates); err != nil {
-		x.events.Warn("", "", "", EvExecutionError, fmt.Sprintf("context update failed: %v", err), nil)
-		return
+		return err
 	}
-	ctx.Version++
+	data, err := json.Marshal(updates)
+	if err != nil {
+		return err
+	}
+	if err = json.Unmarshal(data, ctx); err != nil {
+		return err
+	}
+	ctx.UpdatedAt = time.Now().UTC()
+	return nil
+}
+
+func (x *Executor) updateContext(ctx *store.CopyTradeContext, updates map[string]interface{}) {
+	if err := x.persistContext(ctx, updates); err != nil {
+		x.events.Warn("", "", "", EvExecutionError, fmt.Sprintf("context update failed: %v", err), nil)
+	}
 }
 
 func (x *Executor) markContext(ctx *store.CopyTradeContext, state TradeState, extra map[string]interface{}) {

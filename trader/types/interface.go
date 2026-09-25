@@ -106,15 +106,16 @@ type Trader interface {
 
 // OpenOrder represents a pending order on the exchange
 type OpenOrder struct {
-	OrderID      string  `json:"order_id"`
-	Symbol       string  `json:"symbol"`
-	Side         string  `json:"side"`          // BUY/SELL
-	PositionSide string  `json:"position_side"` // LONG/SHORT
-	Type         string  `json:"type"`          // LIMIT/STOP_MARKET/TAKE_PROFIT_MARKET
-	Price        float64 `json:"price"`         // Order price (for limit orders)
-	StopPrice    float64 `json:"stop_price"`    // Trigger price (for stop orders)
-	Quantity     float64 `json:"quantity"`
-	Status       string  `json:"status"` // NEW
+	ClosePosition bool    `json:"close_position,omitempty"`
+	OrderID       string  `json:"order_id"`
+	Symbol        string  `json:"symbol"`
+	Side          string  `json:"side"`          // BUY/SELL
+	PositionSide  string  `json:"position_side"` // LONG/SHORT
+	Type          string  `json:"type"`          // LIMIT/STOP_MARKET/TAKE_PROFIT_MARKET
+	Price         float64 `json:"price"`         // Order price (for limit orders)
+	StopPrice     float64 `json:"stop_price"`    // Trigger price (for stop orders)
+	Quantity      float64 `json:"quantity"`
+	Status        string  `json:"status"` // NEW
 }
 
 // LimitOrderRequest represents a limit order request.

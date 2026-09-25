@@ -293,6 +293,10 @@ func TestMarketReferenceLimitLifecycleVisibility(t *testing.T) {
 				t.Fatalf("pending context: %+v %v", ctx, err)
 			}
 			x.orderStatus = map[string]interface{}{"status": tc.orderStatus}
+			if tc.orderStatus == "FILLED" {
+				x.orderStatus["executedQty"] = ctx.Quantity
+				x.orderStatus["avgPrice"] = ctx.PlannedEntryPrice
+			}
 			ctx.CreatedAt = time.Now().Add(-241 * time.Minute)
 			e.reconcileEntryPending(ctx)
 			views, err := e.st.CopyTrade().SignalViews(e.traderID, sigs)

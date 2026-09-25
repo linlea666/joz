@@ -28,6 +28,11 @@ const (
 	RiskModeFixed RiskMode = "fixed"
 )
 
+const (
+	EntryPolicyLegacy = "legacy"
+	EntryPolicySplit  = "market_reference_split"
+)
+
 // CopyTradingConfig is the per-trader copy-trading configuration.
 // Stored as JSON in traders.copy_trading_config; parse via ParseCopyTradingConfig.
 type CopyTradingConfig struct {
@@ -36,9 +41,11 @@ type CopyTradingConfig struct {
 	// SourceChannelIDs is RESERVED and not wired anywhere yet: extra channels
 	// feeding the same trades (multi-channel authors). Kept in the schema so
 	// stored configs stay forward-compatible; setting it has NO effect in V1.
-	SourceChannelIDs []string `json:"source_channel_ids,omitempty"`
-	SourceAuthorIDs  []string `json:"source_author_ids,omitempty"` // empty = accept all authors
-	ChannelNotes     string   `json:"channel_notes,omitempty"`     // free-text channel profile injected into the prompt
+	SourceChannelIDs      []string `json:"source_channel_ids,omitempty"`
+	SourceAuthorIDs       []string `json:"source_author_ids,omitempty"` // empty = accept all authors
+	ChannelNotes          string   `json:"channel_notes,omitempty"`     // free-text channel profile injected into the prompt
+	InterpretationProfile string   `json:"interpretation_profile,omitempty"`
+	EntryPolicy           string   `json:"entry_policy,omitempty"`
 
 	// AI parsing
 	ParseImages          bool `json:"parse_images"`
@@ -124,6 +131,15 @@ func (c *CopyTradingConfig) Encode() (string, error) {
 
 // Validate checks the configuration for a copy-trading trader.
 func (c *CopyTradingConfig) Validate() error {
+	if c.InterpretationProfile != "" && c.InterpretationProfile != "default" && c.InterpretationProfile != "tyler_v1" {
+		return fmt.Errorf("unknown interpretation_profile %q", c.InterpretationProfile)
+	}
+	if c.EntryPolicy != "" && c.EntryPolicy != EntryPolicyLegacy && c.EntryPolicy != EntryPolicySplit {
+		return fmt.Errorf("unknown entry_policy %q", c.EntryPolicy)
+	}
+	if c.EntryPolicy == EntryPolicySplit && c.RiskMode != RiskModeByLoss {
+		return fmt.Errorf("market_reference_split requires by_loss risk mode")
+	}
 	if strings.TrimSpace(c.PrimaryChannelID) == "" {
 		return fmt.Errorf("primary_channel_id is required")
 	}
@@ -158,6 +174,17 @@ func (c *CopyTradingConfig) Validate() error {
 	}
 	if _, err := ParseTPRatios(c.DefaultTPRatios); err != nil {
 		return err
+	}
+	return nil
+}
+
+// ValidateExchange checks the opt-in execution capability without changing old configurations.
+func (c *CopyTradingConfig) ValidateExchange(exchangeType string) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if c.EntryPolicy == EntryPolicySplit && strings.ToLower(exchangeType) != "binance" {
+		return fmt.Errorf("market_reference_split currently supports Binance only")
 	}
 	return nil
 }

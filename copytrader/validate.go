@@ -152,6 +152,10 @@ func validateSLSpecs(si *SourceInterpretation, marketPrice float64) (SkipReason,
 			}
 		case PriceEntry, PriceBreakeven:
 			// resolved against the trade context at execution time
+		case PriceTPLevel:
+			if sl.Price.Level < 1 {
+				return SkipUnsupportedPriceSpec, nil
+			}
 		default:
 			return SkipUnsupportedPriceSpec, nil
 		}

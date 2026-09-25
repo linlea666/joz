@@ -149,3 +149,33 @@ func TestSignalProcessedCountsOnlyTerminalStatuses(t *testing.T) {
 		t.Fatal("terminal signal must deduplicate")
 	}
 }
+
+func TestDiscordMetadataRefreshNeverReplaysHistory(t *testing.T) {
+	db := newDiscordTestDB(t)
+	s := NewDiscordMessageStore(db)
+	if err := s.initTables(); err != nil {
+		t.Fatal(err)
+	}
+	old := &DiscordMessage{ChannelID: "chan", MessageID: "old", Content: "#FLOCK 起飛", EmbedsJSON: `[{"description":"#FLOCK entry market","timestamp":"2026-09-24T06:59:00Z"}]`, AttachmentsJSON: `[{"id":"image","url":"https://cdn.discordapp.com/image.png?ex=old"}]`, Revision: 4, MessageTimestamp: time.Now().Add(-24 * time.Hour)}
+	if err := s.MarkBaseline(old); err != nil {
+		t.Fatal(err)
+	}
+	fresh := *old
+	fresh.ContentHash = "new-hash-version"
+	fresh.ReplyToMessageID = "source"
+	fresh.EmbedsJSON = `[{"description":"#FLOCK entry market","timestamp":"2026-09-24T06:59:00Z","author":{"name":"GKS"}}]`
+	fresh.AttachmentsJSON = `[{"id":"image","url":"https://cdn.discordapp.com/image.png?ex=new"}]`
+	result, err := s.Upsert(&fresh)
+	if err != nil || result != DiscordMsgUnchanged {
+		t.Fatalf("metadata queued old trade: %v %v", result, err)
+	}
+	got, _ := s.GetByMessageID("chan", "old")
+	if got.Revision != 4 || got.ProcessingStatus != DiscordMsgSkipped || got.ReplyToMessageID != "source" {
+		t.Fatalf("baseline corrupted: %+v", got)
+	}
+	fresh.EmbedsJSON = `[{"description":"#FLOCK SL to entry","author":{"name":"GKS"}}]`
+	result, err = s.Upsert(&fresh)
+	if err != nil || result != DiscordMsgEdited {
+		t.Fatal("semantic lifecycle edit was lost")
+	}
+}

@@ -166,20 +166,21 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 		Author:    msg.AuthorName,
 		Excerpt:   excerpt(msg.Content, 160),
 	}
-	for _, att := range discord.ParseStoredAttachments(msg.AttachmentsJSON) {
-		if att.IsImage() {
+	for _, media := range MediaSources(msg, e.messageSources(msg)) {
+		if media.Role == "current" {
 			item.ImageCount++
 		}
 	}
 
 	// Discord CDN attachment URLs are signed and expire; refresh the message
 	// via the API so image replay still works on older history.
-	if item.ImageCount > 0 {
+	if item.ImageCount > 0 && e.poller != nil {
 		if client := e.poller.Client(); client != nil {
 			if apiMsg, err := client.GetMessage(msg.ChannelID, msg.MessageID); err == nil {
 				if fresh, cerr := discord.ToStoreMessage(apiMsg, msg.ChannelID); cerr == nil {
 					refreshed := *msg
 					refreshed.AttachmentsJSON = fresh.AttachmentsJSON
+					refreshed.EmbedsJSON = fresh.EmbedsJSON
 					msg = &refreshed
 				}
 			}
@@ -214,7 +215,7 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 
 	instructions := interp.Flatten()
 	if len(instructions) == 1 {
-		verdict, detail, canonical := e.replayEvaluate(instructions[0])
+		verdict, detail, canonical := e.replayEvaluateSource(instructions[0], msg)
 		item.Canonical = canonical
 		item.Verdict = verdict
 		item.VerdictDetail = detail
@@ -226,7 +227,7 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 	var details []string
 	executes, invalids := 0, 0
 	for _, ins := range instructions {
-		verdict, detail, _ := e.replayEvaluate(ins)
+		verdict, detail, _ := e.replayEvaluateSource(ins, msg)
 		switch verdict {
 		case VerdictExecute:
 			executes++
@@ -303,6 +304,8 @@ func fmtPriceSpec(p PriceSpec) string {
 		return trimFloat(p.RangeLow) + "-" + trimFloat(p.RangeHigh)
 	case PriceRMultiple:
 		return fmt.Sprintf("%.2gR", p.Offset)
+	case PriceTPLevel:
+		return fmt.Sprintf("TP%d", p.Level)
 	default:
 		return string(p.Type)
 	}
@@ -342,4 +345,13 @@ func fmtTPLevels(levels []TPLevel) string {
 
 func trimFloat(f float64) string {
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", f), "0"), ".")
+}
+
+func (e *Engine) replayEvaluateSource(ins *SourceInterpretation, msg *store.DiscordMessage) (string, string, string) {
+	if skip, err := ValidateActionEvidence(ins, e.messageSources(msg)); err != nil {
+		return VerdictInvalid, err.Error(), ""
+	} else if skip != SkipNone {
+		return VerdictSkip, string(skip), ""
+	}
+	return e.replayEvaluate(ins)
 }

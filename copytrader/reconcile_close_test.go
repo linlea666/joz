@@ -61,7 +61,7 @@ func TestReconcileMissMarkerClearsWhenPositionReappears(t *testing.T) {
 	mock := &mockExchange{
 		positions: nil,
 		// Live SL so the guard has nothing to restore once the position shows.
-		openOrders: []types.OpenOrder{{Type: "STOP_MARKET", StopPrice: 95}},
+		openOrders: []types.OpenOrder{{Type: "STOP_MARKET", StopPrice: 95, PositionSide: "LONG", Quantity: 0.5}},
 	}
 	e := newReconcileEngine(st, mock)
 	ctx := newTestContext(t, st, StateOpen)

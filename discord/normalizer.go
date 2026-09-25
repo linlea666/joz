@@ -53,6 +53,12 @@ func FlattenEmbeds(embeds []Embed) string {
 			fmt.Fprintf(&b, " Title: %s", e.Title)
 		}
 		b.WriteString("\n")
+		if e.Author != nil && e.Author.Name != "" {
+			fmt.Fprintf(&b, "Source author: %s\n", e.Author.Name)
+		}
+		if e.Timestamp != "" {
+			fmt.Fprintf(&b, "Source timestamp: %s\n", e.Timestamp)
+		}
 		if e.Description != "" {
 			fmt.Fprintf(&b, "%s\n", e.Description)
 		}

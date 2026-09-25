@@ -1,4 +1,4 @@
-import type { CopyTradeEvent } from '../../types'
+import type { CopyTradeEvent, CopyTradeSignal } from '../../types'
 import { t, type Language } from '../../i18n/translations'
 
 function numeric(value: unknown, percent = false): string {
@@ -33,10 +33,12 @@ export function CopyTradeExecutionDetails({
   events,
   language,
   expectsEntry,
+  signal,
 }: {
   events: CopyTradeEvent[] | 'loading' | 'error' | undefined
   language: Language
   expectsEntry: boolean
+  signal?: CopyTradeSignal
 }) {
   if (!events || events === 'loading') {
     return (
@@ -63,6 +65,60 @@ export function CopyTradeExecutionDetails({
       <h3 className="font-semibold text-nofx-text">
         {t('copytrade.executionDetails', language)}
       </h3>
+      {!!signal?.instruction_results?.length && (
+        <div className="space-y-1">
+          <h4 className="font-semibold">
+            {t('copytrade.actionResults', language)}
+          </h4>
+          {signal.instruction_results.map((result) => (
+            <p key={result.index}>
+              {result.symbol} {result.direction} · {result.action} ·{' '}
+              {result.status}
+              {result.skip_reason ? ` (${result.skip_reason})` : ''}
+              {result.status !== 'executed' && result.detail
+                ? `: ${result.detail}`
+                : ''}
+            </p>
+          ))}
+        </div>
+      )}
+      {!!signal?.action_results?.length && (
+        <div className="space-y-1">
+          {signal.action_results.map((action) => (
+            <p key={action.id}>
+              {action.symbol} {action.direction} · {action.action} ·{' '}
+              {action.status}
+              {action.trade_state
+                ? ` · ${tradeStateLabel(action.trade_state, language)}`
+                : ''}
+              {action.error ? `: ${action.error}` : ''}
+            </p>
+          ))}
+        </div>
+      )}
+      {!!signal?.order_legs?.length && (
+        <div className="space-y-2">
+          <h4 className="font-semibold">
+            {t('copytrade.orderLegs', language)}
+          </h4>
+          {signal.order_legs.map((leg) => (
+            <div key={leg.id} className="rounded bg-nofx-bg p-2">
+              <p>
+                {leg.symbol} {leg.direction} · {leg.role} · {leg.order_type} ·{' '}
+                {leg.status}
+              </p>
+              <p>
+                {t('copytrade.filledQuantity', language)}:{' '}
+                {numeric(leg.executed_qty)} / {numeric(leg.quantity)} ·{' '}
+                {t('copytrade.averageFill', language)}: {numeric(leg.avg_price)}
+              </p>
+              {leg.last_error && (
+                <p className="text-nofx-danger">{leg.last_error}</p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       {expectsEntry && decisions.length === 0 && (
         <p className="text-nofx-text-muted">
           {t('copytrade.noEntryDecision', language)}

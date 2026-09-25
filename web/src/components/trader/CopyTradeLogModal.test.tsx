@@ -89,6 +89,70 @@ const openSignals = async (signals: CopyTradeSignal[]) => {
 }
 
 describe('copy-trading execution visibility', () => {
+  it('shows independent action outcomes and actual split fills', () => {
+    const detailed = {
+      ...signal('split', 'OPEN'),
+      instruction_results: [
+        { index: 0, action: 'REDUCE', symbol: 'BTC', status: 'executed' },
+        {
+          index: 1,
+          action: 'UPDATE_SL',
+          symbol: 'ETH',
+          status: 'skipped',
+          skip_reason: 'NEEDS_CONTEXT',
+          detail: 'target is not unique',
+        },
+      ],
+      action_results: [
+        {
+          id: 'action',
+          symbol: 'BTCUSDT',
+          direction: 'LONG',
+          action: 'OPEN',
+          status: 'done',
+          trade_state: 'OPEN',
+        },
+      ],
+      order_legs: [
+        {
+          id: 'first',
+          symbol: 'BTCUSDT',
+          direction: 'LONG',
+          role: 'ENTRY_1',
+          order_type: 'MARKET',
+          status: 'FILLED',
+          quantity: 0.9,
+          executed_qty: 0.9,
+          avg_price: 101,
+        },
+        {
+          id: 'second',
+          symbol: 'BTCUSDT',
+          direction: 'LONG',
+          role: 'ENTRY_2',
+          order_type: 'LIMIT',
+          status: 'PARTIALLY_FILLED',
+          quantity: 1,
+          executed_qty: 0.2,
+          avg_price: 100,
+        },
+      ],
+    } as CopyTradeSignal
+    render(
+      <CopyTradeExecutionDetails
+        events={[]}
+        language="zh"
+        expectsEntry={false}
+        signal={detailed}
+      />
+    )
+    expect(screen.getByText(/target is not unique/)).toBeInTheDocument()
+    expect(screen.getByText(/ENTRY_1.*FILLED/)).toBeInTheDocument()
+    expect(screen.getByText(/ENTRY_2.*PARTIALLY_FILLED/)).toBeInTheDocument()
+    expect(screen.getByText(/0.2 \/ 1/)).toBeInTheDocument()
+    expect(screen.getByText(/OPEN.*done.*已开仓/)).toBeInTheDocument()
+  })
+
   it('separates processing from pending, open and expired trade states', async () => {
     await openSignals([
       signal('pending', 'ENTRY_PENDING'),

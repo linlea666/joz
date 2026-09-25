@@ -195,6 +195,13 @@ export function TraderConfigModal({
   }, [traderData, isEditMode, availableModels, availableExchanges])
 
   if (!isOpen) return null
+  const splitAvailable =
+    copyConfig.risk_mode === 'by_loss' &&
+    availableExchanges
+      .find((ex) => ex.id === formData.exchange_id)
+      ?.exchange_type?.toLowerCase() === 'binance'
+  const invalidEntryPolicy =
+    copyConfig.entry_policy === 'market_reference_split' && !splitAvailable
 
   const handleInputChange = (field: keyof FormState, value: any) => {
     setFormData((prev) => ({ ...prev, [field]: value }))
@@ -444,6 +451,28 @@ export function TraderConfigModal({
                   </p>
                 </div>
 
+                <div>
+                  <label
+                    htmlFor="copy-interpretation-profile"
+                    className="text-sm text-nofx-text block mb-2"
+                  >
+                    {t('copytrade.interpretationProfile', language)}
+                  </label>
+                  <select
+                    id="copy-interpretation-profile"
+                    value={copyConfig.interpretation_profile || 'default'}
+                    onChange={(e) =>
+                      handleCopyConfigChange('interpretation_profile', e.target.value)
+                    }
+                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
+                  >
+                    <option value="default">{t('copytrade.profileDefault', language)}</option>
+                    <option value="tyler_v1">TYLER</option>
+                  </select>
+                  <p className="text-xs text-nofx-text-muted mt-1">
+                    {t('copytrade.profileHint', language)}
+                  </p>
+                </div>
                 {/* Channel profile */}
                 <div>
                   <label className="text-sm text-nofx-text block mb-2">
@@ -667,6 +696,33 @@ export function TraderConfigModal({
                   </p>
                 </div>
 
+                <div>
+                  <label
+                    htmlFor="copy-entry-policy"
+                    className="text-sm text-nofx-text block mb-2"
+                  >
+                    {t('copytrade.entryPolicy', language)}
+                  </label>
+                  <select
+                    id="copy-entry-policy"
+                    value={copyConfig.entry_policy || 'legacy'}
+                    onChange={(e) => handleCopyConfigChange('entry_policy', e.target.value)}
+                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
+                  >
+                    <option value="legacy">{t('copytrade.entryLegacy', language)}</option>
+                    <option value="market_reference_split" disabled={!splitAvailable}>
+                      {t('copytrade.entrySplit', language)}
+                    </option>
+                  </select>
+                  <p className="text-xs text-nofx-text-muted mt-1">
+                    {t('copytrade.splitHint', language)}
+                  </p>
+                  {invalidEntryPolicy && (
+                    <p role="alert" className="text-xs text-nofx-danger mt-1">
+                      {t('copytrade.splitUnsupported', language)}
+                    </p>
+                  )}
+                </div>
                 {/* Entry price offset thresholds */}
                 <div>
                   <div className="grid grid-cols-2 gap-4">
@@ -1031,7 +1087,7 @@ export function TraderConfigModal({
                 !formData.trader_name ||
                 !formData.ai_model ||
                 !formData.exchange_id ||
-                (isCopyTrading && !copyConfig.primary_channel_id.trim())
+                (isCopyTrading && (!copyConfig.primary_channel_id.trim() || invalidEntryPolicy))
               }
               className="px-8 py-3 bg-nofx-gold text-white rounded-lg hover:bg-nofx-gold/90 transition-all duration-200 disabled:bg-nofx-bg-deeper disabled:text-nofx-text-muted disabled:cursor-not-allowed font-medium shadow-lg"
             >

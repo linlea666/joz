@@ -26,14 +26,14 @@ func init() {
 
 // mockExchange implements types.Trader + types.GridTrader with overridable hooks.
 type mockExchange struct {
-	positions      []map[string]interface{}
-	openOrders     []types.OpenOrder
-	openOrdersErr  error
-	orderStatus    map[string]interface{}
-	orderStatusErr error
-	cancelOrderErr error
-	setStopLossErr error
-	closeLongErr   error
+	positions         []map[string]interface{}
+	openOrders        []types.OpenOrder
+	openOrdersErr     error
+	orderStatus       map[string]interface{}
+	orderStatusErr    error
+	cancelOrderErr    error
+	setStopLossErr    error
+	closeLongErr      error
 	setStopLossLog    []float64 // stop prices passed to SetStopLoss
 	setStopLossQtyLog []float64 // quantities passed to SetStopLoss
 	cancelOrderLog    []string
@@ -76,12 +76,12 @@ func (m *mockExchange) CancelStopLossOrders(symbol string) error {
 	m.cancelSLLog = append(m.cancelSLLog, symbol)
 	return nil
 }
-func (m *mockExchange) CancelTakeProfitOrders(string) error                  { return nil }
+func (m *mockExchange) CancelTakeProfitOrders(string) error { return nil }
 func (m *mockExchange) CancelAllOrders(symbol string) error {
 	m.cancelAllLog = append(m.cancelAllLog, symbol)
 	return nil
 }
-func (m *mockExchange) CancelStopOrders(string) error                        { return nil }
+func (m *mockExchange) CancelStopOrders(string) error { return nil }
 func (m *mockExchange) FormatQuantity(_ string, q float64) (string, error) {
 	return fmt.Sprintf("%.3f", q), nil // mimic a 3-decimal step exchange
 }
@@ -99,6 +99,9 @@ func (m *mockExchange) PlaceLimitOrder(*types.LimitOrderRequest) (*types.LimitOr
 }
 func (m *mockExchange) CancelOrder(_ string, orderID string) error {
 	m.cancelOrderLog = append(m.cancelOrderLog, orderID)
+	if m.cancelOrderErr == nil && m.orderStatus != nil && m.orderStatus["status"] != "FILLED" {
+		m.orderStatus["status"] = "CANCELED"
+	}
 	return m.cancelOrderErr
 }
 func (m *mockExchange) GetOrderBook(string, int) ([][]float64, [][]float64, error) {
@@ -114,7 +117,7 @@ func newTestStore(t *testing.T) *store.Store {
 	}
 	if err := gdb.AutoMigrate(
 		&store.CopyTradeContext{}, &store.CopyTradeEvent{},
-		&store.CopyTradeSignal{}, &store.CopyTradeAIRun{},
+		&store.CopyTradeSignal{}, &store.CopyTradeAIRun{}, &store.CopyTradeAction{}, &store.CopyTradeOrder{}, &store.DiscordMessage{}, &store.Trader{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
@@ -269,7 +272,7 @@ func TestReconcileSLGuardSkipsWhenStopExists(t *testing.T) {
 		positions: []map[string]interface{}{{
 			"symbol": "BTCUSDT", "side": "long", "positionAmt": 0.5, "entryPrice": 100.0,
 		}},
-		openOrders: []types.OpenOrder{{Type: "STOP_MARKET", StopPrice: 95}},
+		openOrders: []types.OpenOrder{{Type: "STOP_MARKET", StopPrice: 95, PositionSide: "LONG", Quantity: 0.5}},
 	}
 	events := NewEventLogger(st, "trader-1", "chan-1")
 	e := &Engine{

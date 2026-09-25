@@ -26,7 +26,7 @@ func (at *AutoTrader) runCopyTradingMode() error {
 	if err != nil {
 		return fmt.Errorf("invalid copy trading config: %w", err)
 	}
-	if err := cfg.Validate(); err != nil {
+	if err := cfg.ValidateExchange(at.config.Exchange); err != nil {
 		return fmt.Errorf("copy trading config validation failed: %w", err)
 	}
 

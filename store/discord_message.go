@@ -3,8 +3,10 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -120,21 +122,27 @@ func (s *DiscordMessageStore) Upsert(msg *DiscordMessage) (UpsertResult, error) 
 		return DiscordMsgNew, nil
 	}
 
-	if existing.ContentHash == msg.ContentHash {
-		return DiscordMsgUnchanged, nil
+	// Compare semantic payloads as well as hashes: enriching old rows with
+	// author/reference metadata or rotating signed media URLs is not a new signal.
+	if existing.Content == msg.Content && semanticDiscordJSON(existing.EmbedsJSON) == semanticDiscordJSON(msg.EmbedsJSON) && semanticDiscordJSON(existing.AttachmentsJSON) == semanticDiscordJSON(msg.AttachmentsJSON) {
+		updates := map[string]interface{}{"embeds_json": msg.EmbedsJSON, "attachments_json": msg.AttachmentsJSON, "reply_to_message_id": msg.ReplyToMessageID, "raw_payload": msg.RawPayload, "content_hash": msg.ContentHash}
+		err := s.db.Model(&DiscordMessage{}).Where("id = ?", existing.ID).Updates(updates).Error
+		msg.ID, msg.Revision, msg.ProcessingStatus = existing.ID, existing.Revision, existing.ProcessingStatus
+		return DiscordMsgUnchanged, err
 	}
 
 	updates := map[string]interface{}{
-		"content":           msg.Content,
-		"embeds_json":       msg.EmbedsJSON,
-		"attachments_json":  msg.AttachmentsJSON,
-		"edited_at":         msg.EditedAt,
-		"content_hash":      msg.ContentHash,
-		"raw_payload":       msg.RawPayload,
-		"revision":          existing.Revision + 1,
-		"processing_status": DiscordMsgPending,
-		"processing_error":  "",
-		"received_at":       msg.ReceivedAt,
+		"reply_to_message_id": msg.ReplyToMessageID,
+		"content":             msg.Content,
+		"embeds_json":         msg.EmbedsJSON,
+		"attachments_json":    msg.AttachmentsJSON,
+		"edited_at":           msg.EditedAt,
+		"content_hash":        msg.ContentHash,
+		"raw_payload":         msg.RawPayload,
+		"revision":            existing.Revision + 1,
+		"processing_status":   DiscordMsgPending,
+		"processing_error":    "",
+		"received_at":         msg.ReceivedAt,
 	}
 	if err := s.db.Model(&DiscordMessage{}).Where("id = ?", existing.ID).Updates(updates).Error; err != nil {
 		return DiscordMsgUnchanged, fmt.Errorf("failed to update edited discord message: %w", err)
@@ -313,4 +321,48 @@ func isUniqueViolation(err error) bool {
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "UNIQUE constraint failed") || strings.Contains(msg, "duplicate key value")
+}
+
+// Only trading text and media identity cause revisions. Provenance is refreshed
+// in place, including on baseline messages which must never be replayed.
+func semanticDiscordJSON(raw string) string {
+	var value interface{}
+	if raw == "" || raw == "null" {
+		return "[]"
+	}
+	if json.Unmarshal([]byte(raw), &value) != nil {
+		return raw
+	}
+	var clean func(interface{}) interface{}
+	clean = func(v interface{}) interface{} {
+		switch item := v.(type) {
+		case map[string]interface{}:
+			result := map[string]interface{}{}
+			for k, child := range item {
+				switch k {
+				case "author", "timestamp", "proxy_url", "proxy_icon_url", "height", "width", "content_type", "size":
+					continue
+				}
+				if k == "url" {
+					if str, ok := child.(string); ok {
+						if u, err := url.Parse(str); err == nil && (strings.HasSuffix(u.Host, "discordapp.com") || strings.HasSuffix(u.Host, "discordapp.net")) {
+							u.RawQuery = ""
+							child = u.String()
+						}
+					}
+				}
+				result[k] = clean(child)
+			}
+			return result
+		case []interface{}:
+			for i := range item {
+				item[i] = clean(item[i])
+			}
+			return item
+		default:
+			return v
+		}
+	}
+	data, _ := json.Marshal(clean(value))
+	return string(data)
 }

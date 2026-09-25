@@ -99,7 +99,7 @@ func TestReconcileAdoptsGrownPosition(t *testing.T) {
 		}},
 		// A live stop exists (sized for the old 0.5) so the SL guard stays out
 		// of the way; the growth branch itself must do the resize.
-		openOrders: []types.OpenOrder{{Type: "STOP_MARKET", StopPrice: 95}},
+		openOrders: []types.OpenOrder{{Type: "STOP_MARKET", StopPrice: 95, PositionSide: "LONG", Quantity: 0.5}},
 	}
 	e := newReconcileEngine(st, mock)
 	ctx := newTestContext(t, st, StateOpen) // tracked quantity 0.5

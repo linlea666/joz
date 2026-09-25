@@ -48,6 +48,13 @@ type EmbedMedia struct {
 	Height      int    `json:"height"`
 }
 
+// EmbedAuthor is retained for forwarded quote attribution. It is source
+// metadata, not evidence that the current message repeats the quoted action.
+type EmbedAuthor struct {
+	Name string `json:"name"`
+	URL  string `json:"url,omitempty"`
+}
+
 // Embed is a Discord rich embed.
 type Embed struct {
 	Type        string       `json:"type"`
@@ -55,6 +62,7 @@ type Embed struct {
 	Description string       `json:"description"`
 	URL         string       `json:"url"`
 	Timestamp   string       `json:"timestamp"`
+	Author      *EmbedAuthor `json:"author,omitempty"`
 	Fields      []EmbedField `json:"fields"`
 	Image       *EmbedMedia  `json:"image"`
 	Thumbnail   *EmbedMedia  `json:"thumbnail"`

@@ -38,6 +38,20 @@ type CopyTradeContext struct {
 	// BreakevenAfterTP marks an author-stated conditional rule ("move SL to
 	// entry after TP1") on this specific trade; OR-ed with the global config.
 	BreakevenAfterTP bool `gorm:"column:breakeven_after_tp;default:false" json:"breakeven_after_tp"`
+	BreakevenTPLevel int  `gorm:"default:0" json:"breakeven_tp_level"`
+	// Version zero remains the legacy single-entry lifecycle. Never promote an
+	// old trade merely because the user enables a new entry policy.
+	ExecutionVersion    int        `gorm:"default:0" json:"execution_version"`
+	EntryPolicy         string     `gorm:"default:''" json:"entry_policy,omitempty"`
+	EntryPlanJSON       string     `gorm:"default:''" json:"entry_plan_json,omitempty"`
+	EntryDeadline       *time.Time `json:"entry_deadline,omitempty"`
+	EntryWorking        bool       `gorm:"default:false" json:"entry_working"`
+	EntryFilledQuantity float64    `gorm:"default:0" json:"entry_filled_quantity"`
+	EntryDisabled       bool       `gorm:"default:false" json:"entry_disabled"`
+	HasAddFill          bool       `gorm:"default:false" json:"has_add_fill"`
+	TPPositionQuantity  float64    `gorm:"default:0" json:"tp_position_quantity"`
+	TPRecipeJSON        string     `gorm:"default:''" json:"tp_recipe_json,omitempty"`
+	ClosePendingJSON    string     `gorm:"default:''" json:"close_pending_json,omitempty"`
 
 	EntryOrderID string `gorm:"column:entry_order_id;default:''" json:"entry_order_id"`
 	LastAction   string `gorm:"column:last_action;default:''" json:"last_action"`
@@ -121,15 +135,19 @@ type CopyTradeSignal struct {
 	ReceivedAt       time.Time `gorm:"column:received_at" json:"received_at"`
 
 	// Latency breakdown (milliseconds)
-	ReceiveLatencyMs int64     `gorm:"column:receive_latency_ms;default:0" json:"receive_latency_ms"`
-	MediaDownloadMs  int64     `gorm:"column:media_download_ms;default:0" json:"media_download_ms"`
-	PromptBuildMs    int64     `gorm:"column:prompt_build_ms;default:0" json:"prompt_build_ms"`
-	LLMRequestMs     int64     `gorm:"column:llm_request_ms;default:0" json:"llm_request_ms"`
-	RiskCalcMs       int64     `gorm:"column:risk_calc_ms;default:0" json:"risk_calc_ms"`
-	ExchangeSubmitMs int64     `gorm:"column:exchange_submit_ms;default:0" json:"exchange_submit_ms"`
-	TotalMs          int64     `gorm:"column:total_ms;default:0" json:"total_ms"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ReceiveLatencyMs       int64      `gorm:"column:receive_latency_ms;default:0" json:"receive_latency_ms"`
+	MediaDownloadMs        int64      `gorm:"column:media_download_ms;default:0" json:"media_download_ms"`
+	PromptBuildMs          int64      `gorm:"column:prompt_build_ms;default:0" json:"prompt_build_ms"`
+	LLMRequestMs           int64      `gorm:"column:llm_request_ms;default:0" json:"llm_request_ms"`
+	RiskCalcMs             int64      `gorm:"column:risk_calc_ms;default:0" json:"risk_calc_ms"`
+	ExchangeSubmitMs       int64      `gorm:"column:exchange_submit_ms;default:0" json:"exchange_submit_ms"`
+	TotalMs                int64      `gorm:"column:total_ms;default:0" json:"total_ms"`
+	ExecutionVersion       int        `gorm:"default:0" json:"execution_version"`
+	RetryCount             int        `gorm:"default:0" json:"retry_count"`
+	NextRetryAt            *time.Time `gorm:"index" json:"next_retry_at,omitempty"`
+	InstructionResultsJSON string     `gorm:"default:''" json:"instruction_results_json,omitempty"`
+	CreatedAt              time.Time  `json:"created_at"`
+	UpdatedAt              time.Time  `json:"updated_at"`
 }
 
 func (CopyTradeSignal) TableName() string { return "copytrade_signals" }
@@ -139,7 +157,10 @@ func (CopyTradeSignal) TableName() string { return "copytrade_signals" }
 // It is a read-only response DTO, never a migrated database model.
 type CopyTradeSignalView struct {
 	*CopyTradeSignal
-	TradeState string `json:"trade_state,omitempty"`
+	TradeState         string                 `json:"trade_state,omitempty"`
+	ActionResults      []*CopyTradeActionView `json:"action_results,omitempty"`
+	OrderLegs          []*CopyTradeOrder      `json:"order_legs,omitempty"`
+	InstructionResults []json.RawMessage      `json:"instruction_results,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +206,8 @@ func (s *CopyTradeStore) initTables() error {
 		&CopyTradeAIRun{},
 		&CopyTradeSignal{},
 		&CopyTradeEvent{},
+		&CopyTradeAction{},
+		&CopyTradeOrder{},
 	)
 }
 
@@ -404,6 +427,9 @@ func (s *CopyTradeStore) SignalViews(traderID string, signals []*CopyTradeSignal
 			}
 		}
 		eligible[sig.TradeContextID] = append(eligible[sig.TradeContextID], view)
+	}
+	if err := s.attachExecutionViews(traderID, views); err != nil {
+		return nil, err
 	}
 	if len(eligible) == 0 {
 		return views, nil

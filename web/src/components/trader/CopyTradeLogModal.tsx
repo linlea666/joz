@@ -397,7 +397,7 @@ export function CopyTradeLogModal({
                                     : '#8A8478',
                           }}
                         >
-                          {sig.status === 'executed' ? t('copytrade.processed', language) : sig.status}
+                          {sig.status === 'executed' ? t('copytrade.processed', language) : sig.status === 'retry_wait' ? t('copytrade.retryWaiting', language) : sig.status}
                           {sig.skip_reason ? ` (${sig.skip_reason})` : ''}
                         </span>
                         {sig.trade_state && (
@@ -428,6 +428,7 @@ export function CopyTradeLogModal({
                       <tr key={`${sig.id}-io`} className="border-b border-nofx-gold/10">
                         <td colSpan={7} className="py-2">
                           <CopyTradeExecutionDetails
+                            signal={sig}
                             events={signalEvents[sig.id]}
                             language={language}
                             expectsEntry={sig.action === 'OPEN' || sig.action === 'ADD'}

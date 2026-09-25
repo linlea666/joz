@@ -24,7 +24,7 @@ func TestCopyTradeSignalStatesAndTraceIsolation(t *testing.T) {
 	sqlDB, _ := db.DB()
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	if err := db.AutoMigrate(&store.Trader{}, &store.CopyTradeSignal{}, &store.CopyTradeContext{}, &store.CopyTradeEvent{}); err != nil {
+	if err := db.AutoMigrate(&store.Trader{}, &store.CopyTradeSignal{}, &store.CopyTradeContext{}, &store.CopyTradeEvent{}, &store.CopyTradeAction{}, &store.CopyTradeOrder{}); err != nil {
 		t.Fatal(err)
 	}
 	st, err := store.NewFromGorm(db)
@@ -75,6 +75,24 @@ func TestCopyTradeSignalStatesAndTraceIsolation(t *testing.T) {
 		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, url, nil))
 		return w
 	}
+	for _, action := range []store.CopyTradeAction{
+		{ID: "multi-first", TraderID: "owned", SignalID: "multi", ContextID: "open", Action: "OPEN", Symbol: "BTCUSDT", Status: "done"},
+		{ID: "multi-second", TraderID: "owned", SignalID: "multi", ContextID: "pending", Action: "OPEN", Symbol: "ETHUSDT", Status: "done"},
+		{ID: "foreign-action", TraderID: "foreign", SignalID: "multi", ContextID: "foreign-context", Action: "OPEN", Status: "done"},
+	} {
+		if err := db.Create(&action).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, leg := range []store.CopyTradeOrder{
+		{ID: "leg-one", ClientID: "ct-one", TraderID: "owned", SignalID: "multi", ContextID: "open", Role: "ENTRY_1", Status: "FILLED", Quantity: .9, ExecutedQty: .9},
+		{ID: "leg-two", ClientID: "ct-two", TraderID: "owned", SignalID: "multi", ContextID: "pending", Role: "ENTRY_2", Status: "PARTIALLY_FILLED", Quantity: 1, ExecutedQty: .2},
+		{ID: "leg-private", ClientID: "ct-private", TraderID: "foreign", SignalID: "multi", ContextID: "foreign-context", Status: "NEW"},
+	} {
+		if err := db.Create(&leg).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
 	w := request("/signals?trader_id=owned")
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body)
@@ -91,6 +109,12 @@ func TestCopyTradeSignalStatesAndTraceIsolation(t *testing.T) {
 	byID := map[string]map[string]interface{}{}
 	for _, sig := range response.Signals {
 		byID[sig["id"].(string)] = sig
+	}
+	if actions, ok := byID["multi"]["action_results"].([]interface{}); !ok || len(actions) != 2 {
+		t.Fatal("multi-action results missing or leaked across traders")
+	}
+	if legs, ok := byID["multi"]["order_legs"].([]interface{}); !ok || len(legs) != 2 {
+		t.Fatal("order legs missing or leaked across traders")
 	}
 	for _, tc := range cases {
 		sig := byID[tc.id]

@@ -34,7 +34,7 @@ type EngineParams struct {
 // Engine runs copy trading for ONE trader: it consumes channel messages from
 // the poller, interprets them with the LLM, applies deterministic risk rules
 // and executes through the exchange. All message handling for the trader is
-// strictly serial (mu) so lifecycle order can never invert.
+// strictly serial (messageMu); mu independently protects execution/reconciliation.
 type Engine struct {
 	traderID   string
 	traderName string
@@ -48,11 +48,12 @@ type Engine struct {
 	exec       *Executor
 	events     *EventLogger
 
-	mu      sync.Mutex // serializes message handling per trader
-	stateMu sync.Mutex
-	running bool
-	stopCh  chan struct{}
-	wg      sync.WaitGroup
+	messageMu sync.Mutex // preserves message order while the model is waiting
+	mu        sync.Mutex // serializes exchange operations and reconciliation only
+	stateMu   sync.Mutex
+	running   bool
+	stopCh    chan struct{}
+	wg        sync.WaitGroup
 
 	// posMissSeen records trade context IDs whose position was not found on
 	// the previous reconcile cycle. A trade is only declared closed after two
@@ -120,8 +121,9 @@ func (e *Engine) Start() error {
 		e.stateMu.Unlock()
 		return fmt.Errorf("channel subscription failed: %w", err)
 	}
-	e.wg.Add(1)
+	e.wg.Add(2)
 	go e.reconcileLoop()
+	go e.retryLoop()
 	logger.Infof("🎯 [CopyTrade %s] engine started (channel %s)", e.traderName, e.cfg.PrimaryChannelID)
 	return nil
 }
@@ -139,13 +141,17 @@ func (e *Engine) Stop() {
 
 	e.poller.Unsubscribe(e.cfg.PrimaryChannelID, e.traderID)
 	e.wg.Wait()
+	// Drain an exchange operation already in progress. An interpretation still
+	// waiting for its model will observe stopCh before taking any new action.
+	e.mu.Lock()
+	e.mu.Unlock()
 	logger.Infof("⏹ [CopyTrade %s] engine stopped", e.traderName)
 }
 
 // HandleMessage is the poller callback: one Discord message (or revision).
 func (e *Engine) HandleMessage(msg *store.DiscordMessage, isEdit bool) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e.messageMu.Lock()
+	defer e.messageMu.Unlock()
 
 	// Dedup across restarts: this exact revision already interpreted?
 	done, err := e.st.CopyTrade().SignalProcessed(e.traderID, msg.MessageID, msg.Revision)
@@ -174,7 +180,20 @@ func (e *Engine) HandleMessage(msg *store.DiscordMessage, isEdit bool) error {
 // processMessage runs the full pipeline for one message revision.
 func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	pipelineStart := time.Now()
+	e.stateMu.Lock()
+	stopForThisRun := e.stopCh
+	e.stateMu.Unlock()
+	existing, _ := e.st.CopyTrade().LatestSignal(e.traderID, msg.MessageID, msg.Revision)
+	if existing != nil && existing.Status == "retry_wait" && existing.NextRetryAt != nil && existing.NextRetryAt.After(time.Now()) {
+		return
+	}
+	if existing != nil && existing.ExecutionVersion == 0 {
+		return
+	} // never resume an unknown legacy side effect
 	signalID := uuid.NewString()
+	if existing != nil {
+		signalID = existing.ID
+	}
 	traceID := signalID
 
 	// Receive latency is measured from the revision the pipeline is reacting
@@ -188,6 +207,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 
 	sig := &store.CopyTradeSignal{
 		ID:               signalID,
+		ExecutionVersion: 1,
 		TraderID:         e.traderID,
 		ChannelID:        msg.ChannelID,
 		MessageID:        msg.MessageID,
@@ -197,9 +217,14 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		ReceivedAt:       time.Now().UTC(),
 		ReceiveLatencyMs: time.Since(latencyRef).Milliseconds(),
 	}
-	if err := e.st.CopyTrade().CreateSignal(sig); err != nil {
-		logger.Errorf("[CopyTrade %s] signal persist failed: %v", e.traderID, err)
-		return
+	if existing != nil {
+		sig = existing
+	}
+	if existing == nil {
+		if err := e.st.CopyTrade().CreateSignal(sig); err != nil {
+			logger.Errorf("[CopyTrade %s] signal persist failed: %v", e.traderID, err)
+			return
+		}
 	}
 	e.events.Info(traceID, signalID, msg.MessageID, EvMessageReceived,
 		fmt.Sprintf("message from %s (revision %d, edit=%v), receive latency %.1fs",
@@ -221,14 +246,32 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	}
 
 	// --- 1. Assemble context ---
-	interp, run, timings, err := e.interpret(traceID, signalID, msg, isEdit, false)
+	if existing != nil && existing.Status == "retry_wait" && IsExpired(latencyRef, time.Now().UTC(), e.interpretationRetryTTL(msg)) {
+		skip(SkipExpired, "deferred interpretation expired before retry")
+		return
+	}
+	var interp *SourceInterpretation
+	var run *store.CopyTradeAIRun
+	var timings pipelineTimings
+	var err error
+	if existing != nil && existing.InterpretationJSON != "" && existing.Status != "retry_wait" {
+		interp, err = ParseInterpretation(existing.InterpretationJSON)
+	} else {
+		interp, run, timings, err = e.interpret(traceID, signalID, msg, isEdit, false)
+	}
 	if err != nil {
+		if e.deferInterpretationRetry(sig, msg, err) {
+			return
+		}
 		fail("AI interpretation", err)
 		return
 	}
 	aiRunID := int64(0)
 	if run != nil {
 		aiRunID = run.ID
+	} else if existing != nil {
+		aiRunID = existing.AIRunID
+		timings.mediaMs, timings.promptMs, timings.llmMs = existing.MediaDownloadMs, existing.PromptBuildMs, existing.LLMRequestMs
 	}
 	interpJSON, _ := json.Marshal(interp)
 	e.updateSignal(signalID, map[string]interface{}{
@@ -243,12 +286,26 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		"media_download_ms":    timings.mediaMs,
 		"prompt_build_ms":      timings.promptMs,
 		"llm_request_ms":       timings.llmMs,
+		"next_retry_at":        nil,
+		"error_message":        "",
+		"skip_reason":          "",
 	})
 	e.events.Success(traceID, signalID, msg.MessageID, EvSignalClassified,
 		fmt.Sprintf("%s / %s %s %s (LLM %.1fs)", interp.Classification, interp.Action,
 			interp.Symbol, interp.Direction, float64(timings.llmMs)/1000),
 		timings.llmMs, map[string]interface{}{"reasoning": interp.Reasoning, "warnings": interp.Warnings})
 
+	// Model calls never hold the execution lock. Read target state again under
+	// this lock; a TP fill or timeout may have changed it during interpretation.
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	select {
+	case <-stopForThisRun:
+		skip(SkipPaused, "engine stopped while interpreting; no actions submitted")
+		return
+	default:
+	}
+	sources := e.messageSources(msg)
 	// --- 2..4. Gates & routing, per instruction ---
 	// Multi-instruction messages (one post managing several tracked trades,
 	// e.g. "SEI SL to BE, SUI SL to BE") flatten to their instructions;
@@ -268,8 +325,21 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		skipDetail string
 		executed   int
 	)
+	results := make([]InstructionResult, 0, len(instructions))
 	for i, ins := range instructions {
-		insSkip, insDetail, insErr := e.processInstruction(traceID, signalID, msg, ins)
+		insSkip, insErr := ValidateActionEvidence(ins, sources)
+		insDetail := "current action evidence required"
+		if insSkip == SkipNone && insErr == nil {
+			insSkip, insDetail, insErr = e.processInstruction(traceID, signalID, msg, ins)
+		}
+		result := InstructionResult{Index: i, Action: ins.Action, Symbol: ins.Symbol, Direction: ins.Direction, Status: "executed", SkipReason: insSkip, Detail: insDetail}
+		if insErr != nil {
+			result.Status = "failed"
+			result.Detail = insErr.Error()
+		} else if insSkip != SkipNone {
+			result.Status = "skipped"
+		}
+		results = append(results, result)
 		label := ""
 		if multi {
 			label = fmt.Sprintf("instruction %d/%d (%s %s): ", i+1, len(instructions), ins.Action, ins.Symbol)
@@ -296,6 +366,8 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		}
 	}
 
+	resultJSON, _ := json.Marshal(results)
+	e.updateSignal(signalID, map[string]interface{}{"instruction_results_json": string(resultJSON), "next_retry_at": nil})
 	totalMs := time.Since(pipelineStart).Milliseconds()
 	switch {
 	case firstErr != nil:
@@ -328,6 +400,13 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 // instruction path always had. Returns a terminal skip reason with detail,
 // or an error.
 func (e *Engine) processInstruction(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation) (SkipReason, string, error) {
+	// Resolve missing management symbols only from a unique tracked target.
+	if interp.IsActionable() && interp.Action != ActionOpen && interp.Action != ActionAdd && interp.Symbol == "" {
+		if ctx := e.correlateContext(interp, msg, ""); ctx != nil {
+			interp.Symbol = ctx.Symbol
+			interp.Direction = Direction(ctx.Direction)
+		}
+	}
 	// Instrument resolution & market reference.
 	marketPrice := 0.0
 	canonical := ""
@@ -376,6 +455,36 @@ func (e *Engine) processInstruction(traceID, signalID string, msg *store.Discord
 		return SkipExpired, fmt.Sprintf("signal age %v exceeds TTL %v", time.Since(refTime).Round(time.Second), ttl), nil
 	}
 
+	if interp.Action != ActionOpen && interp.Action != ActionAdd {
+		target := e.correlateContext(interp, msg, canonical)
+		if target == nil {
+			return SkipNeedsContext, "target is missing or not unique", nil
+		}
+		if interp.RequiresAddFill && !target.HasAddFill && target.EntryPlanJSON != "" {
+			if orders, err := e.exec.entryOrders(target); err == nil {
+				confirmed := true
+				for _, o := range orders {
+					if err = e.exec.queryManaged(o); err != nil {
+						confirmed = false
+						break
+					}
+				}
+				if confirmed {
+					_ = e.exec.settleManagedFills(target, orders)
+				}
+			}
+		}
+		if interp.RequiresAddFill && !target.HasAddFill {
+			return SkipNeedsContext, "requires a confirmed add fill for this trade", nil
+		}
+	}
+	action, claimed, claimErr := e.claimInstruction(signalID, msg, interp, canonical)
+	if claimErr != nil {
+		return SkipNone, "", claimErr
+	}
+	if !claimed {
+		return SkipDuplicate, "action already recorded; unresolved side effects are reconciled, never blindly repeated", nil
+	}
 	// Route by action.
 	var execErr error
 	var finalSkip SkipReason
@@ -396,6 +505,17 @@ func (e *Engine) processInstruction(traceID, signalID string, msg *store.Discord
 	default:
 		finalSkip = SkipNotSignal
 	}
+	updates := map[string]interface{}{"status": "done"}
+	if execErr != nil {
+		updates["status"] = "uncertain"
+		updates["error"] = execErr.Error()
+	} else if finalSkip != SkipNone {
+		updates["status"] = "skipped"
+		updates["error"] = string(finalSkip)
+	}
+	if err := e.st.CopyTrade().UpdateAction(action.ID, updates); err != nil {
+		return SkipNone, "", err
+	}
 	return finalSkip, "execution gate", execErr
 }
 
@@ -414,6 +534,13 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 
 	// Context: active trades, recent signals, reply/linked messages.
 	activeCtxs, _ := e.st.CopyTrade().GetActiveContexts(e.traderID)
+	filtered := activeCtxs[:0]
+	for _, c := range activeCtxs {
+		if c.ChannelID == msg.ChannelID {
+			filtered = append(filtered, c)
+		}
+	}
+	activeCtxs = filtered
 	var recent []*store.CopyTradeSignal
 	if e.cfg.SignalContextEnabled {
 		since := time.Now().AddDate(0, 0, -e.cfg.ContextLookbackDays)
@@ -422,14 +549,14 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 
 	var replyMsg *store.DiscordMessage
 	if msg.ReplyToMessageID != "" {
-		replyMsg = e.lookupMessage(msg.ChannelID, msg.ReplyToMessageID)
+		replyMsg = e.lookupMessageForInterpret(msg.ChannelID, msg.ReplyToMessageID, dryRun)
 	}
 	var linked []*store.DiscordMessage
 	for _, link := range discord.ExtractMessageLinks(msg.Content) {
 		if link.MessageID == msg.MessageID {
 			continue
 		}
-		if lm := e.lookupMessage(link.ChannelID, link.MessageID); lm != nil {
+		if lm := e.lookupMessageForInterpret(link.ChannelID, link.MessageID, dryRun); lm != nil {
 			linked = append(linked, lm)
 		}
 		if len(linked) >= 3 {
@@ -437,6 +564,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 		}
 	}
 
+	sources := e.messageSources(msg)
 	// Images.
 	mediaStart := time.Now()
 	var imageParts []mcp.ContentPart
@@ -473,11 +601,12 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 
 	promptStart := time.Now()
 	userPrompt := BuildUserPrompt(PromptInput{
-		Message:        msg,
-		EmbedsText:     discord.FlattenEmbeds(discord.ParseStoredEmbeds(msg.EmbedsJSON)),
-		IsEdit:         isEdit,
-		ImageCount:     imageCount,
-		ChannelNotes:   e.cfg.ChannelNotes,
+		Message:      msg,
+		EmbedsText:   discord.FlattenEmbeds(discord.ParseStoredEmbeds(msg.EmbedsJSON)),
+		IsEdit:       isEdit,
+		ImageCount:   imageCount,
+		ChannelNotes: e.cfg.ChannelNotes,
+		Sources:      sources, InterpretationProfile: e.cfg.InterpretationProfile,
 		ReplyToMessage: replyMsg,
 		LinkedMessages: linked,
 		ActiveContexts: activeCtxs,
@@ -514,7 +643,15 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	}
 
 	llmStart := time.Now()
-	raw, callErr := e.llm.CallWithRequest(&mcp.Request{Messages: messages})
+	var raw string
+	var callErr error
+	if known := InterpretKnownSource(msg, sources, e.cfg.InterpretationProfile); known != nil {
+		b, _ := json.Marshal(known)
+		raw = string(b)
+		run.Model = "deterministic:tyler_v1"
+	} else {
+		raw, callErr = e.llm.CallWithRequest(&mcp.Request{Messages: messages})
+	}
 	t.llmMs = time.Since(llmStart).Milliseconds()
 
 	run.FinishedAt = time.Now().UTC()
@@ -539,6 +676,16 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 		}
 		return nil, run, t, fmt.Errorf("interpretation parse failed: %w", perr)
 	}
+	interp = ApplySourcePolicy(interp, msg, sources, e.cfg.InterpretationProfile)
+	for _, ins := range interp.Flatten() {
+		if ins.ActionEvidence != nil && strings.HasSuffix(ins.ActionEvidence.SourceID, ":image") {
+			for _, part := range imageParts {
+				if part.Text == "Current image source_id="+ins.ActionEvidence.SourceID {
+					ins.EvidenceVerified = true
+				}
+			}
+		}
+	}
 	parsedJSON, _ := json.Marshal(interp)
 	run.ParsedJSON = string(parsedJSON)
 	if !dryRun {
@@ -552,6 +699,9 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 // collectImages downloads message images and converts them to data-URL parts.
 // Failures degrade to text-only with a warning (never fail the signal).
 func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessage, dryRun bool) ([]mcp.ContentPart, int, string) {
+	if e.poller == nil {
+		return nil, 0, "discord client unavailable"
+	}
 	client := e.poller.Client()
 	if client == nil {
 		return nil, 0, "discord client unavailable"
@@ -561,10 +711,10 @@ func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessa
 	var lastErr string
 	failed := 0
 	available := 0
-	for _, att := range discord.ParseStoredAttachments(msg.AttachmentsJSON) {
-		if !att.IsImage() || att.URL == "" {
+	for _, att := range MediaSources(msg, e.messageSources(msg)) {
+		if att.Role != "current" {
 			continue
-		}
+		} // historical media cannot authorize actions
 		available++
 		if count >= 3 { // bound prompt size
 			continue
@@ -586,7 +736,7 @@ func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessa
 			continue
 		}
 		dataURL := "data:" + img.MimeType + ";base64," + base64.StdEncoding.EncodeToString(data)
-		parts = append(parts, mcp.NewImagePart(dataURL))
+		parts = append(parts, mcp.NewTextPart("Current image source_id="+att.SourceID+":image"), mcp.NewImagePart(dataURL))
 		count++
 	}
 	var imageErr string
@@ -600,8 +750,14 @@ func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessa
 
 // lookupMessage reads a message from the store, falling back to the API.
 func (e *Engine) lookupMessage(channelID, messageID string) *store.DiscordMessage {
+	return e.lookupMessageForInterpret(channelID, messageID, false)
+}
+func (e *Engine) lookupMessageForInterpret(channelID, messageID string, dryRun bool) *store.DiscordMessage {
 	if m, err := e.st.DiscordMessage().GetByMessageID(channelID, messageID); err == nil && m != nil {
 		return m
+	}
+	if e.poller == nil {
+		return nil
 	}
 	client := e.poller.Client()
 	if client == nil {
@@ -616,7 +772,9 @@ func (e *Engine) lookupMessage(channelID, messageID string) *store.DiscordMessag
 		return nil
 	}
 	// Persist as baseline so it is never dispatched as a fresh signal.
-	_ = e.st.DiscordMessage().MarkBaseline(rec)
+	if !dryRun {
+		_ = e.st.DiscordMessage().MarkBaseline(rec)
+	}
 	return rec
 }
 
@@ -625,30 +783,92 @@ func (e *Engine) lookupMessage(channelID, messageID string) *store.DiscordMessag
 // correlateContext finds the trade context a management signal refers to.
 // Priority: explicit root message ref > reply target > symbol+direction.
 func (e *Engine) correlateContext(interp *SourceInterpretation, msg *store.DiscordMessage, canonical string) *store.CopyTradeContext {
-	if rootID := interp.TradeReference.RootMessageID; rootID != "" {
-		if ctx, _ := e.st.CopyTrade().GetActiveContextByRootMessage(e.traderID, rootID); ctx != nil {
-			return ctx
-		}
+	contexts, err := e.st.CopyTrade().GetActiveContexts(e.traderID)
+	if err != nil {
+		return nil
 	}
-	// Edited trade cards: the message itself is the root.
-	if ctx, _ := e.st.CopyTrade().GetActiveContextByRootMessage(e.traderID, msg.MessageID); ctx != nil {
-		return ctx
-	}
+	roots := map[string]bool{}
+	verifiedRoots := map[string]bool{}
 	if msg.ReplyToMessageID != "" {
-		if ctx, _ := e.st.CopyTrade().GetActiveContextByRootMessage(e.traderID, msg.ReplyToMessageID); ctx != nil {
-			return ctx
+		verifiedRoots[msg.ReplyToMessageID] = true
+	}
+	unresolvedQuote := false
+	verifiedReference := msg.ReplyToMessageID != ""
+	for _, root := range []string{interp.TradeReference.RootMessageID, interp.TradeReference.ReplyMessageID, msg.ReplyToMessageID} {
+		if root != "" {
+			roots[root] = true
 		}
 	}
-	if canonical != "" {
-		ctx, _ := e.st.CopyTrade().GetActiveContextBySymbol(e.traderID, canonical, string(interp.Direction))
-		return ctx
+	for _, source := range e.messageSources(msg) {
+		if source.Role == "reference" && !source.Image {
+			if source.MessageID != "" {
+				roots[source.MessageID] = true
+				verifiedRoots[source.MessageID] = true
+				verifiedReference = true
+			} else if sourceOpen.MatchString(source.Text) {
+				unresolvedQuote = true
+			}
+		}
 	}
-	return nil
+	for _, link := range discord.ExtractMessageLinks(msg.Content) {
+		if link.ChannelID == msg.ChannelID {
+			roots[link.MessageID] = true
+			verifiedRoots[link.MessageID] = true
+			verifiedReference = true
+		}
+	}
+	if unresolvedQuote && !verifiedReference {
+		return nil
+	}
+	if root := interp.TradeReference.RootMessageID; root != "" && len(verifiedRoots) > 0 && !verifiedRoots[root] {
+		return nil
+	}
+	// An explicit target cannot contradict a native reply. Do not let the
+	// union of two conflicting references select whichever trade is active.
+	if root := interp.TradeReference.RootMessageID; root != "" && msg.ReplyToMessageID != "" && msg.ReplyToMessageID != root {
+		for _, c := range contexts {
+			if c.ChannelID == msg.ChannelID && c.RootMessageID == msg.ReplyToMessageID {
+				return nil
+			}
+		}
+	}
+	if len(roots) == 0 {
+		for _, c := range contexts {
+			if c.RootMessageID == msg.MessageID {
+				roots[msg.MessageID] = true
+			}
+		}
+	}
+	var match *store.CopyTradeContext
+	for _, c := range contexts {
+		if c.ChannelID != msg.ChannelID || (canonical != "" && c.Symbol != canonical) || (interp.Direction != "" && c.Direction != string(interp.Direction)) {
+			continue
+		}
+		if len(roots) > 0 && !roots[c.RootMessageID] {
+			continue
+		}
+		if interp.TradeReference.RootMessageID != "" && c.RootMessageID != interp.TradeReference.RootMessageID {
+			continue
+		}
+		if len(roots) == 0 && canonical == "" {
+			continue
+		}
+		if match != nil {
+			return nil
+		}
+		match = c
+	}
+	return match
 }
 
 func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation, canonical string, marketPrice float64) (SkipReason, error) {
 	if e.cfg.Paused {
 		return SkipPaused, nil
+	}
+	if managed, ok := e.exec.ex.(types.ManagedOrderTrader); ok {
+		if _, err := managed.MarketRules(canonical); err != nil {
+			return SkipUnsupportedInstrument, fmt.Errorf("contract capability: %w", err)
+		}
 	}
 	// Duplicate protection: an active trade on this symbol+direction already exists.
 	if e.cfg.DuplicateOpenProtection {
@@ -710,15 +930,18 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 	// skipped middle spec must not misalign explicit ratios), then cap the
 	// ladder at the executor's capacity: the nearest targets are kept, the
 	// far ones dropped — never reject the whole trade over extra TP levels.
-	var tpPrices []float64
+	var tpPrices, originalTPPrices []float64
+	var tpOrdinals []int
 	var tpLevels []TPLevel
-	for _, tp := range interp.TakeProfitLevels {
+	for ordinal, tp := range interp.TakeProfitLevels {
+		tp.Ordinal = ordinal + 1
 		p := resolveHardPrice(tp.Price, entryPrice)
 		if p <= 0 {
 			e.events.Warn(traceID, signalID, msg.MessageID, EvSignalClassified,
 				fmt.Sprintf("skipping unsupported TP spec %s", tp.Price.Type), nil)
 			continue
 		}
+		originalTPPrices = append(originalTPPrices, p)
 		tpPrices = append(tpPrices, p)
 		tpLevels = append(tpLevels, tp)
 	}
@@ -728,6 +951,9 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 		e.events.Warn(traceID, signalID, msg.MessageID, EvSignalClassified,
 			fmt.Sprintf("signal has %d TP levels, keeping the %d nearest and dropping %v (executor cap)",
 				len(tpPrices)+len(droppedTPs), MaxTPLevels, droppedTPs), nil)
+	}
+	for _, tp := range tpLevels {
+		tpOrdinals = append(tpOrdinals, tp.Ordinal)
 	}
 	defaults, _ := ParseTPRatios(e.cfg.DefaultTPRatios)
 	tpRatios, err := AllocateTPRatios(tpLevels, defaults)
@@ -773,9 +999,35 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 		StopLoss:   slPrice,
 		TPPrices:   tpPrices,
 		TPRatios:   tpRatios,
+		TPOrdinals: tpOrdinals, TPOriginalPrices: originalTPPrices,
 		Sizing:     sizing,
 		RootMsgID:  msg.MessageID,
 		ChannelID:  msg.ChannelID,
+		RiskBudget: 0, MaxNotional: e.cfg.MaxPositionNotionalUSD, AvailableMargin: available,
+		EntryTimeout: time.Duration(e.cfg.EntryTimeoutMinutes) * time.Minute,
+	}
+	if e.cfg.RiskMode == RiskModeByLoss {
+		plan.RiskBudget = e.cfg.RiskAmountUSD
+	}
+	refTime := msg.MessageTimestamp
+	if msg.EditedAt != nil && msg.EditedAt.After(refTime) {
+		refTime = *msg.EditedAt
+	}
+	if e.cfg.OpenSignalTTLSeconds > 0 {
+		plan.SignalExpiresAt = refTime.Add(time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second)
+	}
+	if e.cfg.EntryPolicy == EntryPolicySplit && entrySpec.Type == PriceMarket && entrySpec.Price > 0 && decision.Reason == "adverse_within_threshold" {
+		plan.SplitReference = entrySpec.Price
+	}
+	// Author conditions are committed with the entry intent, before a fill or
+	// protection error can interrupt the open saga and expose global TP1 rules.
+	for _, rule := range interp.ConditionalRules {
+		if rule.Condition == ConditionTPFilled && rule.Action == ActionUpdateSL && (rule.Price.Type == PriceEntry || rule.Price.Type == PriceBreakeven) {
+			plan.BreakevenTPLevel = rule.ConditionLevel
+			if plan.BreakevenTPLevel <= 0 {
+				plan.BreakevenTPLevel = 1
+			}
+		}
 	}
 
 	submitStart := time.Now()
@@ -783,10 +1035,13 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 	e.updateSignal(signalID, map[string]interface{}{
 		"exchange_submit_ms": time.Since(submitStart).Milliseconds(),
 	})
+	if ctx != nil {
+		e.updateSignal(signalID, map[string]interface{}{"trade_context_id": ctx.ID})
+		_ = e.st.CopyTrade().BindOpenAction(signalID, canonical, string(interp.Direction), ctx.ID)
+	}
 	if err != nil {
 		return SkipNone, err
 	}
-	e.updateSignal(signalID, map[string]interface{}{"trade_context_id": ctx.ID})
 	if ctx.State == string(StateOpen) {
 		e.events.Success(traceID, signalID, msg.MessageID, EvTradeOpened,
 			fmt.Sprintf("%s %s opened: qty=%.8g @ %.8g, SL %.8g, %d TPs",
@@ -797,13 +1052,12 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 	// move SL to entry/breakeven") is armed on the context and enforced by the
 	// reconciler; everything else is logged explicitly as unsupported instead
 	// of being dropped silently.
-	e.applyConditionalRules(traceID, signalID, msg.MessageID, interp, ctx)
-	return SkipNone, nil
+	return SkipNone, e.applyConditionalRules(traceID, signalID, msg.MessageID, interp, ctx)
 }
 
 // applyConditionalRules arms supported author-stated follow-up rules on the
 // trade context. Supported in V1: TP_FILLED => UPDATE_SL to ENTRY/BREAKEVEN.
-func (e *Engine) applyConditionalRules(traceID, signalID, messageID string, interp *SourceInterpretation, ctx *store.CopyTradeContext) {
+func (e *Engine) applyConditionalRules(traceID, signalID, messageID string, interp *SourceInterpretation, ctx *store.CopyTradeContext) error {
 	for _, rule := range interp.ConditionalRules {
 		supported := rule.Condition == ConditionTPFilled &&
 			rule.Action == ActionUpdateSL &&
@@ -814,14 +1068,16 @@ func (e *Engine) applyConditionalRules(traceID, signalID, messageID string, inte
 					rule.Condition, rule.ConditionLevel, rule.Action, rule.Price.Type), nil)
 			continue
 		}
-		if ctx.BreakevenAfterTP {
-			continue
+		if rule.ConditionLevel <= 0 {
+			rule.ConditionLevel = 1
 		}
-		e.exec.updateContext(ctx, map[string]interface{}{"breakeven_after_tp": true})
-		ctx.BreakevenAfterTP = true
+		if err := e.exec.persistContext(ctx, map[string]interface{}{"breakeven_after_tp": true, "breakeven_tp_level": rule.ConditionLevel}); err != nil {
+			return err
+		}
 		e.events.Info(traceID, signalID, messageID, EvSignalClassified,
-			"author rule armed: SL moves to entry after the first TP fill", nil)
+			fmt.Sprintf("author rule armed: SL moves to entry after TP%d fill", rule.ConditionLevel), nil)
 	}
+	return nil
 }
 
 // routeAdd: V1 treats ADD conservatively — only executes when there is no
@@ -848,7 +1104,12 @@ func (e *Engine) routeClose(traceID, signalID string, msg *store.DiscordMessage,
 	}
 	// Close of an unfilled entry = cancel.
 	if ctx.State == string(StateEntryPending) {
-		return e.exec.ExecuteCancel(traceID, signalID, ctx)
+		if _, err := e.exec.ExecuteCancel(traceID, signalID, ctx); err != nil {
+			return SkipNone, err
+		}
+		if ctx.Quantity <= 0 || ctx.OpenedAt == nil {
+			return SkipNone, nil
+		}
 	}
 	ratio := 100.0
 	if interp.Action == ActionReduce || interp.CloseMode == CloseModePartial {
@@ -868,7 +1129,7 @@ func (e *Engine) routeCancel(traceID, signalID string, msg *store.DiscordMessage
 	if ctx == nil {
 		return SkipNoPosition, nil
 	}
-	if ok, reason := ActionApplicable(TradeState(ctx.State), ActionCancel); !ok {
+	if ok, reason := ActionApplicable(TradeState(ctx.State), ActionCancel); !ok && !ctx.EntryWorking && !(ctx.ExecutionVersion > 0 && !ctx.EntryDisabled) {
 		return reason, nil
 	}
 	return e.exec.ExecuteCancel(traceID, signalID, ctx)
@@ -882,16 +1143,24 @@ func (e *Engine) routeUpdateSL(traceID, signalID string, msg *store.DiscordMessa
 	if ok, reason := ActionApplicable(TradeState(ctx.State), ActionUpdateSL); !ok {
 		return reason, nil
 	}
+	if len(interp.ConditionalRules) > 0 {
+		for _, rule := range interp.ConditionalRules {
+			if rule.Condition != ConditionTPFilled || rule.Action != ActionUpdateSL || (rule.Price.Type != PriceEntry && rule.Price.Type != PriceBreakeven) {
+				return SkipUnsupportedPriceSpec, nil
+			}
+		}
+		return SkipNone, e.applyConditionalRules(traceID, signalID, msg.MessageID, interp, ctx)
+	}
 	spec := interp.StopLossLevels[0].Price
 	entryRef := ctx.AvgFillPrice
 	if entryRef <= 0 {
 		entryRef = ctx.PlannedEntryPrice
 	}
-	newPrice := resolveHardPrice(spec, entryRef)
+	newPrice := resolveContextPrice(spec, ctx, entryRef)
 	if newPrice <= 0 {
 		return SkipUnsupportedPriceSpec, nil
 	}
-	return e.exec.ExecuteUpdateSL(traceID, signalID, ctx, newPrice)
+	return e.exec.ExecuteUpdateSLSpec(traceID, signalID, ctx, spec)
 }
 
 func (e *Engine) routeUpdateTP(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation, canonical string) (SkipReason, error) {

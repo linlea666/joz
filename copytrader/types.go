@@ -69,6 +69,7 @@ const (
 	PriceRMultiple     PriceSpecType = "R_MULTIPLE"     // e.g. "TP at 2R" (V1: skip-unsupported)
 	PricePercentOffset PriceSpecType = "PERCENT_OFFSET" // e.g. "move SL +0.2%" (V1: skip-unsupported)
 	PriceUnknown       PriceSpecType = "UNKNOWN"
+	PriceTPLevel       PriceSpecType = "TP_LEVEL" // original take-profit ordinal, resolved from the tracked trade
 )
 
 // PriceSpec is a structured price expression.
@@ -78,6 +79,7 @@ type PriceSpec struct {
 	RangeLow  float64       `json:"range_low,omitempty"`  // RANGE (lower bound)
 	RangeHigh float64       `json:"range_high,omitempty"` // RANGE (upper bound)
 	Offset    float64       `json:"offset,omitempty"`     // R_MULTIPLE multiplier or percent offset
+	Level     int           `json:"level,omitempty"`      // one-based original TP ordinal for TP_LEVEL
 }
 
 // EntryOrderType is how the entry should be submitted.
@@ -99,6 +101,7 @@ type EntryOrder struct {
 // nil means the author did not specify a ratio; the deterministic TP policy
 // decides the final allocation (never the AI).
 type TPLevel struct {
+	Ordinal     int       `json:"-"`
 	Price       PriceSpec `json:"price"`
 	Ratio       *float64  `json:"ratio,omitempty"`
 	RatioSource string    `json:"ratio_source,omitempty"` // "explicit" | "unspecified"
@@ -144,6 +147,13 @@ type SourceInfo struct {
 	UsedTradeContext bool `json:"used_trade_context"`
 }
 
+// ActionEvidence points to the current author's words, never to a quoted
+// historical entry. Source IDs are assigned by the application, not the model.
+type ActionEvidence struct {
+	SourceID string `json:"source_id"`
+	Text     string `json:"text"`
+}
+
 // SourceInterpretation is the standard output of AI signal parsing.
 // It answers exactly one question: "what did the author say?".
 type SourceInterpretation struct {
@@ -161,17 +171,21 @@ type SourceInterpretation struct {
 	StopLossLevels   []SLLevel         `json:"stop_loss_levels,omitempty"`
 	ConditionalRules []ConditionalRule `json:"conditional_rules,omitempty"`
 
-	TradeReference TradeReference     `json:"trade_reference,omitempty"`
-	Confidence     map[string]float64 `json:"confidence,omitempty"` // classification/symbol/direction/entry/stop_loss
-	Reasoning      string             `json:"reasoning,omitempty"`
-	Warnings       []string           `json:"warnings,omitempty"`
-	SourceInfo     SourceInfo         `json:"source_info"`
+	TradeReference        TradeReference     `json:"trade_reference,omitempty"`
+	Confidence            map[string]float64 `json:"confidence,omitempty"` // classification/symbol/direction/entry/stop_loss
+	Reasoning             string             `json:"reasoning,omitempty"`
+	Warnings              []string           `json:"warnings,omitempty"`
+	SourceInfo            SourceInfo         `json:"source_info"`
+	ActionEvidence        *ActionEvidence    `json:"action_evidence,omitempty"`
+	EligibilityConditions []string           `json:"eligibility_conditions,omitempty"`
+	EvidenceVerified      bool               `json:"-"`
+	RequiresAddFill       bool               `json:"requires_add_fill,omitempty"` // management applies only if this trade's add leg actually filled
 
 	// Instructions carries the per-trade instructions of a multi-instruction
 	// message (one post managing several tracked trades, e.g. "SEI SL to BE,
 	// SUI SL to BE"). Each element uses the same per-trade fields as the top
-	// level; classification/reasoning/source_info stay message-level (the
-	// parser copies them onto every element). Empty for single-instruction
+	// level; each child retains its own classification and evidence. Missing
+	// classification/source_info inherit the parent for older responses. Empty for single-instruction
 	// messages, whose per-trade fields live directly on the top level.
 	Instructions []*SourceInterpretation `json:"instructions,omitempty"`
 }
@@ -227,6 +241,7 @@ const (
 	SkipPaused                SkipReason = "TRADING_PAUSED"
 	SkipRiskRejected          SkipReason = "RISK_REJECTED"
 	SkipMaxPositions          SkipReason = "MAX_POSITIONS_REACHED"
+	SkipSourceEvidence        SkipReason = "SOURCE_INTENT_MISMATCH"
 )
 
 // IsExpired reports whether a signal is too old to act on.

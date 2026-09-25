@@ -46,6 +46,8 @@ export interface CopyTradingConfig {
   primary_channel_id: string
   source_author_ids?: string[]
   channel_notes?: string
+  interpretation_profile?: 'default' | 'tyler_v1'
+  entry_policy?: 'legacy' | 'market_reference_split'
 
   parse_images: boolean
   send_position_snapshot: boolean
@@ -76,6 +78,8 @@ export interface CopyTradingConfig {
 export const DEFAULT_COPY_TRADING_CONFIG: CopyTradingConfig = {
   primary_channel_id: '',
   channel_notes: '',
+  interpretation_profile: 'default',
+  entry_policy: 'legacy',
   parse_images: true,
   send_position_snapshot: true,
   signal_context_enabled: true,
@@ -116,7 +120,45 @@ export interface CopyTradeEvent {
   created_at: string
 }
 
+export interface CopyTradeActionResult {
+  id: string
+  action: string
+  symbol: string
+  direction: string
+  status: string
+  context_id?: string
+  trade_state?: string
+  error?: string
+}
+export interface CopyTradeOrderLeg {
+  id: string
+  role: string
+  symbol: string
+  direction: string
+  order_type: string
+  price: number
+  quantity: number
+  executed_qty: number
+  avg_price: number
+  status: string
+  order_id?: string
+  last_error?: string
+}
+export interface CopyTradeInstructionResult {
+  index: number
+  action: string
+  symbol: string
+  direction?: string
+  status: string
+  skip_reason?: string
+  detail?: string
+}
 export interface CopyTradeSignal {
+  action_results?: CopyTradeActionResult[]
+  order_legs?: CopyTradeOrderLeg[]
+  instruction_results?: CopyTradeInstructionResult[]
+  retry_count?: number
+  next_retry_at?: string
   id: string
   trader_id: string
   channel_id: string
@@ -148,6 +190,13 @@ export interface CopyTradeSignal {
 }
 
 export interface CopyTradeContext {
+  execution_version?: number
+  entry_policy?: string
+  entry_disabled?: boolean
+  entry_working?: boolean
+  has_add_fill?: boolean
+  entry_deadline?: string
+  breakeven_tp_level?: number
   id: string
   trader_id: string
   channel_id: string

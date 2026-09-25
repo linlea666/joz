@@ -767,15 +767,16 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 		quantity, _ := strconv.ParseFloat(order.OrigQuantity, 64)
 
 		result = append(result, types.OpenOrder{
-			OrderID:      fmt.Sprintf("%d", order.OrderID),
-			Symbol:       order.Symbol,
-			Side:         string(order.Side),
-			PositionSide: string(order.PositionSide),
-			Type:         string(order.Type),
-			Price:        price,
-			StopPrice:    stopPrice,
-			Quantity:     quantity,
-			Status:       string(order.Status),
+			OrderID:       fmt.Sprintf("%d", order.OrderID),
+			Symbol:        order.Symbol,
+			Side:          string(order.Side),
+			PositionSide:  string(order.PositionSide),
+			Type:          string(order.Type),
+			Price:         price,
+			StopPrice:     stopPrice,
+			ClosePosition: order.ClosePosition,
+			Quantity:      quantity,
+			Status:        string(order.Status),
 		})
 	}
 
@@ -795,15 +796,16 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 		quantity, _ := strconv.ParseFloat(algoOrder.Quantity, 64)
 
 		result = append(result, types.OpenOrder{
-			OrderID:      fmt.Sprintf("%d", algoOrder.AlgoId),
-			Symbol:       algoOrder.Symbol,
-			Side:         string(algoOrder.Side),
-			PositionSide: string(algoOrder.PositionSide),
-			Type:         string(algoOrder.OrderType),
-			Price:        0, // Algo orders use stop price
-			StopPrice:    triggerPrice,
-			Quantity:     quantity,
-			Status:       "NEW",
+			OrderID:       fmt.Sprintf("%d", algoOrder.AlgoId),
+			Symbol:        algoOrder.Symbol,
+			Side:          string(algoOrder.Side),
+			PositionSide:  string(algoOrder.PositionSide),
+			Type:          string(algoOrder.OrderType),
+			Price:         0, // Algo orders use stop price
+			StopPrice:     triggerPrice,
+			ClosePosition: algoOrder.ClosePosition,
+			Quantity:      quantity,
+			Status:        "NEW",
 		})
 	}
 
