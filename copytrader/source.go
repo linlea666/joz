@@ -33,9 +33,12 @@ var sourceTPLevel = regexp.MustCompile(`(?i)TP\s*([1-9][0-9]*)`)
 var sourceAddCondition = regexp.MustCompile(`(有[補补][倉仓]|[補补][倉仓][後后]|after (?:an? )?add|if (?:you )?added)`)
 var sourceCancel = regexp.MustCompile(`(?i)(撤[單单]|取消[掛挂][單单]|cancel)`)
 var sourceAdd = regexp.MustCompile(`(?i)([補补][倉仓]|加[倉仓]|\badd\b)`)
+var sourceQuoteStart = regexp.MustCompile(`(?im)^[ \t]*(?:引用信息|引用訊息|引用消息|quoted message|quote)[ \t]*[:：][ \t]*`)
+var sourceReplyStart = regexp.MustCompile(`(?im)^[ \t]*(?:💬[ \t]*)?(?:回复|回覆|reply)[ \t]*[:：][ \t]*`)
+var sourceBreakeven = regexp.MustCompile(`(?i)(成本.*[損损]|[損损].*成本|保本|上成本|移[至到]成本|拉[到至]成本)`)
 
 func BuildSourceSegments(msg *store.DiscordMessage, profile string) []SourceSegment {
-	segments := []SourceSegment{{ID: "body", Role: "current", Text: msg.Content}}
+	segments := buildBodySourceSegments(msg.Content, profile)
 	for i, embed := range discord.ParseStoredEmbeds(msg.EmbedsJSON) {
 		segment := SourceSegment{ID: fmt.Sprintf("embed:%d", i), Role: "current", Text: discord.FlattenEmbeds([]discord.Embed{embed}), Timestamp: embed.Timestamp}
 		if embed.Author != nil {
@@ -55,6 +58,40 @@ func BuildSourceSegments(msg *store.DiscordMessage, profile string) []SourceSegm
 	for _, media := range MediaSources(msg, segments) {
 		segments = append(segments, SourceSegment{ID: media.SourceID + ":image", Role: media.Role, Image: true, Text: "Image supplied separately; transcribe current action words for evidence."})
 	}
+	return segments
+}
+
+// buildBodySourceSegments keeps the legacy single-body representation for
+// generic interpretation profiles. TYLER messages may explicitly quote an old
+// card in plain text; split that quote from the current reply so quoted entry
+// parameters cannot authorize a new OPEN/ADD action.
+func buildBodySourceSegments(content, profile string) []SourceSegment {
+	if profile != "tyler_v1" {
+		return []SourceSegment{{ID: "body", Role: "current", Text: content}}
+	}
+	quote := sourceQuoteStart.FindStringIndex(content)
+	if quote == nil {
+		return []SourceSegment{{ID: "body", Role: "current", Text: content}}
+	}
+
+	segments := make([]SourceSegment, 0, 3)
+	appendSegment := func(id, role, text, reason string) {
+		if strings.TrimSpace(text) == "" {
+			return
+		}
+		segments = append(segments, SourceSegment{ID: id, Role: role, Text: text, Reason: reason})
+	}
+	appendSegment("body:current:0", "current", content[:quote[0]], "text before quoted card")
+
+	rest := content[quote[1]:]
+	replyRel := sourceReplyStart.FindStringIndex(rest)
+	if replyRel == nil {
+		appendSegment("body:reference:0", "reference", content[quote[0]:], "explicit quoted card")
+		return segments
+	}
+	replyStart := quote[1] + replyRel[0]
+	appendSegment("body:reference:0", "reference", content[quote[0]:replyStart], "explicit quoted card")
+	appendSegment("body:current:1", "current", content[replyStart:], "current reply after quoted card")
 	return segments
 }
 
@@ -82,6 +119,32 @@ var sourceMention = regexp.MustCompile(`<@[^>]*>`)
 
 func normalizedSignalText(s string) string {
 	return strings.Join(strings.Fields(sourceMention.ReplaceAllString(s, "")), "")
+}
+
+// findEvidenceSpan matches the model's evidence while tolerating only
+// whitespace differences. Punctuation, emoji, wording and source boundaries
+// remain strict so a paraphrase or quoted card cannot authorize an action.
+func findEvidenceSpan(source, evidence string) (int, int, bool) {
+	evidence = strings.TrimSpace(evidence)
+	if evidence == "" {
+		return 0, 0, false
+	}
+	if index := strings.Index(source, evidence); index >= 0 {
+		return index, index + len(evidence), true
+	}
+	fields := strings.Fields(evidence)
+	if len(fields) == 0 {
+		return 0, 0, false
+	}
+	pattern := regexp.QuoteMeta(fields[0])
+	for _, field := range fields[1:] {
+		pattern += `\s+` + regexp.QuoteMeta(field)
+	}
+	loc := regexp.MustCompile(`(?s)` + pattern).FindStringIndex(source)
+	if loc == nil {
+		return 0, 0, false
+	}
+	return loc[0], loc[1], true
 }
 
 func MediaSources(msg *store.DiscordMessage, segments []SourceSegment) []SourceMedia {
@@ -114,7 +177,8 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 	if profile != "tyler_v1" {
 		return nil
 	}
-	body := strings.TrimSpace(msg.Content)
+	body, actionSourceID, actionEvidence := tylerCurrentSource(segments, msg.Content)
+	body = strings.TrimSpace(body)
 	if body == "" || sourceOpen.MatchString(body) {
 		return nil
 	}
@@ -151,11 +215,11 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 	}
 	var actions []*SourceInterpretation
 	makeAction := func(a Action) *SourceInterpretation {
-		return &SourceInterpretation{Classification: ClassificationSignal, Action: a, Symbol: sym, ActionEvidence: &ActionEvidence{SourceID: "body", Text: body}, RequiresAddFill: sourceAddCondition.MatchString(body), Reasoning: "TYLER explicit management policy"}
+		return &SourceInterpretation{Classification: ClassificationSignal, Action: a, Symbol: sym, ActionEvidence: &ActionEvidence{SourceID: actionSourceID, Text: actionEvidence}, RequiresAddFill: sourceAddCondition.MatchString(body), Reasoning: "TYLER explicit management policy"}
 	}
 	full := strings.Contains(body, "全平") || strings.Contains(body, "提前平倉") || strings.Contains(body, "提前平仓") || strings.Contains(body, "提前止損離場") || strings.Contains(body, "提前止损离场") || strings.Contains(body, "這單就不拿") || strings.Contains(body, "这单就不拿")
 	reduce := strings.Contains(body, "減倉") || strings.Contains(body, "减仓") || strings.Contains(body, "可以先跑") || regexp.MustCompile(`(?i)(提前|可做|可以作|自行.*作)\s*TP\s*\d`).MatchString(body)
-	be := regexp.MustCompile(`(成本.*[損损]|[損损].*成本|保本)`).MatchString(body) || strings.Contains(body, "無風險持倉") || strings.Contains(body, "无风险持仓")
+	be := sourceBreakeven.MatchString(body) || strings.Contains(body, "無風險持倉") || strings.Contains(body, "无风险持仓")
 	moveTP := (strings.Contains(body, "止損") || strings.Contains(body, "止损")) && sourceTPLevel.MatchString(body) && (strings.Contains(body, "提升") || strings.Contains(body, "移至") || strings.Contains(body, "移到"))
 	if full {
 		a := makeAction(ActionClose)
@@ -207,6 +271,36 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 	return &SourceInterpretation{Classification: ClassificationSignal, Action: actions[0].Action, Symbol: sym, Instructions: actions}
 }
 
+// tylerCurrentSource returns the current text used by the deterministic TYLER
+// policy and the exact source segment that contains its action wording.
+func tylerCurrentSource(segments []SourceSegment, fallback string) (string, string, string) {
+	current := make([]SourceSegment, 0, len(segments))
+	for _, segment := range segments {
+		if segment.Role == "current" && !segment.Image && strings.TrimSpace(segment.Text) != "" {
+			current = append(current, segment)
+		}
+	}
+	if len(current) == 0 {
+		if len(segments) == 0 {
+			return strings.TrimSpace(fallback), "body", strings.TrimSpace(fallback)
+		}
+		return "", "", ""
+	}
+
+	action := current[0]
+	for _, segment := range current {
+		if sourceManagement.MatchString(segment.Text) || sourceCancel.MatchString(segment.Text) || sourceProfit.MatchString(segment.Text) {
+			action = segment
+			break
+		}
+	}
+	parts := make([]string, 0, len(current))
+	for _, segment := range current {
+		parts = append(parts, segment.Text)
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n")), action.ID, strings.TrimSpace(action.Text)
+}
+
 func ApplySourcePolicy(interp *SourceInterpretation, msg *store.DiscordMessage, segments []SourceSegment, profile string) *SourceInterpretation {
 	if known := InterpretKnownSource(msg, segments, profile); known != nil {
 		return known
@@ -252,32 +346,39 @@ func ApplySourcePolicy(interp *SourceInterpretation, msg *store.DiscordMessage, 
 // Keep the qualifying clause around quoted evidence. In a multi-symbol body,
 // restrict it to that symbol's block so another trade's condition does not leak.
 func evidenceScope(body, evidence string) string {
-	index := strings.Index(body, evidence)
-	if index < 0 {
+	evidenceStart, evidenceEnd, ok := findEvidenceSpan(body, evidence)
+	if !ok {
 		return body
 	}
 	matches := sourceSymbol.FindAllStringIndex(body, -1)
-	start, end := 0, len(body)
+	scopeStart, scopeEnd := 0, len(body)
 	for _, m := range matches {
-		if m[0] <= index {
-			start = m[0]
-		} else if m[0] >= index+len(evidence) {
-			end = m[0]
+		if m[0] <= evidenceStart {
+			scopeStart = m[0]
+		} else if m[0] >= evidenceEnd {
+			scopeEnd = m[0]
 			break
 		}
 	}
 	if len(matches) <= 1 {
 		return body
 	}
-	return body[start:end]
+	return body[scopeStart:scopeEnd]
 }
 
 func ValidateActionEvidence(ins *SourceInterpretation, segments []SourceSegment) (SkipReason, error) {
+	skip, _, err := ValidateActionEvidenceDetailed(ins, segments)
+	return skip, err
+}
+
+// ValidateActionEvidenceDetailed preserves the existing skip semantics while
+// returning a stable diagnostic for the execution log/UI.
+func ValidateActionEvidenceDetailed(ins *SourceInterpretation, segments []SourceSegment) (SkipReason, string, error) {
 	if !ins.IsActionable() {
-		return SkipNone, nil
+		return SkipNone, "", nil
 	}
 	if ins.ActionEvidence == nil {
-		return SkipSourceEvidence, nil
+		return SkipSourceEvidence, "missing current action evidence", nil
 	}
 	for _, s := range segments {
 		if s.ID != ins.ActionEvidence.SourceID {
@@ -285,23 +386,31 @@ func ValidateActionEvidence(ins *SourceInterpretation, segments []SourceSegment)
 		}
 		text := strings.TrimSpace(ins.ActionEvidence.Text)
 		if s.Image && !ins.EvidenceVerified {
-			return SkipSourceEvidence, nil
+			return SkipSourceEvidence, "current image evidence was not verified", nil
 		}
-		if s.Role != "current" || text == "" || (!s.Image && !strings.Contains(s.Text, text)) {
-			return SkipSourceEvidence, nil
+		if s.Role != "current" {
+			return SkipSourceEvidence, "action evidence points to a reference source", nil
+		}
+		if text == "" {
+			return SkipSourceEvidence, "current action evidence is empty", nil
+		}
+		if !s.Image {
+			if _, _, ok := findEvidenceSpan(s.Text, text); !ok {
+				return SkipSourceEvidence, "action evidence does not match the current source text", nil
+			}
 		}
 		if len(ins.EligibilityConditions) > 0 {
-			return SkipNeedsContext, nil
+			return SkipNeedsContext, "eligibility condition is not verified", nil
 		}
 		scope := text
 		if !s.Image {
 			scope = evidenceScope(s.Text, text)
 		}
 		if sourceAddCondition.MatchString(scope) && !ins.RequiresAddFill {
-			return SkipNeedsContext, nil
+			return SkipNeedsContext, "requires a confirmed add fill for this trade", nil
 		}
 		if regexp.MustCompile(`(?i)(如果|若是|只有|only if|\bif\b)`).MatchString(scope) && !ins.RequiresAddFill && len(ins.ConditionalRules) == 0 {
-			return SkipNeedsContext, nil
+			return SkipNeedsContext, "conditional eligibility is not verified", nil
 		}
 		if (ins.Action == ActionOpen || ins.Action == ActionAdd) && !s.Image {
 			mentions := sourceSymbol.FindAllStringSubmatch(s.Text, -1)
@@ -315,18 +424,18 @@ func ValidateActionEvidence(ins *SourceInterpretation, segments []SourceSegment)
 					}
 				}
 				if !match {
-					return SkipSourceEvidence, nil
+					return SkipSourceEvidence, "opening evidence symbol does not match the parsed symbol", nil
 				}
 			}
 		}
 		openingEvidence := sourceOpen.MatchString(text) || (ins.Action == ActionAdd && sourceAdd.MatchString(text))
 		if (ins.Action == ActionOpen || ins.Action == ActionAdd) && (!openingEvidence || sourceNegation.MatchString(text)) {
-			return SkipSourceEvidence, nil
+			return SkipSourceEvidence, "current evidence lacks an unambiguous open/add instruction", nil
 		}
 		if ins.Action != ActionOpen && ins.Action != ActionAdd && !sourceManagement.MatchString(text) && !sourceCancel.MatchString(text) {
-			return SkipSourceEvidence, nil
+			return SkipSourceEvidence, "current evidence lacks a management instruction", nil
 		}
-		return SkipNone, nil
+		return SkipNone, "", nil
 	}
-	return SkipSourceEvidence, nil
+	return SkipSourceEvidence, "action evidence source was not found", nil
 }

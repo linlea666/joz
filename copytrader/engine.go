@@ -327,8 +327,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	)
 	results := make([]InstructionResult, 0, len(instructions))
 	for i, ins := range instructions {
-		insSkip, insErr := ValidateActionEvidence(ins, sources)
-		insDetail := "current action evidence required"
+		insSkip, insDetail, insErr := ValidateActionEvidenceDetailed(ins, sources)
 		if insSkip == SkipNone && insErr == nil {
 			insSkip, insDetail, insErr = e.processInstruction(traceID, signalID, msg, ins)
 		}

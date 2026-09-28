@@ -67,6 +67,82 @@ func TestQuotedOpenRejectedIndependentlyOfPrices(t *testing.T) {
 		t.Fatal("historical open escaped source gate")
 	}
 }
+
+func TestEvidenceWhitespaceDifferencesRemainCurrentSource(t *testing.T) {
+	msg := &store.DiscordMessage{Content: "#STEEM｜做空 📉\n\n進場：市價\n止損：0.0685\n\n止盈：\n0.06208-0.05898-0.05466"}
+	ins := &SourceInterpretation{
+		Classification: ClassificationSignal,
+		Action:         ActionOpen,
+		Symbol:         "STEEM",
+		Direction:      DirectionShort,
+		ActionEvidence: &ActionEvidence{SourceID: "body", Text: "#STEEM｜做空 📉\n進場：市價\n止損：0.0685\n止盈：\n0.06208-0.05898-0.05466"},
+	}
+	if skip, detail, _ := ValidateActionEvidenceDetailed(ins, BuildSourceSegments(msg, "default")); skip != SkipNone || detail != "" {
+		t.Fatalf("whitespace-only evidence mismatch: skip=%s detail=%q", skip, detail)
+	}
+}
+
+func TestTylerPlainTextQuoteCannotAuthorizeOpen(t *testing.T) {
+	body := "引用信息：#SOL｜做多 🚀🚀🚀\n\n進場：116.5\n止損：113.5\n\n止盈：118 - 120 - 123\n\n2%～3% 倉位｜50x-40x\n💬 回复：\n#SOL 這單下午6點之前有效 <@&1539559615241523230>"
+	msg := &store.DiscordMessage{Content: body}
+
+	tyler := BuildSourceSegments(msg, "tyler_v1")
+	if len(tyler) != 2 || tyler[0].Role != "reference" || tyler[1].Role != "current" {
+		t.Fatalf("unexpected TYLER source split: %+v", tyler)
+	}
+	if skip, detail, _ := ValidateActionEvidenceDetailed(&SourceInterpretation{
+		Classification: ClassificationSignal,
+		Action:         ActionOpen,
+		Symbol:         "SOL",
+		Direction:      DirectionLong,
+		ActionEvidence: &ActionEvidence{SourceID: tyler[0].ID, Text: "#SOL｜做多 進場：116.5 止損：113.5"},
+	}, tyler); skip != SkipSourceEvidence || detail != "action evidence points to a reference source" {
+		t.Fatalf("quoted open was not rejected safely: skip=%s detail=%q", skip, detail)
+	}
+	if skip, detail, _ := ValidateActionEvidenceDetailed(&SourceInterpretation{
+		Classification: ClassificationSignal,
+		Action:         ActionOpen,
+		Symbol:         "SOL",
+		Direction:      DirectionLong,
+		ActionEvidence: &ActionEvidence{SourceID: tyler[1].ID, Text: "#SOL 這單下午6點之前有效"},
+	}, tyler); skip != SkipSourceEvidence || detail != "current evidence lacks an unambiguous open/add instruction" {
+		t.Fatalf("validity-only reply authorized open: skip=%s detail=%q", skip, detail)
+	}
+
+	generic := BuildSourceSegments(msg, "default")
+	if len(generic) != 1 || generic[0].ID != "body" || generic[0].Role != "current" {
+		t.Fatalf("generic source behavior changed: %+v", generic)
+	}
+}
+
+func TestTylerReduceAndMoveStopToCost(t *testing.T) {
+	msg := &store.DiscordMessage{Content: "#STEEM TP1✅ 提醒大家記得減倉上成本 <@&1539559615241523230>"}
+	segments := BuildSourceSegments(msg, "tyler_v1")
+	got := InterpretKnownSource(msg, segments, "tyler_v1")
+	if got == nil {
+		t.Fatal("TYLER up-cost instruction was not recognized")
+	}
+	items := got.Flatten()
+	if len(items) != 2 || items[0].Action != ActionReduce || items[1].Action != ActionUpdateSL {
+		t.Fatalf("unexpected TYLER actions: %+v", items)
+	}
+	if items[1].StopLossLevels[0].Price.Type != PriceEntry {
+		t.Fatalf("up-cost action did not target entry: %+v", items[1].StopLossLevels)
+	}
+	for _, item := range items {
+		if skip, detail, _ := ValidateActionEvidenceDetailed(item, segments); skip != SkipNone || detail != "" {
+			t.Fatalf("TYLER action evidence rejected: action=%s skip=%s detail=%q", item.Action, skip, detail)
+		}
+	}
+}
+
+func TestTylerCostPriceMentionAloneIsNotBreakevenInstruction(t *testing.T) {
+	msg := &store.DiscordMessage{Content: "#STEEM 成本价 0.0685"}
+	if got := InterpretKnownSource(msg, BuildSourceSegments(msg, "tyler_v1"), "tyler_v1"); got != nil {
+		t.Fatalf("cost-price mention became an action: %+v", got)
+	}
+}
+
 func TestNeilCardAndJonziEditRemainCurrent(t *testing.T) {
 	now := time.Now().UTC()
 	for _, body := range []string{"", "Trade update"} {
