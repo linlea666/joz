@@ -117,7 +117,8 @@ func newTestStore(t *testing.T) *store.Store {
 	}
 	if err := gdb.AutoMigrate(
 		&store.CopyTradeContext{}, &store.CopyTradeEvent{},
-		&store.CopyTradeSignal{}, &store.CopyTradeAIRun{}, &store.CopyTradeAction{}, &store.CopyTradeOrder{}, &store.DiscordMessage{}, &store.Trader{},
+		&store.CopyTradeSignal{}, &store.CopyTradeAIRun{}, &store.CopyTradeAction{}, &store.CopyTradeOrder{},
+		&store.CopyTradeReplay{}, &store.CopyTradeReplayItem{}, &store.DiscordMessage{}, &store.Trader{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

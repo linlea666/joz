@@ -59,6 +59,63 @@ func TestTylerScreenshotManagement(t *testing.T) {
 		})
 	}
 }
+
+func TestTylerNaturalLanguageExitAndCancelIntents(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		action Action
+	}{
+		{name: "early stop short", body: "#ASTER 提前止損出", action: ActionClose},
+		{name: "early stop full", body: "#ASTER 提前止损出局", action: ActionClose},
+		{name: "this trade stopped", body: "#ASTER 这单止损出局", action: ActionClose},
+		{name: "early exit", body: "#ASTER 提前离场", action: ActionClose},
+		{name: "early leave", body: "#ASTER 提前退出", action: ActionClose},
+		{name: "cancel pending", body: "#ASTER 撤挂单", action: ActionCancel},
+		{name: "cancel pending with 掉", body: "#ASTER 撤掉挂单", action: ActionCancel},
+		{name: "cancel limit", body: "#ASTER 取消挂单", action: ActionCancel},
+		{name: "cancel add", body: "#ASTER 取消补仓", action: ActionCancel},
+		{name: "cancel position is close", body: "#ASTER 取消仓位", action: ActionClose},
+		{name: "partial close is reduce", body: "#ASTER 平仓50%", action: ActionReduce},
+		{name: "stop hit status", body: "#ASTER 止损已触发", action: ActionClose},
+		{name: "closed status", body: "#ASTER 交易已平仓", action: ActionClose},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &store.DiscordMessage{Content: tt.body}
+			segments := BuildSourceSegments(msg, "tyler_v1")
+			got := InterpretKnownSource(msg, segments, "tyler_v1")
+			if got == nil || got.Action != tt.action {
+				t.Fatalf("got %+v, want %s", got, tt.action)
+			}
+			if skip, detail, _ := ValidateActionEvidenceDetailed(got, segments); skip != SkipNone || detail != "" {
+				t.Fatalf("recognized intent failed evidence validation: skip=%s detail=%q", skip, detail)
+			}
+		})
+	}
+}
+
+func TestTylerUntriggeredStopDoesNotClose(t *testing.T) {
+	msg := &store.DiscordMessage{Content: "#ASTER 止损未触发，继续持有"}
+	if got := InterpretKnownSource(msg, BuildSourceSegments(msg, "tyler_v1"), "tyler_v1"); got != nil {
+		t.Fatalf("untriggered stop became an action: %+v", got)
+	}
+}
+
+func TestNegatedManagementActionCannotPassEvidence(t *testing.T) {
+	for _, body := range []string{"#ASTER 不要平仓", "#ASTER 暂不止盈", "#ASTER do not close"} {
+		ins := &SourceInterpretation{
+			Classification: ClassificationSignal,
+			Action:         ActionClose,
+			Symbol:         "ASTER",
+			ActionEvidence: &ActionEvidence{SourceID: "body", Text: body},
+		}
+		if skip, detail, _ := ValidateActionEvidenceDetailed(ins, BuildSourceSegments(&store.DiscordMessage{Content: body}, "default")); skip != SkipSourceEvidence || detail != "current evidence negates the parsed action" {
+			t.Fatalf("negated close passed evidence: body=%q skip=%s detail=%q", body, skip, detail)
+		}
+	}
+}
+
 func TestQuotedOpenRejectedIndependentlyOfPrices(t *testing.T) {
 	msg := quotedMessage("#FLOCK 止盈或者減倉")
 	segments := BuildSourceSegments(msg, "default")
@@ -79,6 +136,99 @@ func TestEvidenceWhitespaceDifferencesRemainCurrentSource(t *testing.T) {
 	}
 	if skip, detail, _ := ValidateActionEvidenceDetailed(ins, BuildSourceSegments(msg, "default")); skip != SkipNone || detail != "" {
 		t.Fatalf("whitespace-only evidence mismatch: skip=%s detail=%q", skip, detail)
+	}
+}
+
+func TestLegacyBodyEvidenceNormalizesToCurrentTylerSegment(t *testing.T) {
+	msg := &store.DiscordMessage{Content: "⏰ #ADA｜做空\n進場：市價-0.2469\n止損：0.2511\n止盈：0.2334-0.2197"}
+	segments := BuildSourceSegments(msg, "tyler_v1")
+	ins := &SourceInterpretation{
+		Classification: ClassificationSignal,
+		Action:         ActionOpen,
+		Symbol:         "ADA",
+		Direction:      DirectionShort,
+		ActionEvidence: &ActionEvidence{SourceID: "body", Text: "作者明确要求 ADA 做空并给出市价参考"},
+	}
+	got := ApplySourcePolicy(ins, msg, segments, "tyler_v1")
+	if got == nil || got.ActionEvidence == nil || got.ActionEvidence.SourceID != "body" {
+		t.Fatalf("legacy body evidence was not retained for unsplit body: %+v", got)
+	}
+	if skip, detail, _ := ValidateActionEvidenceDetailed(got, segments); skip != SkipNone || detail != "" {
+		t.Fatalf("normalized current evidence rejected: skip=%s detail=%q evidence=%+v", skip, detail, got.ActionEvidence)
+	}
+	if len(got.Warnings) != 1 {
+		t.Fatalf("normalization warning missing: %+v", got.Warnings)
+	}
+}
+
+func TestLegacyBodyEvidenceMapsToTylerCurrentSegment(t *testing.T) {
+	body := "引用信息：#SOL｜做多\n進場：116.5\n止損：113.5\n\n💬 回复：\n#SOL 提前止損出"
+	msg := &store.DiscordMessage{Content: body}
+	segments := BuildSourceSegments(msg, "tyler_v1")
+	ins := &SourceInterpretation{
+		Classification: ClassificationSignal,
+		Action:         ActionClose,
+		Symbol:         "SOL",
+		Direction:      DirectionLong,
+		ActionEvidence: &ActionEvidence{SourceID: "body", Text: "作者要求平仓"},
+	}
+	got := ApplySourcePolicy(ins, msg, segments, "tyler_v1")
+	if got == nil || got.ActionEvidence == nil || got.ActionEvidence.SourceID != "body:current:1" {
+		t.Fatalf("legacy body evidence did not map to current reply: %+v", got)
+	}
+	if skip, detail, _ := ValidateActionEvidenceDetailed(got, segments); skip != SkipNone || detail != "" {
+		t.Fatalf("current mapped evidence rejected: skip=%s detail=%q evidence=%+v", skip, detail, got.ActionEvidence)
+	}
+}
+
+func TestClosedStatusCardCannotAuthorizeNewOpen(t *testing.T) {
+	for _, body := range []string{
+		"## 🟢 BTC/USDT long\nTrade was manually closed\nEntry: 82889.4\nTP: 83825.6",
+		"## 🟢 BTC/USDT long\n交易已平仓\n入场价: 82889.4\n止盈: 83825.6",
+		"## 🟢 BTC/USDT 做多\n交易已平仓\n进场价: 82889.4\n止盈: 83825.6",
+		"## 🟢 BTC/USDT 做多\n交易已平仓\n开仓价: 82889.4\n止盈: 83825.6",
+	} {
+		msg := &store.DiscordMessage{Content: body}
+		ins := &SourceInterpretation{
+			Classification: ClassificationSignal,
+			Action:         ActionOpen,
+			Symbol:         "BTC/USDT",
+			Direction:      DirectionLong,
+			ActionEvidence: &ActionEvidence{SourceID: "body", Text: "BTC setup with entry and TP"},
+		}
+		ApplySourcePolicy(ins, msg, BuildSourceSegments(msg, "default"), "default")
+		if skip, detail, _ := ValidateActionEvidenceDetailed(ins, BuildSourceSegments(msg, "default")); skip != SkipSourceEvidence || detail != "current status indicates a closed trade; no explicit new entry instruction" {
+			t.Fatalf("closed status card authorized OPEN: body=%q skip=%s detail=%q", body, skip, detail)
+		}
+	}
+}
+
+func TestClosedStatusRecapCannotAuthorizeReduce(t *testing.T) {
+	for _, body := range []string{"#BTC 获利了", "#BTC 起飞，赚到了"} {
+		ins := &SourceInterpretation{
+			Classification: ClassificationSignal,
+			Action:         ActionReduce,
+			Symbol:         "BTC",
+			ActionEvidence: &ActionEvidence{SourceID: "body", Text: body},
+		}
+		if skip, detail, _ := ValidateActionEvidenceDetailed(ins, BuildSourceSegments(&store.DiscordMessage{Content: body}, "default")); skip != SkipSourceEvidence || detail != "current evidence lacks a management instruction" {
+			t.Fatalf("recap authorized REDUCE: body=%q skip=%s detail=%q", body, skip, detail)
+		}
+	}
+}
+
+func TestExplicitOpenAfterClosedStatusCanStartNewTrade(t *testing.T) {
+	body := "BTC 交易已平仓\n做多\n進場：市價\n止損：95"
+	msg := &store.DiscordMessage{Content: body}
+	ins := &SourceInterpretation{
+		Classification: ClassificationSignal,
+		Action:         ActionOpen,
+		Symbol:         "BTC",
+		Direction:      DirectionLong,
+		ActionEvidence: &ActionEvidence{SourceID: "body", Text: body},
+	}
+	if skip, detail, _ := ValidateActionEvidenceDetailed(ins, BuildSourceSegments(msg, "default")); skip != SkipNone || detail != "" {
+		t.Fatalf("explicit new entry after terminal status was blocked: skip=%s detail=%q", skip, detail)
 	}
 }
 

@@ -826,13 +826,24 @@ func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity
 		posSide = futures.PositionSideTypeShort
 	}
 
-	// Use new Algo Order API
-	_, err := t.client.NewCreateAlgoOrderService().
+	rules, err := t.MarketRules(symbol)
+	if err != nil {
+		return fmt.Errorf("failed to load market rules for stop-loss: %w", err)
+	}
+	normalizedPrice, err := rules.NormalizePrice(stopPrice)
+	if err != nil {
+		return fmt.Errorf("invalid stop-loss price %.12g: %w", stopPrice, err)
+	}
+
+	// Use new Algo Order API. Binance validates triggerPrice against the
+	// symbol's PRICE_FILTER tickSize; fixed decimal formatting is insufficient
+	// for low-priced contracts such as WUSDT and AKTUSDT.
+	_, err = t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.AlgoOrderTypeStopMarket).
-		TriggerPrice(fmt.Sprintf("%.8f", stopPrice)).
+		TriggerPrice(strconv.FormatFloat(normalizedPrice, 'f', -1, 64)).
 		WorkingType(futures.WorkingTypeContractPrice).
 		ClosePosition(true).
 		ClientAlgoId(getBrOrderID()).
@@ -842,7 +853,7 @@ func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity
 		return fmt.Errorf("failed to set stop-loss: %w", err)
 	}
 
-	logger.Infof("  Stop-loss price set (Algo Order): %.4f", stopPrice)
+	logger.Infof("  Stop-loss price set (Algo Order): %.12g", normalizedPrice)
 	return nil
 }
 
@@ -860,13 +871,23 @@ func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quanti
 		posSide = futures.PositionSideTypeShort
 	}
 
-	// Use new Algo Order API
-	_, err := t.client.NewCreateAlgoOrderService().
+	rules, err := t.MarketRules(symbol)
+	if err != nil {
+		return fmt.Errorf("failed to load market rules for take-profit: %w", err)
+	}
+	normalizedPrice, err := rules.NormalizePrice(takeProfitPrice)
+	if err != nil {
+		return fmt.Errorf("invalid take-profit price %.12g: %w", takeProfitPrice, err)
+	}
+
+	// Use new Algo Order API with the exchange tickSize, not a fixed number of
+	// decimal places.
+	_, err = t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
 		Type(futures.AlgoOrderTypeTakeProfitMarket).
-		TriggerPrice(fmt.Sprintf("%.8f", takeProfitPrice)).
+		TriggerPrice(strconv.FormatFloat(normalizedPrice, 'f', -1, 64)).
 		WorkingType(futures.WorkingTypeContractPrice).
 		ClosePosition(true).
 		ClientAlgoId(getBrOrderID()).
@@ -876,7 +897,7 @@ func (t *FuturesTrader) SetTakeProfit(symbol string, positionSide string, quanti
 		return fmt.Errorf("failed to set take-profit: %w", err)
 	}
 
-	logger.Infof("  Take-profit price set (Algo Order): %.4f", takeProfitPrice)
+	logger.Infof("  Take-profit price set (Algo Order): %.12g", normalizedPrice)
 	return nil
 }
 

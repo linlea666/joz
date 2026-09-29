@@ -23,7 +23,7 @@ import (
 // Inherits TraderTestSuite and adds Binance Futures specific mock logic
 type BinanceFuturesTestSuite struct {
 	*testutil.TraderTestSuite // Embeds base test suite
-	mockServer              *httptest.Server
+	mockServer                *httptest.Server
 }
 
 // NewBinanceFuturesTestSuite Creates Binance Futures test suite
@@ -128,6 +128,7 @@ func NewBinanceFuturesTestSuite(t *testing.T) *BinanceFuturesTestSuite {
 					{
 						"symbol":             "BTCUSDT",
 						"status":             "TRADING",
+						"contractType":       "PERPETUAL",
 						"baseAsset":          "BTC",
 						"quoteAsset":         "USDT",
 						"pricePrecision":     2,
@@ -152,6 +153,7 @@ func NewBinanceFuturesTestSuite(t *testing.T) *BinanceFuturesTestSuite {
 					{
 						"symbol":             "ETHUSDT",
 						"status":             "TRADING",
+						"contractType":       "PERPETUAL",
 						"baseAsset":          "ETH",
 						"quoteAsset":         "USDT",
 						"pricePrecision":     2,

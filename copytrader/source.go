@@ -24,15 +24,25 @@ type SourceSegment struct {
 type SourceMedia struct{ URL, SourceID, Role string }
 
 var sourceSymbol = regexp.MustCompile(`(?i)[#＃]([\p{L}\p{N}]+(?:/USDT)?)`)
-var sourceOpen = regexp.MustCompile(`(?i)(進場|进场|入場|入场|entry|entries|buy now|sell now|open long|open short|做多|做空)`)
+var sourceOpen = regexp.MustCompile(`(?i)(進場|进场|入場|入场|開倉|开仓|entry|entries|buy now|sell now|open long|open short|做多|做空)`)
 var sourceManagement = regexp.MustCompile(`(?i)(止盈|止損|止损|減倉|减仓|平倉|平仓|全平|成本|保本|[無无][風风][險险]持[倉仓]|[這这][單单]就不拿|可以先跑|提前.*TP|close|reduce|exit|stops?|\bSL\b|take profit|breakeven|break even|trim)`)
 var sourceDirection = regexp.MustCompile(`(?i)(做多|做空|多單|空單|long|short|buy|sell)`)
 var sourceNegation = regexp.MustCompile(`(?i)(不要|暫不|暂不|勿|別|别|尚未|未到|如果|若是|not yet|do not|don't)`)
+var sourceActionNegation = regexp.MustCompile(`(?i)(不要|暫不|暂不|勿|別|别|尚未|未到|not yet|do not|don't)`)
 var sourceProfit = regexp.MustCompile(`(?i)(起飛|起飞|獲利|获利|翻倍|倍|TP\s*\d.*(?:到|完成|✅|hit|booked)|^\s*[#＃]\S+\s+TP\s*\d\s*(?:<.*>)?\s*$)`)
 var sourceTPLevel = regexp.MustCompile(`(?i)TP\s*([1-9][0-9]*)`)
 var sourceAddCondition = regexp.MustCompile(`(有[補补][倉仓]|[補补][倉仓][後后]|after (?:an? )?add|if (?:you )?added)`)
-var sourceCancel = regexp.MustCompile(`(?i)(撤[單单]|取消[掛挂][單单]|cancel)`)
+var sourceCancel = regexp.MustCompile(`(?i)(撤(?:掉(?:[掛挂])?|[掛挂])?[單单]|取消[掛挂][單单]|取消[補补][倉仓]|\bcancel(?:\s+(?:the\s+)?(?:bid|order|entry|position))?\b)`)
 var sourceAdd = regexp.MustCompile(`(?i)([補补][倉仓]|加[倉仓]|\badd\b)`)
+var sourceCloseIntent = regexp.MustCompile(`(?i)(全平|平[倉仓]|提前.*(?:止[損损](?:出局|出場|出|離場|离场|退出)|[離离][場场]|退出|出場|出场)|止[損损].*(?:已觸發|已触发|出局|出場|离场|離場|退出)|取消[倉仓]位|\bcancel.*\bposition\b|\b(?:close|closing|exit|out|cut it)(?:\s+here)?\b|manually closed|stopped out|stop(?:ped)? .*hit|trade (?:was )?closed|position closed|已平[倉仓]|交易已平[倉仓])`)
+var sourceClosedStatus = regexp.MustCompile(`(?i)(交易已平[倉仓]|已平[倉仓]|trade (?:was )?closed|position closed|manually closed|stopped out|stop(?:ped)? .*hit|止[損损].*(?:已觸發|已触发|出局|退出)|已經出場|已经出场)`)
+
+// Only explicit entry verbs can override a terminal status card. In
+// particular, a bare "Entry:" field or a historical long/short label is not
+// an instruction to open a new trade.
+var sourceExplicitOpen = regexp.MustCompile(`(?i)(進場\s*(?:[:：]|市價|市价|限價|限价)|进场\s*(?:[:：]|市價|市价|限價|限价)|\bopen(?:\s+(?:long|short))?\b|buy\s+now|sell\s+now|做多|做空|開多|开多|開空|开空|開倉(?:\s+|[:：]|$)|开仓(?:\s+|[:：]|$)|\benter(?:ing)?\b)`)
+var sourceReduce = regexp.MustCompile(`(?i)(止盈|減倉|减仓|(?:平倉|平仓)\s*[0-9]+(?:\.[0-9]+)?\s*[%％]|可以先跑|提前.*TP|\breduce\b|\btrim\b|take profit|(?:獲利|获利).*(?:了結|了结|出場|出场|平倉|平仓|take|book|realiz))`)
+var sourceConditional = regexp.MustCompile(`(?i)(如果|若是|只有|only if|\bif\b)`)
 var sourceQuoteStart = regexp.MustCompile(`(?im)^[ \t]*(?:引用信息|引用訊息|引用消息|quoted message|quote)[ \t]*[:：][ \t]*`)
 var sourceReplyStart = regexp.MustCompile(`(?im)^[ \t]*(?:💬[ \t]*)?(?:回复|回覆|reply)[ \t]*[:：][ \t]*`)
 var sourceBreakeven = regexp.MustCompile(`(?i)(成本.*[損损]|[損损].*成本|保本|上成本|移[至到]成本|拉[到至]成本)`)
@@ -122,8 +132,9 @@ func normalizedSignalText(s string) string {
 }
 
 // findEvidenceSpan matches the model's evidence while tolerating only
-// whitespace differences. Punctuation, emoji, wording and source boundaries
-// remain strict so a paraphrase or quoted card cannot authorize an action.
+// whitespace differences. Semantic paraphrases are handled separately by
+// normalizeActionEvidence after the current segment's action intent is
+// verified; this helper remains strict so it cannot cross source boundaries.
 func findEvidenceSpan(source, evidence string) (int, int, bool) {
 	evidence = strings.TrimSpace(evidence)
 	if evidence == "" {
@@ -217,11 +228,11 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 	makeAction := func(a Action) *SourceInterpretation {
 		return &SourceInterpretation{Classification: ClassificationSignal, Action: a, Symbol: sym, ActionEvidence: &ActionEvidence{SourceID: actionSourceID, Text: actionEvidence}, RequiresAddFill: sourceAddCondition.MatchString(body), Reasoning: "TYLER explicit management policy"}
 	}
-	full := strings.Contains(body, "全平") || strings.Contains(body, "提前平倉") || strings.Contains(body, "提前平仓") || strings.Contains(body, "提前止損離場") || strings.Contains(body, "提前止损离场") || strings.Contains(body, "這單就不拿") || strings.Contains(body, "这单就不拿")
-	reduce := strings.Contains(body, "減倉") || strings.Contains(body, "减仓") || strings.Contains(body, "可以先跑") || regexp.MustCompile(`(?i)(提前|可做|可以作|自行.*作)\s*TP\s*\d`).MatchString(body)
+	full := sourceCloseIntent.MatchString(body) || strings.Contains(body, "提前平倉") || strings.Contains(body, "提前平仓") || strings.Contains(body, "提前止損離場") || strings.Contains(body, "提前止损离场") || strings.Contains(body, "這單就不拿") || strings.Contains(body, "这单就不拿")
+	reduce := strings.Contains(body, "減倉") || strings.Contains(body, "减仓") || strings.Contains(body, "可以先跑") || regexp.MustCompile(`(?i)(提前|可做|可以作|自行.*作)\s*TP\s*\d`).MatchString(body) || regexp.MustCompile(`(?:平倉|平仓)\s*[0-9]+(?:\.[0-9]+)?\s*[%％]`).MatchString(body)
 	be := sourceBreakeven.MatchString(body) || strings.Contains(body, "無風險持倉") || strings.Contains(body, "无风险持仓")
 	moveTP := (strings.Contains(body, "止損") || strings.Contains(body, "止损")) && sourceTPLevel.MatchString(body) && (strings.Contains(body, "提升") || strings.Contains(body, "移至") || strings.Contains(body, "移到"))
-	if full {
+	if full && !reduce {
 		a := makeAction(ActionClose)
 		a.CloseMode = CloseModeFull
 		actions = append(actions, a)
@@ -240,7 +251,7 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 			}
 			actions = append(actions, a)
 		}
-		if strings.Contains(body, "撤單") || strings.Contains(body, "撤单") || strings.Contains(body, "取消掛單") || strings.Contains(body, "取消挂单") {
+		if sourceCancel.MatchString(body) && !full {
 			actions = append(actions, makeAction(ActionCancel))
 		}
 		if be || moveTP {
@@ -306,41 +317,191 @@ func ApplySourcePolicy(interp *SourceInterpretation, msg *store.DiscordMessage, 
 		return known
 	}
 	for _, ins := range interp.Flatten() {
-		conditionText := msg.Content
-		if ins.ActionEvidence != nil {
-			for _, s := range segments {
-				if s.ID == ins.ActionEvidence.SourceID && s.Role == "current" && !s.Image {
-					conditionText = evidenceScope(s.Text, ins.ActionEvidence.Text)
-				}
-			}
+		normalizeActionEvidence(ins, segments)
+		if ins.ActionEvidence == nil {
+			continue
 		}
+		segment := findSourceSegment(segments, ins.ActionEvidence.SourceID)
+		if segment == nil || segment.Role != "current" || segment.Image {
+			continue
+		}
+		conditionText := actionEvidenceScope(ins, segment.Text)
 		if sourceAddCondition.MatchString(conditionText) {
 			ins.RequiresAddFill = true
 		}
 		if strings.Contains(conditionText, "倉位重") || strings.Contains(conditionText, "仓位重") {
 			ins.Classification = ClassificationNeedsContext
 		}
-		if ins.ActionEvidence != nil {
-			continue
-		}
-		// Compatibility with older model output: infer a source only from a
-		// current action-bearing segment, never from a reference card.
-		for _, s := range segments {
-			if s.Role != "current" || s.Image || strings.TrimSpace(s.Text) == "" {
-				continue
-			}
-			if ins.Action == ActionOpen || ins.Action == ActionAdd {
-				if !sourceOpen.MatchString(s.Text) && !(ins.Action == ActionAdd && sourceAdd.MatchString(s.Text)) {
-					continue
-				}
-			} else if !sourceManagement.MatchString(s.Text) && !sourceCancel.MatchString(s.Text) {
-				continue
-			}
-			ins.ActionEvidence = &ActionEvidence{SourceID: s.ID, Text: s.Text}
-			break
-		}
 	}
 	return interp
+}
+
+// Normalize only legacy body IDs, absent evidence, or paraphrases within the
+// named current segment. Explicit references, images and unknown IDs are never
+// silently rebound to a different source. Ambiguous candidate segments remain
+// unnormalized and are rejected by the source gate.
+func normalizeActionEvidence(ins *SourceInterpretation, segments []SourceSegment) {
+	if ins == nil || !ins.IsActionable() {
+		return
+	}
+	var candidate *SourceSegment
+	if ins.ActionEvidence != nil && ins.ActionEvidence.SourceID != "" {
+		candidate = findSourceSegment(segments, ins.ActionEvidence.SourceID)
+		if candidate != nil {
+			if candidate.Role != "current" || candidate.Image {
+				return
+			}
+			if _, _, ok := findEvidenceSpan(candidate.Text, ins.ActionEvidence.Text); ok {
+				return // exact evidence still passes symbol, condition and intent gates below
+			}
+		} else if ins.ActionEvidence.SourceID != "body" {
+			return
+		}
+	}
+	if candidate == nil {
+		for i := range segments {
+			s := &segments[i]
+			if s.Role != "current" || s.Image {
+				continue
+			}
+			// A legacy body alias can only address current body fragments.
+			if ins.ActionEvidence != nil && ins.ActionEvidence.SourceID == "body" && !strings.HasPrefix(s.ID, "body:") {
+				continue
+			}
+			scope := evidenceScopeForSymbol(s.Text, ins.Symbol)
+			if !segmentCarriesAction(ins, scope) {
+				continue
+			}
+			if candidate != nil {
+				return
+			}
+			candidate = s
+		}
+	}
+	if candidate == nil {
+		return
+	}
+	text := evidenceScopeForSymbol(candidate.Text, ins.Symbol)
+	if !segmentCarriesAction(ins, text) {
+		return
+	}
+	ins.ActionEvidence = &ActionEvidence{SourceID: candidate.ID, Text: text}
+	ins.Warnings = appendUniqueWarning(ins.Warnings, "action evidence normalized to current source segment")
+}
+
+func findSourceSegment(segments []SourceSegment, id string) *SourceSegment {
+	for i := range segments {
+		if segments[i].ID == id {
+			return &segments[i]
+		}
+	}
+	return nil
+}
+
+// A terminal status card may repeat the original direction or entry fields.
+// Only an explicit entry verb that appears after the latest terminal status
+// can override that status; earlier direction labels remain historical facts.
+func terminalStatusBlocksOpen(text string) bool {
+	statuses := sourceClosedStatus.FindAllStringIndex(text, -1)
+	if len(statuses) == 0 {
+		return false
+	}
+	opens := sourceExplicitOpen.FindAllStringIndex(text, -1)
+	if len(opens) == 0 {
+		return true
+	}
+	lastStatusEnd := statuses[len(statuses)-1][1]
+	lastOpenEnd := opens[len(opens)-1][1]
+	return lastOpenEnd <= lastStatusEnd
+}
+
+func segmentCarriesAction(ins *SourceInterpretation, text string) bool {
+	if ins == nil || strings.TrimSpace(text) == "" {
+		return false
+	}
+	switch ins.Action {
+	case ActionOpen, ActionAdd:
+		if terminalStatusBlocksOpen(text) {
+			return false
+		}
+		return !sourceCancel.MatchString(text) && (sourceOpen.MatchString(text) || (ins.Action == ActionAdd && sourceAdd.MatchString(text)))
+	case ActionCancel:
+		return sourceCancel.MatchString(text) && !sourceCloseIntent.MatchString(text)
+	case ActionClose:
+		return sourceCloseIntent.MatchString(text) || regexp.MustCompile(`(?i)(\b(?:close|closing|exit|out|cut it)\b|[這这][單单]就不拿)`).MatchString(text)
+	case ActionReduce:
+		return sourceReduce.MatchString(text)
+	default:
+		return sourceManagement.MatchString(text) && !sourceCancel.MatchString(text)
+	}
+}
+
+// Scope a source to the target symbol before testing intent or conditions.
+// Multiple blocks for the same symbol need exact evidence to disambiguate;
+// a paraphrase must never select the first matching block by accident.
+func evidenceScopeForSymbol(body, rawSymbol string) string {
+	matches := sourceSymbol.FindAllStringIndex(body, -1)
+	if len(matches) == 0 {
+		return strings.TrimSpace(body)
+	}
+	want, _ := ResolveInstrument(rawSymbol)
+	unique := map[string]bool{}
+	for _, m := range matches {
+		got, _ := ResolveInstrument(strings.TrimLeft(body[m[0]:m[1]], "#＃"))
+		if got != "" {
+			unique[got] = true
+		}
+	}
+	if len(unique) == 1 && (want == "" || unique[want]) {
+		return strings.TrimSpace(body)
+	}
+	if want == "" || !unique[want] {
+		return ""
+	}
+	var block string
+	for i, m := range matches {
+		got, _ := ResolveInstrument(strings.TrimLeft(body[m[0]:m[1]], "#＃"))
+		if got != want {
+			continue
+		}
+		if block != "" {
+			return ""
+		}
+		end := len(body)
+		if i+1 < len(matches) {
+			end = matches[i+1][0]
+		}
+		start := m[0]
+		if i == 0 {
+			start = 0 // retain an outer qualifier before the first ticker
+		}
+		block = strings.TrimSpace(body[start:end])
+	}
+	return block
+}
+
+// For literal evidence preserve its surrounding block and reject a symbol
+// mismatch; for a paraphrase use the unique target block from actual source.
+func actionEvidenceScope(ins *SourceInterpretation, body string) string {
+	if ins.ActionEvidence != nil {
+		if _, _, ok := findEvidenceSpan(body, ins.ActionEvidence.Text); ok {
+			scope := evidenceScope(body, ins.ActionEvidence.Text)
+			if scoped := evidenceScopeForSymbol(scope, ins.Symbol); scoped != "" {
+				return scoped
+			}
+			return ""
+		}
+	}
+	return evidenceScopeForSymbol(body, ins.Symbol)
+}
+
+func appendUniqueWarning(warnings []string, warning string) []string {
+	for _, existing := range warnings {
+		if existing == warning {
+			return warnings
+		}
+	}
+	return append(warnings, warning)
 }
 
 // Keep the qualifying clause around quoted evidence. In a multi-symbol body,
@@ -380,62 +541,59 @@ func ValidateActionEvidenceDetailed(ins *SourceInterpretation, segments []Source
 	if ins.ActionEvidence == nil {
 		return SkipSourceEvidence, "missing current action evidence", nil
 	}
-	for _, s := range segments {
-		if s.ID != ins.ActionEvidence.SourceID {
-			continue
+	s := findSourceSegment(segments, ins.ActionEvidence.SourceID)
+	if s == nil {
+		return SkipSourceEvidence, "action evidence source was not found", nil
+	}
+	if s.Role != "current" {
+		return SkipSourceEvidence, "action evidence points to a reference source", nil
+	}
+	if s.Image && !ins.EvidenceVerified {
+		return SkipSourceEvidence, "current image evidence was not verified", nil
+	}
+	if strings.TrimSpace(ins.ActionEvidence.Text) == "" {
+		return SkipSourceEvidence, "current action evidence is empty", nil
+	}
+	scope := ins.ActionEvidence.Text
+	if !s.Image {
+		scope = actionEvidenceScope(ins, s.Text)
+		if scope == "" {
+			return SkipSourceEvidence, "current evidence symbol or block does not match the parsed symbol", nil
 		}
-		text := strings.TrimSpace(ins.ActionEvidence.Text)
-		if s.Image && !ins.EvidenceVerified {
-			return SkipSourceEvidence, "current image evidence was not verified", nil
-		}
-		if s.Role != "current" {
-			return SkipSourceEvidence, "action evidence points to a reference source", nil
-		}
-		if text == "" {
-			return SkipSourceEvidence, "current action evidence is empty", nil
-		}
-		if !s.Image {
-			if _, _, ok := findEvidenceSpan(s.Text, text); !ok {
-				return SkipSourceEvidence, "action evidence does not match the current source text", nil
-			}
-		}
-		if len(ins.EligibilityConditions) > 0 {
-			return SkipNeedsContext, "eligibility condition is not verified", nil
-		}
-		scope := text
-		if !s.Image {
-			scope = evidenceScope(s.Text, text)
-		}
-		if sourceAddCondition.MatchString(scope) && !ins.RequiresAddFill {
-			return SkipNeedsContext, "requires a confirmed add fill for this trade", nil
-		}
-		if regexp.MustCompile(`(?i)(如果|若是|只有|only if|\bif\b)`).MatchString(scope) && !ins.RequiresAddFill && len(ins.ConditionalRules) == 0 {
-			return SkipNeedsContext, "conditional eligibility is not verified", nil
-		}
-		if (ins.Action == ActionOpen || ins.Action == ActionAdd) && !s.Image {
-			mentions := sourceSymbol.FindAllStringSubmatch(s.Text, -1)
-			if len(mentions) > 0 {
-				match := false
-				want, _ := ResolveInstrument(ins.Symbol)
-				for _, m := range mentions {
-					symbol, _ := ResolveInstrument(m[1])
-					if symbol != "" && symbol == want {
-						match = true
-					}
-				}
-				if !match {
-					return SkipSourceEvidence, "opening evidence symbol does not match the parsed symbol", nil
+	}
+	opening := ins.Action == ActionOpen || ins.Action == ActionAdd
+	if opening && terminalStatusBlocksOpen(scope) {
+		return SkipSourceEvidence, "current status indicates a closed trade; no explicit new entry instruction", nil
+	}
+	// A current terminal card also takes precedence over an attached entry
+	// chart. Images do not override an explicit current status for this symbol.
+	if opening && s.Image {
+		for _, segment := range segments {
+			if segment.Role == "current" && !segment.Image {
+				text := evidenceScopeForSymbol(segment.Text, ins.Symbol)
+				if terminalStatusBlocksOpen(text) {
+					return SkipSourceEvidence, "current status indicates a closed trade; no explicit new entry instruction", nil
 				}
 			}
 		}
-		openingEvidence := sourceOpen.MatchString(text) || (ins.Action == ActionAdd && sourceAdd.MatchString(text))
-		if (ins.Action == ActionOpen || ins.Action == ActionAdd) && (!openingEvidence || sourceNegation.MatchString(text)) {
+	}
+	if len(ins.EligibilityConditions) > 0 {
+		return SkipNeedsContext, "eligibility condition is not verified", nil
+	}
+	if sourceAddCondition.MatchString(scope) && !ins.RequiresAddFill {
+		return SkipNeedsContext, "requires a confirmed add fill for this trade", nil
+	}
+	if sourceConditional.MatchString(scope) && !ins.RequiresAddFill && len(ins.ConditionalRules) == 0 {
+		return SkipNeedsContext, "conditional eligibility is not verified", nil
+	}
+	if sourceActionNegation.MatchString(scope) {
+		return SkipSourceEvidence, "current evidence negates the parsed action", nil
+	}
+	if !segmentCarriesAction(ins, scope) || (opening && sourceNegation.MatchString(scope)) {
+		if opening {
 			return SkipSourceEvidence, "current evidence lacks an unambiguous open/add instruction", nil
 		}
-		if ins.Action != ActionOpen && ins.Action != ActionAdd && !sourceManagement.MatchString(text) && !sourceCancel.MatchString(text) {
-			return SkipSourceEvidence, "current evidence lacks a management instruction", nil
-		}
-		return SkipNone, "", nil
+		return SkipSourceEvidence, "current evidence lacks a management instruction", nil
 	}
-	return SkipSourceEvidence, "action evidence source was not found", nil
+	return SkipNone, "", nil
 }

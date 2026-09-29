@@ -451,7 +451,8 @@ func (s *Server) copyEngineFor(c *gin.Context, traderID string) *copytrader.Engi
 }
 
 // handleStartCopyTradeReplay launches a dry-run recognition replay over the
-// stored channel history. No orders are placed, nothing is persisted.
+// stored channel history. No orders are placed; only the replay report is
+// persisted for restart-safe inspection, never live trading records.
 func (s *Server) handleStartCopyTradeReplay(c *gin.Context) {
 	var req struct {
 		TraderID string `json:"trader_id"`

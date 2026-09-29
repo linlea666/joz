@@ -186,6 +186,60 @@ type CopyTradeEvent struct {
 
 func (CopyTradeEvent) TableName() string { return "copytrade_execution_events" }
 
+// CopyTradeReplay is a durable dry-run recognition replay. Replay data is
+// intentionally separate from live signals/actions/orders so inspection never
+// mutates trading state.
+type CopyTradeReplay struct {
+	ID         string     `gorm:"primaryKey" json:"id"`
+	TraderID   string     `gorm:"index;not null" json:"trader_id"`
+	ChannelID  string     `gorm:"not null" json:"channel_id"`
+	Status     string     `gorm:"index" json:"status"`
+	Total      int        `json:"total"`
+	Done       int        `json:"done"`
+	StartedAt  time.Time  `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+}
+
+func (CopyTradeReplay) TableName() string { return "copytrade_replays" }
+
+// CopyTradeReplayItem stores the complete per-message dry-run result,
+// including prompts and model output for post-restart troubleshooting.
+type CopyTradeReplayItem struct {
+	ID             uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	ReplayID       string    `gorm:"index;not null" json:"replay_id"`
+	Sequence       int       `gorm:"index" json:"sequence"`
+	MessageID      string    `json:"message_id"`
+	Timestamp      time.Time `json:"timestamp"`
+	Author         string    `json:"author"`
+	Excerpt        string    `json:"excerpt"`
+	ImageCount     int       `json:"image_count"`
+	ImagesSent     int       `json:"images_sent"`
+	LLMMs          int64     `json:"llm_ms"`
+	Classification string    `json:"classification,omitempty"`
+	Action         string    `json:"action,omitempty"`
+	Symbol         string    `json:"symbol,omitempty"`
+	Canonical      string    `json:"canonical,omitempty"`
+	Direction      string    `json:"direction,omitempty"`
+	Entries        string    `json:"entries,omitempty"`
+	StopLoss       string    `json:"stop_loss,omitempty"`
+	TakeProfits    string    `json:"take_profits,omitempty"`
+	Verdict        string    `json:"verdict"`
+	VerdictDetail  string    `json:"verdict_detail,omitempty"`
+	Reasoning      string    `json:"reasoning,omitempty"`
+	WarningsJSON   string    `gorm:"column:warnings_json;type:text" json:"warnings_json,omitempty"`
+	Error          string    `json:"error,omitempty"`
+	ImageError     string    `json:"image_error,omitempty"`
+	SystemPrompt   string    `gorm:"type:text" json:"system_prompt,omitempty"`
+	UserPrompt     string    `gorm:"type:text" json:"user_prompt,omitempty"`
+	RawResponse    string    `gorm:"type:text" json:"raw_response,omitempty"`
+	ParsedJSON     string    `gorm:"type:text" json:"parsed_json,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+func (CopyTradeReplayItem) TableName() string { return "copytrade_replay_items" }
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -208,6 +262,8 @@ func (s *CopyTradeStore) initTables() error {
 		&CopyTradeEvent{},
 		&CopyTradeAction{},
 		&CopyTradeOrder{},
+		&CopyTradeReplay{},
+		&CopyTradeReplayItem{},
 	)
 }
 
@@ -340,6 +396,50 @@ func (s *CopyTradeStore) GetAIStats(since time.Time) ([]*AIStat, error) {
 		Order("avg_ms ASC").
 		Scan(&stats).Error
 	return stats, err
+}
+
+// CreateReplay starts a durable dry-run report.
+func (s *CopyTradeStore) CreateReplay(replay *CopyTradeReplay) error {
+	return s.db.Create(replay).Error
+}
+
+// UpdateReplay applies progress or completion fields to a replay report.
+func (s *CopyTradeStore) UpdateReplay(id string, updates map[string]interface{}) error {
+	return s.db.Model(&CopyTradeReplay{}).Where("id = ?", id).Updates(updates).Error
+}
+
+// CreateReplayItem appends one complete dry-run result.
+func (s *CopyTradeStore) CreateReplayItem(item *CopyTradeReplayItem) error {
+	return s.db.Create(item).Error
+}
+
+// GetReplay loads one report and its items in chronological order.
+func (s *CopyTradeStore) GetReplay(traderID, id string) (*CopyTradeReplay, []*CopyTradeReplayItem, error) {
+	var replay CopyTradeReplay
+	if err := s.db.Where("id = ? AND trader_id = ?", id, traderID).First(&replay).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	var items []*CopyTradeReplayItem
+	if err := s.db.Where("replay_id = ?", id).Order("sequence ASC, id ASC").Find(&items).Error; err != nil {
+		return nil, nil, err
+	}
+	return &replay, items, nil
+}
+
+// GetLatestReplay returns the most recent report for a trader, including all
+// per-message results. A missing report is not an error.
+func (s *CopyTradeStore) GetLatestReplay(traderID string) (*CopyTradeReplay, []*CopyTradeReplayItem, error) {
+	var replay CopyTradeReplay
+	if err := s.db.Where("trader_id = ?", traderID).Order("started_at DESC, id DESC").First(&replay).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	return s.GetReplay(traderID, replay.ID)
 }
 
 // --- Signals ---

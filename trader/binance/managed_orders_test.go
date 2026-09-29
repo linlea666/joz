@@ -94,3 +94,42 @@ func TestManagedOrderUsesStableIDAndPreciseCancel(t *testing.T) {
 		}
 	}
 }
+
+func TestAlgoProtectionUsesPriceTickSize(t *testing.T) {
+	var triggers []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/fapi/v1/exchangeInfo":
+			_, _ = w.Write([]byte(`{"symbols":[{"symbol":"WUSDT","status":"TRADING","contractType":"PERPETUAL","quoteAsset":"USDT","filters":[{"filterType":"LOT_SIZE","minQty":"0.1","maxQty":"100000","stepSize":"0.1"},{"filterType":"MARKET_LOT_SIZE","minQty":"0.1","maxQty":"100000","stepSize":"0.1"},{"filterType":"PRICE_FILTER","minPrice":"0.0001","maxPrice":"100000","tickSize":"0.0001"}]},{"symbol":"AKTUSDT","status":"TRADING","contractType":"PERPETUAL","quoteAsset":"USDT","filters":[{"filterType":"LOT_SIZE","minQty":"0.1","maxQty":"100000","stepSize":"0.1"},{"filterType":"MARKET_LOT_SIZE","minQty":"0.1","maxQty":"100000","stepSize":"0.1"},{"filterType":"PRICE_FILTER","minPrice":"0.001","maxPrice":"100000","tickSize":"0.001"}]}]}`))
+		case "/fapi/v1/algoOrder":
+			triggers = append(triggers, r.FormValue("triggerPrice"))
+			_, _ = w.Write([]byte(`{"algoId":123}`))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	defer server.Close()
+
+	client := futures.NewClient("test-key", "test-secret")
+	client.BaseURL = server.URL
+	client.HTTPClient = server.Client()
+	ex := &FuturesTrader{client: client}
+
+	if err := ex.SetStopLoss("WUSDT", "SHORT", 10, 0.01613); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.SetTakeProfit("WUSDT", "SHORT", 10, 0.01619); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.SetStopLoss("AKTUSDT", "LONG", 10, 1.23456); err != nil {
+		t.Fatal(err)
+	}
+	if err := ex.SetTakeProfit("AKTUSDT", "LONG", 10, 1.23499); err != nil {
+		t.Fatal(err)
+	}
+	if len(triggers) != 4 || triggers[0] != "0.0161" || triggers[1] != "0.0161" || triggers[2] != "1.234" || triggers[3] != "1.234" {
+		t.Fatalf("algo trigger prices were not normalized to tickSize: %v", triggers)
+	}
+}
