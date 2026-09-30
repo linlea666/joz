@@ -5,7 +5,6 @@ import { Menu, X, ChevronDown, Settings } from 'lucide-react'
 import { t, type Language } from '../../i18n/translations'
 import { OFFICIAL_LINKS } from '../../constants/branding'
 import { getCurrentPageForPath, ROUTES, type Page } from '../../router/paths'
-import { HyperliquidWalletConnect } from './HyperliquidWalletConnect'
 
 interface HeaderBarProps {
   onLoginClick?: () => void
@@ -199,12 +198,6 @@ export default function HeaderBar({
 
           {/* Right Side - Social Links and User Actions */}
           <div className="flex shrink-0 items-center gap-2">
-            <div className="hidden xl:block">
-              <HyperliquidWalletConnect
-                language={language}
-                isLoggedIn={isLoggedIn}
-              />
-            </div>
             {/* Social Links - Always visible */}
             <div className="hidden items-center gap-1 2xl:flex">
               {/* GitHub */}

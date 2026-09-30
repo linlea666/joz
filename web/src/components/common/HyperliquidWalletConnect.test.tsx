@@ -148,23 +148,16 @@ describe('Hyperliquid guided connection', () => {
     expect(screen.queryByText('Save to NOFX — done')).toBeNull()
   })
 
-  it('keeps an open header wallet below the log modal regardless of DOM order', async () => {
-    const ui = (showLog: boolean) => (
+  it('does not expose a global Hyperliquid setup panel in the header', () => {
+    render(
       <MemoryRouter>
-        {showLog && <CopyTradeLogModal traderId="test" traderName="Test" language="en" onClose={() => {}} />}
+        <CopyTradeLogModal traderId="test" traderName="Test" language="en" onClose={() => {}} />
         <HeaderBar language="en" isLoggedIn={false} />
       </MemoryRouter>
     )
-    const view = render(ui(false))
-    fireEvent.click(screen.getByRole('button', { name: 'Connect Hyperliquid' }))
-    view.rerender(ui(true))
-    await screen.findByText('No events yet')
-    const wallet = screen.getByRole('heading', { name: 'Connect Hyperliquid' })
-    const header = wallet.closest('nav')!
-    const logOverlay = screen.getByRole('heading', { name: 'Copy Trading Log' }).closest('.fixed')!
-    expect(header).toHaveClass('z-40')
-    expect(logOverlay).toHaveClass('z-50')
-    expect(wallet.closest('[class*="z-40"]')).toBeTruthy()
+
+    expect(screen.queryByRole('button', { name: 'Connect Hyperliquid' })).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'Connect Hyperliquid' })).toBeNull()
   })
 
   it('explains the authorization outcome before asking for a signature', () => {
