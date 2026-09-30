@@ -29,7 +29,6 @@ import type {
   ExchangeAccountState,
   TraderInfo,
 } from '../../types'
-import { HyperliquidWalletConnect } from '../common/HyperliquidWalletConnect'
 
 type LaunchStepStatus = 'ready' | 'action' | 'blocked'
 
@@ -82,7 +81,6 @@ export function AutopilotLaunchPanel({
   exchangeAccountStates,
   traders = [],
   isLoggedIn,
-  language,
   onRefresh,
   onOpenClaw402Config,
   onOpenHyperliquidConfig,
@@ -94,7 +92,6 @@ export function AutopilotLaunchPanel({
   const [walletLoading, setWalletLoading] = useState(false)
   const [launching, setLaunching] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
-  const isZh = language === 'zh'
 
   const claw402Model = useMemo(
     () =>
@@ -230,6 +227,14 @@ export function AutopilotLaunchPanel({
     }
   }
 
+  const openHyperliquidConfig = () => {
+    if (onOpenHyperliquidConfig) {
+      onOpenHyperliquidConfig()
+    } else {
+      navigate(`${ROUTES.traders}?setup=hyperliquid`)
+    }
+  }
+
   const handleLaunch = async () => {
     if (!claw402Model || !hyperliquidExchange) return
     setLaunching(true)
@@ -250,7 +255,7 @@ export function AutopilotLaunchPanel({
           if (outcome.setupTarget === 'claw402') {
             onOpenClaw402Config?.()
           } else if (outcome.setupTarget === 'hyperliquid') {
-            onOpenHyperliquidConfig?.()
+            openHyperliquidConfig()
           }
         }
         await refreshEverything()
@@ -326,7 +331,7 @@ export function AutopilotLaunchPanel({
       action: (
         <button
           type="button"
-          onClick={() => onOpenHyperliquidConfig?.()}
+          onClick={openHyperliquidConfig}
           className="inline-flex items-center gap-1.5 text-xs font-semibold text-nofx-gold hover:text-nofx-accent"
         >
           <Wallet className="h-3.5 w-3.5" />
@@ -382,15 +387,7 @@ export function AutopilotLaunchPanel({
       return (
         <button
           type="button"
-          onClick={() => {
-            if (onOpenHyperliquidConfig) {
-              onOpenHyperliquidConfig()
-            } else {
-              document
-                .getElementById('hyperliquid-quick-connect')
-                ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-            }
-          }}
+          onClick={openHyperliquidConfig}
           className="inline-flex items-center justify-center gap-2 rounded-lg bg-nofx-gold px-4 py-3 text-sm font-bold text-white hover:bg-nofx-accent"
         >
           Connect Hyperliquid
@@ -450,7 +447,7 @@ export function AutopilotLaunchPanel({
       id="autopilot-launch-panel"
       className="overflow-hidden rounded-xl border border-nofx-gold/20 bg-nofx-bg-lighter"
     >
-      <div className="grid gap-0 xl:grid-cols-[1.05fr_0.95fr]">
+      <div className="grid gap-0">
         <div className="p-5 md:p-6">
           <div className="mb-5 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
             <div>
@@ -525,39 +522,6 @@ export function AutopilotLaunchPanel({
             ))}
           </div>
         </div>
-
-        <aside className="border-t border-nofx-gold/20 bg-nofx-bg p-5 md:p-6 xl:border-l xl:border-t-0">
-          <div className="mb-4 flex items-center gap-2 text-sm font-semibold text-nofx-text">
-            <Wallet className="h-4 w-4 text-nofx-gold" />
-            Hyperliquid setup
-          </div>
-          {hyperliquidConnected ? (
-            <div className="rounded-lg border border-nofx-success/25 bg-nofx-success/10 p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold text-nofx-success">
-                <CheckCircle2 className="h-4 w-4" />
-                Trading authorization is ready
-              </div>
-              <div className="mt-2 font-mono text-xs text-nofx-success/90">
-                {shortAddress(hyperliquidExchange?.hyperliquidWalletAddr)}
-              </div>
-              <p className="mt-3 text-xs leading-5 text-nofx-text-muted">
-                Funds stay in your Hyperliquid account. NOFX only stores the
-                authorized Agent key required for automated execution.
-              </p>
-            </div>
-          ) : (
-            <div>
-              <div id="hyperliquid-quick-connect">
-                <HyperliquidWalletConnect
-                  language={isZh ? 'zh' : 'en'}
-                  isLoggedIn={isLoggedIn}
-                  variant="inline"
-                  onSaved={refreshEverything}
-                />
-              </div>
-            </div>
-          )}
-        </aside>
       </div>
     </section>
   )
