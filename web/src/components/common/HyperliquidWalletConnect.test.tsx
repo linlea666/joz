@@ -1,6 +1,9 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { HyperliquidWalletConnect } from './HyperliquidWalletConnect'
+import HeaderBar from './HeaderBar'
+import { MemoryRouter } from 'react-router-dom'
+import { CopyTradeLogModal } from '../trader/CopyTradeLogModal'
 
 const mocks = vi.hoisted(() => ({
   getExchangeConfigs: vi.fn(),
@@ -21,6 +24,7 @@ vi.mock('../../lib/api', () => ({
     createExchangeEncrypted: mocks.createExchangeEncrypted,
     updateExchangeConfigsEncrypted: mocks.updateExchangeConfigsEncrypted,
     getHyperliquidAgent: mocks.getHyperliquidAgent,
+    getCopyTradeEvents: vi.fn().mockResolvedValue([]),
   },
 }))
 
@@ -142,6 +146,25 @@ describe('Hyperliquid guided connection', () => {
       screen.queryByText('Approve the small per-trade builder fee')
     ).toBeNull()
     expect(screen.queryByText('Save to NOFX — done')).toBeNull()
+  })
+
+  it('keeps an open header wallet below the log modal regardless of DOM order', async () => {
+    const ui = (showLog: boolean) => (
+      <MemoryRouter>
+        {showLog && <CopyTradeLogModal traderId="test" traderName="Test" language="en" onClose={() => {}} />}
+        <HeaderBar language="en" isLoggedIn={false} />
+      </MemoryRouter>
+    )
+    const view = render(ui(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Hyperliquid' }))
+    view.rerender(ui(true))
+    await screen.findByText('No events yet')
+    const wallet = screen.getByRole('heading', { name: 'Connect Hyperliquid' })
+    const header = wallet.closest('nav')!
+    const logOverlay = screen.getByRole('heading', { name: 'Copy Trading Log' }).closest('.fixed')!
+    expect(header).toHaveClass('z-40')
+    expect(logOverlay).toHaveClass('z-50')
+    expect(wallet.closest('[class*="z-40"]')).toBeTruthy()
   })
 
   it('explains the authorization outcome before asking for a signature', () => {

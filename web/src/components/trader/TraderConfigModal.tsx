@@ -130,6 +130,9 @@ export function TraderConfigModal({
   const [copyConfig, setCopyConfig] = useState<CopyTradingConfig>({
     ...DEFAULT_COPY_TRADING_CONFIG,
   })
+  const [entryTimeoutInput, setEntryTimeoutInput] = useState(
+    String(DEFAULT_COPY_TRADING_CONFIG.entry_timeout_minutes)
+  )
   const [isSaving, setIsSaving] = useState(false)
   const [isGeneratingProfile, setIsGeneratingProfile] = useState(false)
   const [strategies, setStrategies] = useState<Strategy[]>([])
@@ -178,7 +181,9 @@ export function TraderConfigModal({
         strategy_id: traderData.strategy_id || '',
         trader_type: traderData.trader_type || 'ai_scan',
       })
-      setCopyConfig(parseCopyConfig(traderData.copy_trading_config))
+      const parsedCopyConfig = parseCopyConfig(traderData.copy_trading_config)
+      setCopyConfig(parsedCopyConfig)
+      setEntryTimeoutInput(String(parsedCopyConfig.entry_timeout_minutes))
     } else if (!isEditMode) {
       setFormData({
         trader_name: '',
@@ -191,6 +196,7 @@ export function TraderConfigModal({
         trader_type: 'ai_scan',
       })
       setCopyConfig({ ...DEFAULT_COPY_TRADING_CONFIG })
+      setEntryTimeoutInput(String(DEFAULT_COPY_TRADING_CONFIG.entry_timeout_minutes))
     }
   }, [traderData, isEditMode, availableModels, availableExchanges])
 
@@ -202,6 +208,13 @@ export function TraderConfigModal({
       ?.exchange_type?.toLowerCase() === 'binance'
   const invalidEntryPolicy =
     copyConfig.entry_policy === 'market_reference_split' && !splitAvailable
+  const entryTimeoutMinutes = Number(entryTimeoutInput)
+  // Go converts minutes to int64 nanoseconds; reject values that overflow it.
+  const invalidEntryTimeout =
+    entryTimeoutInput.trim() === '' ||
+    !Number.isSafeInteger(entryTimeoutMinutes) ||
+    entryTimeoutMinutes < 0 ||
+    entryTimeoutMinutes > 153722867
 
   const handleInputChange = (field: keyof FormState, value: any) => {
     setFormData((prev) => ({ ...prev, [field]: value }))
@@ -219,7 +232,7 @@ export function TraderConfigModal({
   }
 
   const handleSave = async () => {
-    if (!onSave) return
+    if (!onSave || (isCopyTrading && invalidEntryTimeout)) return
 
     setIsSaving(true)
     try {
@@ -236,6 +249,7 @@ export function TraderConfigModal({
       if (isCopyTrading) {
         saveData.copy_trading_config = JSON.stringify({
           ...copyConfig,
+          entry_timeout_minutes: entryTimeoutMinutes,
           primary_channel_id: copyConfig.primary_channel_id.trim(),
         })
       }
@@ -723,6 +737,42 @@ export function TraderConfigModal({
                     </p>
                   )}
                 </div>
+
+                {/* Unfilled entry order lifetime */}
+                <div>
+                  <label
+                    htmlFor="copy-entry-timeout-minutes"
+                    className="text-sm text-nofx-text block mb-2"
+                  >
+                    {t('copytrade.entryTimeout', language)}
+                  </label>
+                  <input
+                    id="copy-entry-timeout-minutes"
+                    type="number"
+                    min="0"
+                    max="153722867"
+                    step="1"
+                    value={entryTimeoutInput}
+                    onChange={(e) => setEntryTimeoutInput(e.target.value)}
+                    aria-invalid={invalidEntryTimeout}
+                    aria-describedby="copy-entry-timeout-hint"
+                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
+                  />
+                  <p id="copy-entry-timeout-hint" className="text-xs text-nofx-text-muted mt-1">
+                    {t('copytrade.entryTimeoutHint', language)}
+                  </p>
+                  {invalidEntryTimeout && (
+                    <p role="alert" className="text-xs text-nofx-danger mt-1">
+                      {t('copytrade.entryTimeoutInvalid', language)}
+                    </p>
+                  )}
+                  {!invalidEntryTimeout && entryTimeoutMinutes === 0 && (
+                    <p role="status" className="text-xs text-nofx-danger mt-1">
+                      {t('copytrade.entryTimeoutUnlimited', language)}
+                    </p>
+                  )}
+                </div>
+
                 {/* Entry price offset thresholds */}
                 <div>
                   <div className="grid grid-cols-2 gap-4">
@@ -1087,7 +1137,7 @@ export function TraderConfigModal({
                 !formData.trader_name ||
                 !formData.ai_model ||
                 !formData.exchange_id ||
-                (isCopyTrading && (!copyConfig.primary_channel_id.trim() || invalidEntryPolicy))
+                (isCopyTrading && (!copyConfig.primary_channel_id.trim() || invalidEntryPolicy || invalidEntryTimeout))
               }
               className="px-8 py-3 bg-nofx-gold text-white rounded-lg hover:bg-nofx-gold/90 transition-all duration-200 disabled:bg-nofx-bg-deeper disabled:text-nofx-text-muted disabled:cursor-not-allowed font-medium shadow-lg"
             >

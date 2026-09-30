@@ -24,7 +24,8 @@ afterEach(cleanup)
 function setup(
   exchangeType = 'binance',
   policy = 'legacy',
-  riskMode = 'by_loss'
+  riskMode = 'by_loss',
+  entryTimeout?: number
 ) {
   const save = vi.fn().mockResolvedValue(undefined)
   const trader = {
@@ -41,6 +42,7 @@ function setup(
       risk_amount_usd: 15,
       altcoin_price_offset_pct: 0.2,
       auto_breakeven_after_tp: true,
+      entry_timeout_minutes: entryTimeout,
     }),
   } as TraderConfigData
   render(
@@ -88,6 +90,48 @@ describe('copy-trading opt-in settings', () => {
       auto_breakeven_after_tp: true,
     })
   })
+
+  it.each([30, 0])('saves an explicit entry lifetime of %i minutes', async (minutes) => {
+    const save = setup()
+    const timeout = screen.getByLabelText('未成交挂单有效期（分钟）')
+    expect(timeout).toHaveValue(240)
+    fireEvent.change(timeout, { target: { value: String(minutes) } })
+    if (minutes === 0) {
+      expect(screen.getByRole('status')).toHaveTextContent('已关闭自动过期')
+    }
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(JSON.parse(save.mock.calls[0][0].copy_trading_config)).toMatchObject({
+      entry_timeout_minutes: minutes,
+      risk_amount_usd: 15,
+      altcoin_price_offset_pct: 0.2,
+      open_signal_ttl_seconds: 300,
+      management_signal_ttl_seconds: 1800,
+    })
+  })
+
+  it.each([0, 60])('preserves a saved entry lifetime of %i minutes', async (minutes) => {
+    const save = setup('binance', 'legacy', 'by_loss', minutes)
+    expect(screen.getByLabelText('未成交挂单有效期（分钟）')).toHaveValue(minutes)
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(JSON.parse(save.mock.calls[0][0].copy_trading_config).entry_timeout_minutes).toBe(minutes)
+  })
+
+  it.each(['', '-1', '1.5', '1e309', '153722868'])(
+    'blocks invalid lifetime %j rather than silently disabling expiry', (value) => {
+      const save = setup()
+      fireEvent.change(screen.getByLabelText('未成交挂单有效期（分钟）'), { target: { value } })
+      expect(screen.getByRole('alert')).toBeInTheDocument()
+      expect(screen.queryByRole('status')).not.toBeInTheDocument()
+      const button = screen.getByRole('button', { name: '保存修改' })
+      expect(button).toBeDisabled()
+      fireEvent.click(button)
+      expect(save).not.toHaveBeenCalled()
+      fireEvent.change(screen.getByLabelText('未成交挂单有效期（分钟）'), { target: { value: '240' } })
+      expect(button).toBeEnabled()
+    }
+  )
 
   it.each([
     ['okx', 'by_loss'],

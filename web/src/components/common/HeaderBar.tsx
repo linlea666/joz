@@ -61,7 +61,7 @@ export default function HeaderBar({
   }, [])
 
   return (
-    <nav className="fixed top-0 w-full z-50 header-bar">
+    <nav className="fixed top-0 w-full z-40 header-bar">
       <div className="flex items-center justify-between h-16 px-4 sm:px-6 max-w-[1920px] mx-auto">
         {/* Logo - Always go to home page */}
         <div

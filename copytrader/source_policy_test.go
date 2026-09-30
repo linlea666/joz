@@ -74,6 +74,13 @@ func TestTylerNaturalLanguageExitAndCancelIntents(t *testing.T) {
 		{name: "cancel pending", body: "#ASTER 撤挂单", action: ActionCancel},
 		{name: "cancel pending with 掉", body: "#ASTER 撤掉挂单", action: ActionCancel},
 		{name: "cancel limit", body: "#ASTER 取消挂单", action: ActionCancel},
+		{name: "cancel order", body: "#ASTER 取消订单", action: ActionCancel},
+		{name: "cancel this order", body: "#ASTER 取消这笔订单", action: ActionCancel},
+		{name: "cancel entry order", body: "#ASTER 取消入场订单", action: ActionCancel},
+		{name: "cancel limit order", body: "#ASTER 取消限价单", action: ActionCancel},
+		{name: "cancel traditional order", body: "#ASTER 取消這筆訂單", action: ActionCancel},
+		{name: "cancel traditional entry", body: "#ASTER 取消進場訂單", action: ActionCancel},
+		{name: "cancel traditional limit", body: "#ASTER 取消限價單", action: ActionCancel},
 		{name: "cancel add", body: "#ASTER 取消补仓", action: ActionCancel},
 		{name: "cancel position is close", body: "#ASTER 取消仓位", action: ActionClose},
 		{name: "partial close is reduce", body: "#ASTER 平仓50%", action: ActionReduce},
@@ -90,6 +97,141 @@ func TestTylerNaturalLanguageExitAndCancelIntents(t *testing.T) {
 			}
 			if skip, detail, _ := ValidateActionEvidenceDetailed(got, segments); skip != SkipNone || detail != "" {
 				t.Fatalf("recognized intent failed evidence validation: skip=%s detail=%q", skip, detail)
+			}
+		})
+	}
+}
+
+func TestCancelOrderSourceGates(t *testing.T) {
+	for _, profile := range []string{"default", "tyler_v1"} {
+		for _, tt := range []struct {
+			body   string
+			action Action
+			skip   SkipReason
+		}{
+			{"#BTC 取消订单", ActionCancel, SkipNone},
+			{"#BTC 取消这笔订单", ActionCancel, SkipNone},
+			{"#BTC 取消入场订单", ActionCancel, SkipNone},
+			{"#BTC 取消限价单", ActionCancel, SkipNone},
+			{"#BTC 取消這筆訂單", ActionCancel, SkipNone},
+			{"#BTC 取消進場訂單", ActionCancel, SkipNone},
+			{"#BTC 取消订单", ActionOpen, SkipSourceEvidence},
+			{"#BTC 取消订单", ActionClose, SkipSourceEvidence},
+			{"#BTC 取消仓位", ActionCancel, SkipSourceEvidence},
+			{"#BTC 取消仓位", ActionClose, SkipNone},
+			{"#BTC 不要取消订单", ActionCancel, SkipSourceEvidence},
+			{"#BTC 暂不取消入场订单", ActionCancel, SkipSourceEvidence},
+			{"#BTC 如果价格跌破90，取消订单", ActionCancel, SkipNeedsContext},
+			{"#BTC 继续持有\n#ETH 取消订单", ActionCancel, SkipSourceEvidence},
+		} {
+			t.Run(profile+"/"+tt.body+"/"+string(tt.action), func(t *testing.T) {
+				msg := &store.DiscordMessage{Content: tt.body}
+				ins := &SourceInterpretation{Classification: ClassificationSignal, Action: tt.action, Symbol: "BTC", ActionEvidence: &ActionEvidence{SourceID: "body", Text: "AI paraphrase of the current instruction"}}
+				if skip, detail, err := ValidateActionEvidenceDetailed(ins, BuildSourceSegments(msg, profile)); err != nil || skip != tt.skip {
+					t.Fatalf("skip=%s detail=%q err=%v, want %s", skip, detail, err, tt.skip)
+				}
+			})
+		}
+	}
+}
+
+func TestTylerMixedCancelAndOpenStillUsesInterpreter(t *testing.T) {
+	for _, body := range []string{
+		"#BTC 取消入场订单，然后市价做多，止损90",
+		"#BTC 取消订单\n進場：100 止損：90",
+		"#BTC cancel the entry and open short",
+	} {
+		msg := &store.DiscordMessage{Content: body}
+		if got := InterpretKnownSource(msg, BuildSourceSegments(msg, "tyler_v1"), "tyler_v1"); got != nil {
+			t.Fatalf("mixed entry instruction overwritten: %q -> %+v", body, got)
+		}
+	}
+}
+
+func TestQuotedCancellationCannotAuthorizeCurrentAction(t *testing.T) {
+	msg := &store.DiscordMessage{Content: "引用信息：#BTC 取消订单\n💬 回复：\n#BTC 继续等待"}
+	segments := BuildSourceSegments(msg, "tyler_v1")
+	if got := InterpretKnownSource(msg, segments, "tyler_v1"); got != nil {
+		t.Fatalf("historical cancel became a current instruction: %+v", got)
+	}
+	for _, id := range []string{"body:reference:0", "body:current:1"} {
+		ins := &SourceInterpretation{Classification: ClassificationSignal, Action: ActionCancel, Symbol: "BTC", ActionEvidence: &ActionEvidence{SourceID: id, Text: "取消订单"}}
+		if skip, _, _ := ValidateActionEvidenceDetailed(ins, segments); skip != SkipSourceEvidence {
+			t.Fatalf("historical cancel authorized through %s: %s", id, skip)
+		}
+	}
+}
+
+func TestCancelOrderMessagePreservesFillsAndRequiresUniqueTarget(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		state       TradeState
+		orderStatus string
+		filled      float64
+		ambiguous   bool
+		wantState   TradeState
+		wantSkip    SkipReason
+		wantCancels int
+	}{
+		{name: "unfilled", state: StateEntryPending, orderStatus: "NEW", wantState: StateCancelled, wantCancels: 1},
+		{name: "partial", state: StateEntryPending, orderStatus: "PARTIALLY_FILLED", filled: .2, wantState: StateOpen, wantCancels: 1},
+		{name: "filled before cancel", state: StateEntryPending, orderStatus: "FILLED", filled: .5, wantState: StateOpen},
+		{name: "already open", state: StateOpen, orderStatus: "FILLED", filled: .5, wantState: StateOpen, wantSkip: SkipAlreadyFlat},
+		{name: "missing", wantSkip: SkipNeedsContext},
+		{name: "ambiguous", state: StateEntryPending, orderStatus: "NEW", ambiguous: true, wantState: StateEntryPending, wantSkip: SkipNeedsContext},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newTestStore(t)
+			venue := &mockExchange{orderStatus: map[string]interface{}{"status": tt.orderStatus, "executedQty": tt.filled, "avgPrice": 100.0}}
+			var ctx *store.CopyTradeContext
+			if tt.state != "" {
+				ctx = newTestContext(t, st, tt.state)
+				if tt.ambiguous {
+					second := *ctx
+					second.ID, second.RootMessageID = "another-trade", "another-root"
+					if err := st.CopyTrade().CreateContext(&second); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			cfg := DefaultCopyTradingConfig()
+			cfg.PrimaryChannelID, cfg.InterpretationProfile = "chan-1", "tyler_v1"
+			e := NewEngine(EngineParams{TraderID: "trader-1", Store: st, Exchange: venue, Config: &cfg})
+			msg := &store.DiscordMessage{MessageID: "cancel-order", ChannelID: "chan-1", MessageTimestamp: time.Now(), Content: "#BTC 取消入场订单"}
+			if err := e.HandleMessage(msg, false); err != nil {
+				t.Fatal(err)
+			}
+			sig, err := st.CopyTrade().LatestSignal(e.traderID, msg.MessageID, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sig.Action != string(ActionCancel) || sig.SkipReason != string(tt.wantSkip) || sig.ErrorMessage != "" {
+				t.Fatalf("unexpected cancellation result: %+v", sig)
+			}
+			if len(venue.cancelOrderLog) != tt.wantCancels || venue.closeCalled != 0 || len(venue.cancelAllLog) != 0 || len(venue.cancelSLLog) != 0 {
+				t.Fatalf("wrong cancellation side effects: %+v", venue)
+			}
+			if ctx != nil {
+				saved, err := st.CopyTrade().GetContext(ctx.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if saved.State != string(tt.wantState) {
+					t.Fatalf("state=%s, want=%s", saved.State, tt.wantState)
+				}
+				if tt.filled > 0 && saved.Quantity != tt.filled {
+					t.Fatalf("filled quantity changed: %g", saved.Quantity)
+				}
+				if tt.filled > 0 && tt.state == StateEntryPending && len(venue.setStopLossLog) == 0 {
+					t.Fatal("fill discovered during cancellation was not protected")
+				}
+			}
+			// The same cancellation must remain harmless after a repeat delivery.
+			if err := e.HandleMessage(msg, false); err != nil {
+				t.Fatal(err)
+			}
+			if len(venue.cancelOrderLog) != tt.wantCancels || venue.closeCalled != 0 {
+				t.Fatal("repeat cancellation changed orders or positions")
 			}
 		})
 	}

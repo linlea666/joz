@@ -32,7 +32,7 @@ var sourceActionNegation = regexp.MustCompile(`(?i)(不要|暫不|暂不|勿|別
 var sourceProfit = regexp.MustCompile(`(?i)(起飛|起飞|獲利|获利|翻倍|倍|TP\s*\d.*(?:到|完成|✅|hit|booked)|^\s*[#＃]\S+\s+TP\s*\d\s*(?:<.*>)?\s*$)`)
 var sourceTPLevel = regexp.MustCompile(`(?i)TP\s*([1-9][0-9]*)`)
 var sourceAddCondition = regexp.MustCompile(`(有[補补][倉仓]|[補补][倉仓][後后]|after (?:an? )?add|if (?:you )?added)`)
-var sourceCancel = regexp.MustCompile(`(?i)(撤(?:掉(?:[掛挂])?|[掛挂])?[單单]|取消[掛挂][單单]|取消[補补][倉仓]|\bcancel(?:\s+(?:the\s+)?(?:bid|order|entry|position))?\b)`)
+var sourceCancel = regexp.MustCompile(`(?i)(撤(?:掉(?:[掛挂])?|[掛挂])?[單单]|取消[掛挂][單单]|取消[補补][倉仓]|取消(?:[這这](?:[筆笔])?)?(?:[訂订][單单]|(?:入[場场]|[進进][場场]|限[價价])(?:[訂订])?[單单])|\bcancel(?:\s+(?:the\s+)?(?:bid|order|entry|position))?\b)`)
 var sourceAdd = regexp.MustCompile(`(?i)([補补][倉仓]|加[倉仓]|\badd\b)`)
 var sourceCloseIntent = regexp.MustCompile(`(?i)(全平|平[倉仓]|提前.*(?:止[損损](?:出局|出場|出|離場|离场|退出)|[離离][場场]|退出|出場|出场)|止[損损].*(?:已觸發|已触发|出局|出場|离场|離場|退出)|取消[倉仓]位|\bcancel.*\bposition\b|\b(?:close|closing|exit|out|cut it)(?:\s+here)?\b|manually closed|stopped out|stop(?:ped)? .*hit|trade (?:was )?closed|position closed|已平[倉仓]|交易已平[倉仓])`)
 var sourceClosedStatus = regexp.MustCompile(`(?i)(交易已平[倉仓]|已平[倉仓]|trade (?:was )?closed|position closed|manually closed|stopped out|stop(?:ped)? .*hit|止[損损].*(?:已觸發|已触发|出局|退出)|已經出場|已经出场)`)
@@ -190,7 +190,9 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 	}
 	body, actionSourceID, actionEvidence := tylerCurrentSource(segments, msg.Content)
 	body = strings.TrimSpace(body)
-	if body == "" || sourceOpen.MatchString(body) {
+	// "Cancel entry order" contains an entry word but is not an open.
+	// Leave mixed cancel/new-entry instructions to the interpreter as before.
+	if body == "" || sourceOpen.MatchString(sourceCancel.ReplaceAllString(body, "")) {
 		return nil
 	}
 	if sourceNegation.MatchString(body) && !strings.Contains(body, "如果還繼續持有") {
