@@ -279,8 +279,12 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         copy_trading_config: data.copy_trading_config,
       }
 
-      await api.updateTrader(editingTrader.trader_id, request)
-      toast.success(t('aiTradersToast.saved', language))
+      const result = await api.updateTrader(editingTrader.trader_id, request)
+      if (result?.config_reload_status === 'failed') {
+        toast.warning(t('copytrade.configSavedInactive', language))
+      } else {
+        toast.success(t(result?.restart_requested ? 'copytrade.configRestartRequested' : 'aiTradersToast.saved', language))
+      }
       setShowEditModal(false)
       setEditingTrader(null)
       await mutateTraders()

@@ -46,7 +46,7 @@ export interface CopyTradingConfig {
   primary_channel_id: string
   source_author_ids?: string[]
   channel_notes?: string
-  interpretation_profile?: 'default' | 'tyler_v1'
+  interpretation_profile?: 'default' | 'tyler_v1' | 'cmm_v1' | 'jonzi_v1'
   entry_policy?: 'legacy' | 'market_reference_split'
   market_dual_price_mode?: 'legacy' | 'range' | 'market_then_limit' | 'reject'
   default_reduce_ratio?: number
@@ -244,6 +244,7 @@ export interface CopyTradeAIStat {
 
 // Dry-run recognition replay (accuracy testing, no execution/persistence).
 export interface CopyTradeReplayItem {
+  rules_snapshot_json?: string
   evaluation_scope?: string
   unchecked_gates?: string[]
   message_id: string
@@ -298,4 +299,11 @@ export interface CopyTradeReplayReport {
   started_at: string
   finished_at?: string
   items: CopyTradeReplayItem[]
+}
+
+export interface CopyTradePreset {
+  id: NonNullable<CopyTradingConfig['interpretation_profile']>
+  name: string
+  description: string
+  recommended_config: Pick<CopyTradingConfig, 'market_dual_price_mode' | 'default_reduce_ratio' | 'channel_notes'>
 }

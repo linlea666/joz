@@ -254,3 +254,18 @@ describe('copy-trading execution visibility', () => {
     expect(screen.queryByText('0%')).not.toBeInTheDocument()
   })
 })
+
+it('shows both final entry legs and the rule precedence instead of only the first decision', () => {
+  render(<CopyTradeExecutionDetails expectsEntry language="zh" events={[{
+    id: 999, event: 'copytrade.entry.decision', message: 'final plan', context_json: JSON.stringify({
+      symbol: 'QNTUSDT', source_order_type: 'MARKET', decision: { order_type: 'MARKET', entry_price: 288 },
+      plan: { origin: 'explicit_market_limit', policy_note: 'explicit legs take precedence; single-reference policy not applied' },
+      risk_budget: 10,
+      legs: [{ type: 'MARKET', price: 288, quantity: 0.28, risk_fraction: 0.5 }, { type: 'LIMIT', price: 279.33, quantity: 0.57, risk_fraction: 0.5 }],
+    }),
+  } as CopyTradeEvent]} />)
+  expect(screen.getByText(/explicit_market_limit/)).toBeInTheDocument()
+  expect(screen.getByText(/single-reference policy not applied/)).toBeInTheDocument()
+  expect(screen.getByText(/订单 2:.*279.33.*50%/)).toBeInTheDocument()
+  expect(screen.getByText(/共享风险预算：10 USD/)).toBeInTheDocument()
+})

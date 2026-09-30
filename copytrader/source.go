@@ -41,7 +41,7 @@ var sourceClosedStatus = regexp.MustCompile(`(?i)(交易已平[倉仓]|已平[�
 // particular, a bare "Entry:" field or a historical long/short label is not
 // an instruction to open a new trade.
 var sourceExplicitOpen = regexp.MustCompile(`(?i)(進場\s*(?:[:：]|市價|市价|限價|限价)|进场\s*(?:[:：]|市價|市价|限價|限价)|\bopen(?:\s+(?:long|short))?\b|buy\s+now|sell\s+now|做多|做空|開多|开多|開空|开空|開倉(?:\s+|[:：]|$)|开仓(?:\s+|[:：]|$)|\benter(?:ing)?\b)`)
-var sourceReduce = regexp.MustCompile(`(?i)(止盈|減倉|减仓|(?:平倉|平仓)\s*[0-9]+(?:\.[0-9]+)?\s*[%％]|可以先跑|提前.*TP|\breduce\b|\btrim\b|take profit|(?:獲利|获利).*(?:了結|了结|出場|出场|平倉|平仓|take|book|realiz))`)
+var sourceReduce = regexp.MustCompile(`(?i)(止盈|減倉|减仓|減半|减半|減掉|减掉|(?:平倉|平仓)\s*[0-9]+(?:\.[0-9]+)?\s*[%％]|可以先跑|提前.*TP|\breduce\b|\btrim\b|take profit|(?:獲利|获利).*(?:了結|了结|出場|出场|平倉|平仓|take|book|realiz))`)
 var sourceConditional = regexp.MustCompile(`(?i)(如果|若是|只有|only if|\bif\b)`)
 var sourceQuoteStart = regexp.MustCompile(`(?im)^[ \t]*(?:引用信息|引用訊息|引用消息|quoted message|quote)[ \t]*[:：][ \t]*`)
 var sourceReplyStart = regexp.MustCompile(`(?im)^[ \t]*(?:💬[ \t]*)?(?:回复|回覆|reply)[ \t]*[:：][ \t]*`)
@@ -60,7 +60,7 @@ func BuildSourceSegments(msg *store.DiscordMessage, profile string) []SourceSegm
 		old := err == nil && msg.MessageTimestamp.Sub(ts) > time.Minute
 		if msg.ReplyToMessageID != "" && old {
 			segment.Role, segment.Reason = "reference", "older card in a reply"
-		} else if old && (profile == "tyler_v1" || embed.Author != nil) && (sourceProfit.MatchString(msg.Content) || sourceManagement.MatchString(msg.Content)) && !sourceOpen.MatchString(msg.Content) {
+		} else if old && (splitQuotedSources(profile) || embed.Author != nil) && (sourceProfit.MatchString(msg.Content) || sourceManagement.MatchString(msg.Content)) && !sourceOpen.MatchString(msg.Content) {
 			segment.Role, segment.Reason = "reference", "attributed older card accompanying a current message"
 		}
 		segments = append(segments, segment)
@@ -72,11 +72,11 @@ func BuildSourceSegments(msg *store.DiscordMessage, profile string) []SourceSegm
 }
 
 // buildBodySourceSegments keeps the legacy single-body representation for
-// generic interpretation profiles. TYLER messages may explicitly quote an old
+// generic interpretation profiles. Author presets may explicitly quote an old
 // card in plain text; split that quote from the current reply so quoted entry
 // parameters cannot authorize a new OPEN/ADD action.
 func buildBodySourceSegments(content, profile string) []SourceSegment {
-	if profile != "tyler_v1" {
+	if !splitQuotedSources(profile) {
 		return []SourceSegment{{ID: "body", Role: "current", Text: content}}
 	}
 	quote := sourceQuoteStart.FindStringIndex(content)
@@ -186,7 +186,7 @@ func MediaSources(msg *store.DiscordMessage, segments []SourceSegment) []SourceM
 // the normal correlation, TTL and risk gates.
 func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, profile string) *SourceInterpretation {
 	if profile != "tyler_v1" {
-		return nil
+		return interpretPresetSource(msg, segments, profile)
 	}
 	body, actionSourceID, actionEvidence := tylerCurrentSource(segments, msg.Content)
 	body = strings.TrimSpace(body)
@@ -232,6 +232,13 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 	}
 	full := sourceCloseIntent.MatchString(body) || strings.Contains(body, "提前平倉") || strings.Contains(body, "提前平仓") || strings.Contains(body, "提前止損離場") || strings.Contains(body, "提前止损离场") || strings.Contains(body, "這單就不拿") || strings.Contains(body, "这单就不拿")
 	reduce := strings.Contains(body, "減倉") || strings.Contains(body, "减仓") || strings.Contains(body, "可以先跑") || regexp.MustCompile(`(?i)(提前|可做|可以作|自行.*作)\s*TP\s*\d`).MatchString(body) || regexp.MustCompile(`(?:平倉|平仓)\s*[0-9]+(?:\.[0-9]+)?\s*[%％]`).MatchString(body)
+	// A fraction after "close / 平仓" is a partial exit, never a full close.
+	if full && !sourceClosedStatus.MatchString(body) {
+		_, explicit, ratioErr := explicitReductionRatio(body)
+		if explicit || ratioErr != nil {
+			reduce = true
+		}
+	}
 	be := sourceBreakeven.MatchString(body) || strings.Contains(body, "無風險持倉") || strings.Contains(body, "无风险持仓")
 	moveTP := (strings.Contains(body, "止損") || strings.Contains(body, "止损")) && sourceTPLevel.MatchString(body) && (strings.Contains(body, "提升") || strings.Contains(body, "移至") || strings.Contains(body, "移到"))
 	if full && !reduce {
@@ -241,9 +248,12 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 	} else {
 		if reduce {
 			a := makeAction(ActionReduce)
-			v := 50.0
-			if m := regexp.MustCompile(`(?:減倉|减仓|止盈|平倉|平仓)\s*([0-9]+(?:\.[0-9]+)?)\s*[%％]`).FindStringSubmatch(body); len(m) > 1 {
-				fmt.Sscanf(m[1], "%f", &v)
+			v := 50.0 // Compatibility for direct callers; effective default is applied in ApplyMessageRules.
+			if explicit, found, err := explicitReductionRatio(body); err != nil {
+				a.Classification = ClassificationAmbiguous
+				a.Reasoning = err.Error()
+			} else if found {
+				v = explicit
 			}
 			a.CloseRatio = &v
 			a.CloseMode = CloseModePartial
@@ -432,7 +442,11 @@ func segmentCarriesAction(ins *SourceInterpretation, text string) bool {
 	case ActionClose:
 		return sourceCloseIntent.MatchString(text) || regexp.MustCompile(`(?i)(\b(?:close|closing|exit|out|cut it)\b|[這这][單单]就不拿)`).MatchString(text)
 	case ActionReduce:
-		return sourceReduce.MatchString(text)
+		if sourceReduce.MatchString(text) {
+			return true
+		}
+		_, explicit, err := explicitReductionRatio(text)
+		return sourceCloseIntent.MatchString(text) && explicit && err == nil
 	default:
 		return sourceManagement.MatchString(text) && !sourceCancel.MatchString(text)
 	}

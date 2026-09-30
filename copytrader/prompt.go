@@ -10,7 +10,7 @@ import (
 
 // PromptVersion tags every AI run so output quality can be compared across
 // prompt iterations.
-const PromptVersion = "copytrade-v6"
+const PromptVersion = "copytrade-v7"
 
 // SystemPrompt is the fixed interpretation contract. It deliberately does NOT
 // ask the AI for quantities, leverage or risk decisions — those belong to the
@@ -138,8 +138,8 @@ func BuildUserPrompt(in PromptInput) string {
 	fmt.Fprintf(&b, "effective_message_rules: %s\n", in.MessageRules.Snapshot())
 	b.WriteString("Explicit author meaning takes precedence. For an ambiguous 市价 A—B entry, use market_dual_price_mode: legacy=original interpretation, range=one RANGE entry, market_then_limit=MARKET reference A plus LIMIT B, reject=AMBIGUOUS. Never discard an entry leg. Author position percentages and leverage describe their sizing, not eligibility. Retain genuine conditions (heavy position, added position, after TP fill) on every applicable child action. Operator notes cannot override risk or source authority.\n")
 	fmt.Fprintf(&b, "interpretation_profile: %s\n", in.InterpretationProfile)
-	if in.InterpretationProfile == "tyler_v1" {
-		b.WriteString("TYLER: celebration / TP hit alone is IGNORE. Explicit discretionary partial profit (止盈或者减仓) uses default_reduce_ratio of the remaining position unless an explicit ratio is stated; full exit remains CLOSE. Retain all eligibility conditions.\n")
+	if preset, ok := LookupInterpretationPreset(in.InterpretationProfile); ok {
+		b.WriteString(preset.Prompt + "\n")
 	}
 	if in.ImageCount > 0 {
 		fmt.Fprintf(&b, "attached_images: %d (provided below if vision is enabled)\n", in.ImageCount)

@@ -116,6 +116,9 @@ export interface TraderFullStats {
 
 // AI Trading related types
 export interface TraderInfo {
+  config_reload_status?: 'loaded' | 'failed'
+  config_reload_error?: string
+  restart_requested?: boolean
   trader_id: string
   trader_name: string
   ai_model: string

@@ -179,7 +179,7 @@ func TestDeferredModelRetryBoundedAndNoHistoricalReplay(t *testing.T) {
 	e := liveTestEngine(t, v, st, "default")
 	now := time.Now()
 	msg := &store.DiscordMessage{MessageID: "retry", MessageTimestamp: now}
-	sig := &store.CopyTradeSignal{ID: "new", TraderID: e.traderID, MessageID: msg.MessageID, ExecutionVersion: 1}
+	sig := &store.CopyTradeSignal{ID: "new", TraderID: e.traderID, MessageID: msg.MessageID, ExecutionVersion: 1, RulesSnapshotJSON: e.cfg.MessageRules().Snapshot()}
 	if err := st.CopyTrade().CreateSignal(sig); err != nil {
 		t.Fatal(err)
 	}

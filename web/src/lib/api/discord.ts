@@ -1,5 +1,6 @@
 import type {
   DiscordConfig,
+  CopyTradePreset,
   DiscordChannelPreviewMessage,
   CopyTradeEvent,
   CopyTradeSignal,
@@ -11,6 +12,12 @@ import type {
 import { API_BASE, httpClient } from './helpers'
 
 export const discordApi = {
+  async getCopyTradeProfiles(): Promise<CopyTradePreset[]> {
+    const result = await httpClient.get<{ profiles: CopyTradePreset[] }>(`${API_BASE}/copytrade/profiles`)
+    if (!result.success || !result.data?.profiles) throw new Error('Failed to load author presets')
+    return result.data.profiles
+  },
+
   async getDiscordConfig(): Promise<DiscordConfig> {
     const result = await httpClient.get<DiscordConfig>(`${API_BASE}/discord`)
     if (!result.success) throw new Error('Failed to fetch Discord config')

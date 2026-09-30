@@ -158,7 +158,7 @@ func (c *CopyTradingConfig) Validate() error {
 	if len(c.SourceChannelIDs) > 0 || c.ReasoningEffort != "" {
 		return fmt.Errorf("source_channel_ids and reasoning_effort are reserved and not supported")
 	}
-	if c.InterpretationProfile != "" && c.InterpretationProfile != "default" && c.InterpretationProfile != "tyler_v1" {
+	if _, ok := LookupInterpretationPreset(c.InterpretationProfile); !ok {
 		return fmt.Errorf("unknown interpretation_profile %q", c.InterpretationProfile)
 	}
 	if c.EntryPolicy != "" && c.EntryPolicy != EntryPolicyLegacy && c.EntryPolicy != EntryPolicySplit {

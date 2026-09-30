@@ -21,6 +21,7 @@ import {
 import { httpClient } from '../../lib/httpClient'
 import { api } from '../../lib/api'
 import { toast } from 'sonner'
+import { useCopyTradeProfiles } from '../../hooks/useCopyTradeProfiles'
 import { NofxSelect } from '../ui/select'
 
 const CHANNEL_PROFILE_TEMPLATE_ZH = `发单格式：
@@ -139,6 +140,9 @@ export function TraderConfigModal({
 
   const isCopyTrading = formData.trader_type === 'copy_trading'
 
+  const { profiles, error: profilesError } = useCopyTradeProfiles(isOpen && isCopyTrading)
+  const selectedPreset = profiles.find(p => p.id === (copyConfig.interpretation_profile || 'default'))
+
   // Fetch the user's strategy list
   useEffect(() => {
     const fetchStrategies = async () => {
@@ -198,7 +202,7 @@ export function TraderConfigModal({
       setCopyConfig({ ...DEFAULT_COPY_TRADING_CONFIG })
       setEntryTimeoutInput(String(DEFAULT_COPY_TRADING_CONFIG.entry_timeout_minutes))
     }
-  }, [traderData, isEditMode, availableModels, availableExchanges])
+  }, [isOpen, traderData, isEditMode, availableModels, availableExchanges])
 
   if (!isOpen) return null
   const splitAvailable =
@@ -483,20 +487,29 @@ export function TraderConfigModal({
                   </label>
                   <select
                     id="copy-interpretation-profile"
+                    disabled={!profiles.length}
                     value={copyConfig.interpretation_profile || 'default'}
                     onChange={(e) =>
-                      handleCopyConfigChange('interpretation_profile', e.target.value)
+                      setCopyConfig(prev => {
+                        const preset = profiles.find(p => p.id === e.target.value)
+                        if (!preset) return prev
+                        return { ...prev, ...(preset.id === 'default' ? {} : preset.recommended_config), interpretation_profile: preset.id }
+                      })
                     }
                     className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
                   >
-                    <option value="default">{t('copytrade.profileDefault', language)}</option>
-                    <option value="tyler_v1">TYLER</option>
+                    {!profiles.length && <option value={copyConfig.interpretation_profile || 'default'}>{copyConfig.interpretation_profile || t('copytrade.profileDefault', language)}</option>}
+                    {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                   </select>
                   <p className="text-xs text-nofx-text-muted mt-1">
-                    {t('copytrade.profileHint', language)}
+                    {selectedPreset?.description}
+                    {' '}{t('copytrade.profileHint', language, { ratio: copyConfig.default_reduce_ratio ?? 50 })}
                   </p>
+                  {profilesError && <p role="alert" className="text-xs text-nofx-danger">{t('copytrade.profileLoadFailed', language)}</p>}
                 </div>
-                <div>
+                <fieldset className="border border-nofx-gold/20 rounded p-3 space-y-3">
+                  <legend className="px-1 text-sm">{t('copytrade.entryRules', language)}</legend>
+                  <p className="text-xs text-nofx-text-muted">{t('copytrade.entryRulesHint', language)}</p>
                   <label htmlFor="copy-dual-price" className="text-sm text-nofx-text block mb-2">{t('copytrade.dualPriceLabel', language)}</label>
                   <select id="copy-dual-price" value={copyConfig.market_dual_price_mode || 'legacy'} onChange={e => handleCopyConfigChange('market_dual_price_mode', e.target.value)} className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text">
                     <option value="legacy">{t('copytrade.dualPriceLegacy', language)}</option>
@@ -504,6 +517,36 @@ export function TraderConfigModal({
                     <option value="market_then_limit" disabled={!splitAvailable}>{t('copytrade.dualPriceSplit', language)}</option>
                     <option value="reject">{t('copytrade.dualPriceReject', language)}</option>
                   </select>
+                  <div>
+                    <label
+                      htmlFor="copy-entry-policy"
+                      className="text-sm text-nofx-text block mb-2"
+                    >
+                      {t('copytrade.entryPolicy', language)}
+                    </label>
+                    <select
+                      id="copy-entry-policy"
+                      value={copyConfig.entry_policy || 'legacy'}
+                      onChange={(e) => handleCopyConfigChange('entry_policy', e.target.value)}
+                      className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
+                    >
+                      <option value="legacy">{t('copytrade.entryLegacy', language)}</option>
+                      <option value="market_reference_split" disabled={!splitAvailable}>
+                        {t('copytrade.entrySplit', language)}
+                      </option>
+                    </select>
+                    <p className="text-xs text-nofx-text-muted mt-1">
+                      {t('copytrade.splitHint', language)}
+                    </p>
+                    {invalidEntryPolicy && (
+                      <p role="alert" className="text-xs text-nofx-danger mt-1">
+                        {t('copytrade.splitUnsupported', language)}
+                      </p>
+                    )}
+                  </div>
+
+                </fieldset>
+                <div>
                   <label htmlFor="copy-default-reduce" className="text-sm text-nofx-text block mt-3 mb-2">{t('copytrade.reduceDefault', language)}</label>
                   <input id="copy-default-reduce" type="number" min="0.01" max="100" step="any" value={copyConfig.default_reduce_ratio ?? 50} onChange={e => handleCopyConfigChange('default_reduce_ratio', Number(e.target.value))} className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text" />
                   <p className="text-xs text-nofx-text-muted mt-2">{t('copytrade.rulesHint', language)}</p>
@@ -732,34 +775,6 @@ export function TraderConfigModal({
                   <p className="text-xs text-nofx-text-muted mt-1">
                     {t('copytrade.tpRatiosHint', language)}
                   </p>
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="copy-entry-policy"
-                    className="text-sm text-nofx-text block mb-2"
-                  >
-                    {t('copytrade.entryPolicy', language)}
-                  </label>
-                  <select
-                    id="copy-entry-policy"
-                    value={copyConfig.entry_policy || 'legacy'}
-                    onChange={(e) => handleCopyConfigChange('entry_policy', e.target.value)}
-                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
-                  >
-                    <option value="legacy">{t('copytrade.entryLegacy', language)}</option>
-                    <option value="market_reference_split" disabled={!splitAvailable}>
-                      {t('copytrade.entrySplit', language)}
-                    </option>
-                  </select>
-                  <p className="text-xs text-nofx-text-muted mt-1">
-                    {t('copytrade.splitHint', language)}
-                  </p>
-                  {invalidEntryPolicy && (
-                    <p role="alert" className="text-xs text-nofx-danger mt-1">
-                      {t('copytrade.splitUnsupported', language)}
-                    </p>
-                  )}
                 </div>
 
                 {/* Unfilled entry order lifetime */}

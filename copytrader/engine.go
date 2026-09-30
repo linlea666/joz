@@ -247,7 +247,11 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	}
 
 	// --- 1. Assemble context ---
-	if existing != nil && existing.Status == "retry_wait" && IsExpired(latencyRef, time.Now().UTC(), e.interpretationRetryTTL(msg)) {
+	if _, err := e.rulesForSignal(signalID); err != nil {
+		skip(SkipNeedsContext, "rule snapshot unavailable: "+err.Error())
+		return
+	}
+	if existing != nil && existing.Status == "retry_wait" && IsExpired(latencyRef, time.Now().UTC(), e.interpretationRetryTTL(msg, signalID)) {
 		skip(SkipExpired, "deferred interpretation expired before retry")
 		return
 	}
@@ -432,7 +436,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 func (e *Engine) processInstruction(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation) (SkipReason, string, error) {
 	// Resolve missing management symbols only from a unique tracked target.
 	if interp.IsActionable() && interp.Action != ActionOpen && interp.Action != ActionAdd && interp.Symbol == "" {
-		if ctx := e.correlateContext(interp, msg, ""); ctx != nil {
+		if ctx := e.correlateContext(interp, msg, "", signalID); ctx != nil {
 			interp.Symbol = ctx.Symbol
 			interp.Direction = Direction(ctx.Direction)
 		}
@@ -486,7 +490,7 @@ func (e *Engine) processInstruction(traceID, signalID string, msg *store.Discord
 	}
 
 	if interp.Action != ActionOpen && interp.Action != ActionAdd {
-		target := e.correlateContext(interp, msg, canonical)
+		target := e.correlateContext(interp, msg, canonical, signalID)
 		if target == nil {
 			return SkipNeedsContext, "target is missing or not unique", nil
 		}
@@ -640,7 +644,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	imageCount := 0
 	var imageErr string
 	if e.cfg.ParseImages {
-		imageParts, imageCount, imageErr = e.collectImages(traceID, signalID, msg, dryRun)
+		imageParts, imageCount, imageErr = e.collectImages(traceID, signalID, msg, dryRun, rules.Profile)
 	}
 	t.mediaMs = time.Since(mediaStart).Milliseconds()
 	t.imageErr = imageErr
@@ -719,7 +723,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	if known := InterpretKnownSource(msg, sources, rules.Profile); known != nil {
 		b, _ := json.Marshal(known)
 		raw = string(b)
-		run.Model = "deterministic:tyler_v1"
+		run.Model = "deterministic:" + rules.Profile
 	} else {
 		raw, callErr = e.llm.CallWithRequest(&mcp.Request{Messages: messages})
 	}
@@ -779,7 +783,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 
 // collectImages downloads message images and converts them to data-URL parts.
 // Failures degrade to text-only with a warning (never fail the signal).
-func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessage, dryRun bool) ([]mcp.ContentPart, int, string) {
+func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessage, dryRun bool, profiles ...string) ([]mcp.ContentPart, int, string) {
 	if e.poller == nil {
 		return nil, 0, "discord client unavailable"
 	}
@@ -792,7 +796,7 @@ func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessa
 	var lastErr string
 	failed := 0
 	available := 0
-	for _, att := range MediaSources(msg, e.messageSources(msg)) {
+	for _, att := range MediaSources(msg, e.messageSources(msg, profiles...)) {
 		if att.Role != "current" {
 			continue
 		} // historical media cannot authorize actions
@@ -863,7 +867,7 @@ func (e *Engine) lookupMessageForInterpret(channelID, messageID string, dryRun b
 
 // correlateContext finds the trade context a management signal refers to.
 // Priority: explicit root message ref > reply target > symbol+direction.
-func (e *Engine) correlateContext(interp *SourceInterpretation, msg *store.DiscordMessage, canonical string) *store.CopyTradeContext {
+func (e *Engine) correlateContext(interp *SourceInterpretation, msg *store.DiscordMessage, canonical string, signalIDs ...string) *store.CopyTradeContext {
 	contexts, err := e.st.CopyTrade().GetActiveContexts(e.traderID)
 	if err != nil {
 		return nil
@@ -880,7 +884,27 @@ func (e *Engine) correlateContext(interp *SourceInterpretation, msg *store.Disco
 			roots[root] = true
 		}
 	}
-	for _, source := range e.messageSources(msg) {
+	rules := e.cfg.MessageRules()
+	if len(signalIDs) > 0 {
+		var err error
+		rules, err = e.rulesForSignal(signalIDs[0])
+		if err != nil {
+			return nil
+		}
+	}
+	if interp.RequiresOriginalCard {
+		var match *store.CopyTradeContext
+		for _, c := range contexts {
+			if c.ChannelID == msg.ChannelID && c.RootMessageID == msg.MessageID && c.Symbol == canonical && (interp.Direction == "" || c.Direction == string(interp.Direction)) {
+				if match != nil {
+					return nil
+				}
+				match = c
+			}
+		}
+		return match
+	}
+	for _, source := range e.messageSources(msg, rules.Profile) {
 		if source.Role == "reference" && !source.Image {
 			if source.MessageID != "" {
 				roots[source.MessageID] = true
@@ -984,34 +1008,23 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 	if len(interp.EntryOrders) == 0 {
 		return SkipUnsupportedPriceSpec, nil
 	}
-	explicitSplit := len(interp.EntryOrders) > 1
-	if explicitSplit && (len(interp.EntryOrders) != 2 || interp.EntryOrders[0].OrderType != EntryMarket || interp.EntryOrders[0].Price.Type != PriceMarket || interp.EntryOrders[1].OrderType != EntryLimit || interp.EntryOrders[1].Price.Type != PriceFixed || e.cfg.RiskMode != RiskModeByLoss) {
-		return SkipUnsupportedPriceSpec, fmt.Errorf("unsupported entry combination; no legs submitted")
+	shape, skip, err := resolveEntryPlan(interp.Direction, interp.EntryOrders, marketPrice, e.cfg.PriceOffsetPctFor(canonical), e.cfg.LimitToMarketWithin, rules.EntryPolicy)
+	if err != nil {
+		if skip == SkipRiskRejected || skip == SkipNeedsContext {
+			e.events.Warn(traceID, signalID, msg.MessageID, EvSignalSkipped, err.Error(), nil)
+			return skip, nil
+		}
+		return skip, err
 	}
-	if explicitSplit {
+	if shape.SplitReference > 0 {
+		if e.cfg.RiskMode != RiskModeByLoss {
+			return SkipRiskRejected, fmt.Errorf("multi-leg entry requires by_loss")
+		}
 		if _, ok := e.exec.ex.(types.ManagedOrderTrader); !ok {
 			return SkipUnsupportedInstrument, fmt.Errorf("multi-leg entry requires managed orders")
 		}
 	}
-	entrySpec := interp.EntryOrders[0].Price
-	decision, err := decideEntry(interp.Direction, entrySpec, marketPrice,
-		e.cfg.PriceOffsetPctFor(canonical), e.cfg.LimitToMarketWithin)
-	if err != nil || decision.OrderType == EntryPlanSkip {
-		if err == nil {
-			err = fmt.Errorf("no executable entry")
-		}
-		return SkipUnsupportedPriceSpec, nil
-	}
-	if explicitSplit && decision.OrderType != EntryPlanMarket {
-		return SkipRiskRejected, nil
-	}
-	entryType, entryPrice := decision.OrderType, decision.EntryPrice
-	e.events.Info(traceID, signalID, msg.MessageID, EvEntryDecision,
-		fmt.Sprintf("%s %s: author=%s/%s reference=%.8g market=%.8g threshold=%.8g%% limit_conversion=%t -> %s @ %.8g (%s)",
-			canonical, interp.Direction, interp.EntryOrders[0].OrderType, entrySpec.Type,
-			decision.ReferencePrice, decision.MarketPrice, decision.ThresholdPct,
-			decision.LimitToMarketWithin, entryType, entryPrice, decision.Reason),
-		map[string]interface{}{"symbol": canonical, "source_order_type": interp.EntryOrders[0].OrderType, "decision": decision})
+	entryType, entryPrice := shape.Decision.OrderType, shape.Decision.EntryPrice
 
 	// Resolve SL / TP hard prices against the entry reference.
 	slPrice := resolveHardPrice(interp.StopLossLevels[0].Price, entryPrice)
@@ -1136,14 +1149,10 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 	if e.cfg.OpenSignalTTLSeconds > 0 {
 		plan.SignalExpiresAt = refTime.Add(time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second)
 	}
-	if e.cfg.EntryPolicy == EntryPolicySplit && entrySpec.Type == PriceMarket && entrySpec.Price > 0 && decision.Reason == "adverse_within_threshold" {
-		plan.SplitReference = entrySpec.Price
-	}
-	if explicitSplit {
-		plan.SplitReference = interp.EntryOrders[1].Price.Price
-		if (interp.Direction == DirectionLong && (plan.SplitReference <= slPrice || plan.SplitReference >= marketPrice)) || (interp.Direction == DirectionShort && (plan.SplitReference >= slPrice || plan.SplitReference <= marketPrice)) {
-			return SkipRiskRejected, fmt.Errorf("second limit must remain between stop and market")
-		}
+	plan.SplitReference = shape.SplitReference
+	plan.EntryDecisionJSON, _ = json.Marshal(shape)
+	if shape.Origin == "explicit_market_limit" && ((interp.Direction == DirectionLong && (shape.SplitReference <= slPrice || shape.SplitReference >= marketPrice)) || (interp.Direction == DirectionShort && (shape.SplitReference >= slPrice || shape.SplitReference <= marketPrice))) {
+		return SkipRiskRejected, fmt.Errorf("second limit must remain between stop and market")
 	}
 
 	// Author conditions are committed with the entry intent, before a fill or
@@ -1220,7 +1229,7 @@ func (e *Engine) routeAdd(traceID, signalID string, msg *store.DiscordMessage, i
 }
 
 func (e *Engine) routeClose(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation, canonical string) (SkipReason, error) {
-	ctx := e.correlateContext(interp, msg, canonical)
+	ctx := e.correlateContext(interp, msg, canonical, signalID)
 	if ctx == nil {
 		e.events.Info(traceID, signalID, msg.MessageID, EvSignalSkipped,
 			fmt.Sprintf("no tracked trade for %s (we never followed this open)", canonical), nil)
@@ -1256,7 +1265,7 @@ func (e *Engine) routeClose(traceID, signalID string, msg *store.DiscordMessage,
 }
 
 func (e *Engine) routeCancel(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation, canonical string) (SkipReason, error) {
-	ctx := e.correlateContext(interp, msg, canonical)
+	ctx := e.correlateContext(interp, msg, canonical, signalID)
 	if ctx == nil {
 		return SkipNoPosition, nil
 	}
@@ -1267,7 +1276,7 @@ func (e *Engine) routeCancel(traceID, signalID string, msg *store.DiscordMessage
 }
 
 func (e *Engine) routeUpdateSL(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation, canonical string) (SkipReason, error) {
-	ctx := e.correlateContext(interp, msg, canonical)
+	ctx := e.correlateContext(interp, msg, canonical, signalID)
 	if ctx == nil {
 		return SkipNoPosition, nil
 	}
@@ -1295,7 +1304,7 @@ func (e *Engine) routeUpdateSL(traceID, signalID string, msg *store.DiscordMessa
 }
 
 func (e *Engine) routeUpdateTP(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation, canonical string) (SkipReason, error) {
-	ctx := e.correlateContext(interp, msg, canonical)
+	ctx := e.correlateContext(interp, msg, canonical, signalID)
 	if ctx == nil {
 		return SkipNoPosition, nil
 	}

@@ -347,6 +347,7 @@ The token is validated against the Discord API before saving and stored encrypte
 				s.handleTestDiscordChannel)
 
 			// Copy-trading observability
+			s.route(protected, "GET", "/copytrade/profiles", "Copy trading author presets", s.handleGetCopyTradeProfiles)
 			s.route(protected, "GET", "/copytrade/events", "Copy trading event stream (trader_id or trace_id)", s.handleGetCopyTradeEvents)
 			s.route(protected, "GET", "/copytrade/signals", "Copy trading interpreted signals (trader_id)", s.handleGetCopyTradeSignals)
 			s.route(protected, "GET", "/copytrade/contexts", "Copy trading active trade contexts (trader_id)", s.handleGetCopyTradeContexts)

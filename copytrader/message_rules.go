@@ -10,9 +10,10 @@ import (
 	"strings"
 )
 
-const MessageRulesVersion = 1
+const MessageRulesVersion = 2
 
 type MessageRules struct {
+	EntryPolicy   string  `json:"entry_policy,omitempty"`
 	Version       int     `json:"version"`
 	Profile       string  `json:"interpretation_profile"`
 	Notes         string  `json:"channel_notes"`
@@ -21,7 +22,15 @@ type MessageRules struct {
 }
 
 func (c *CopyTradingConfig) MessageRules() MessageRules {
-	return MessageRules{MessageRulesVersion, c.InterpretationProfile, c.ChannelNotes, c.MarketDualPriceMode, c.ReduceRatio()}
+	policy := c.EntryPolicy
+	if policy == "" {
+		policy = EntryPolicyLegacy
+	}
+	profile := c.InterpretationProfile
+	if profile == "" {
+		profile = "default"
+	}
+	return MessageRules{Version: MessageRulesVersion, Profile: profile, Notes: c.ChannelNotes, DualPriceMode: c.MarketDualPriceMode, ReduceRatio: c.ReduceRatio(), EntryPolicy: policy}
 }
 func (r MessageRules) Snapshot() string { b, _ := json.Marshal(r); return string(b) }
 func (e *Engine) rulesForSignal(signalID string) (MessageRules, error) {
@@ -31,28 +40,51 @@ func (e *Engine) rulesForSignal(signalID string) (MessageRules, error) {
 		if err != nil {
 			return r, fmt.Errorf("load message rule snapshot: %w", err)
 		}
+		if sig != nil && sig.RulesSnapshotJSON == "" {
+			return MessageRules{}, fmt.Errorf("historical signal has no rule snapshot; cannot safely reinterpret or submit")
+		}
 		if sig != nil && sig.RulesSnapshotJSON != "" {
+			r = MessageRules{}
 			if err = json.Unmarshal([]byte(sig.RulesSnapshotJSON), &r); err != nil {
 				return r, err
 			}
-			if r.Version != MessageRulesVersion || !finite(r.ReduceRatio) || r.ReduceRatio <= 0 || r.ReduceRatio > 100 {
+			if (r.Version != 1 && r.Version != MessageRulesVersion) || !finite(r.ReduceRatio) || r.ReduceRatio <= 0 || r.ReduceRatio > 100 {
 				return r, fmt.Errorf("unsupported or invalid message rule snapshot")
 			}
 		}
+	}
+	if _, ok := LookupInterpretationPreset(r.Profile); !ok {
+		return r, fmt.Errorf("unknown interpretation preset %q", r.Profile)
+	}
+	switch r.DualPriceMode {
+	case "", DualPriceLegacy, DualPriceRange, DualPriceSplit, DualPriceReject:
+	default:
+		return r, fmt.Errorf("invalid frozen dual-price mode")
+	}
+	if r.Version >= 2 && r.EntryPolicy != EntryPolicyLegacy && r.EntryPolicy != EntryPolicySplit {
+		return r, fmt.Errorf("invalid frozen entry policy")
 	}
 	return r, nil
 }
 
 var dualMarketPrices = regexp.MustCompile(`(?:進場|进场|入場|入场)\s*[:：]?\s*市[價价]\s*([0-9]+(?:\.[0-9]+)?)\s*(?:附近)?\s*[—–－-]\s*([0-9]+(?:\.[0-9]+)?)`)
-var explicitEntryMeaning = regexp.MustCompile(`(?:區間|区间|兩筆|两笔|分批|(?i:range|two orders))`)
-var explicitFraction = regexp.MustCompile(`(?i)(一半|減半|减半|half|quarter|third|[一二三四五六七八九十]+分之[一二三四五六七八九十]+|[0-9]+\s*/\s*[0-9]+)`)
-var explicitReduceRatio = regexp.MustCompile(`(?:減倉|减仓|減掉|减掉|止盈|平倉|平仓|(?i:reduce|close|trim|take))[^\n，,;。%％]{0,30}[0-9]+(?:\.[0-9]+)?\s*[%％]`)
+var explicitEntryRange = regexp.MustCompile(`(?:區間|区间|(?i:range))`)
+var explicitEntryTwo = regexp.MustCompile(`(?:兩筆|两笔|分批|(?i:two orders))`)
 var authorPositionParameters = regexp.MustCompile(`(?i)^\s*[0-9]+(?:\.[0-9]+)?\s*[%％]\s*(?:[～~—–-]\s*[0-9]+(?:\.[0-9]+)?\s*[%％])?\s*[倉仓]位\s*(?:[｜|,，]\s*[0-9]+(?:\s*[～~—–-]\s*[0-9]+)?\s*(?:x|倍))?\s*$`)
 
 // ApplyMessageRules resolves only current, symbol-scoped author text. Reference
 // cards and performance recaps never gain opening authority through a setting.
 func ApplyMessageRules(interp *SourceInterpretation, msg *store.DiscordMessage, sources []SourceSegment, rules MessageRules) *SourceInterpretation {
+	if interp == nil {
+		return applyPresetPolicy(nil, msg, sources, rules)
+	}
 	for _, ins := range interp.Flatten() {
+		if ins.Action == ActionClose && ins.CloseMode == CloseModePartial {
+			ins.Action = ActionReduce
+		}
+		if ins.Action == ActionReduce {
+			ins.CloseMode = CloseModePartial
+		}
 		var scope string
 		for _, s := range sources {
 			if s.Role == "current" && !s.Image {
@@ -63,11 +95,23 @@ func ApplyMessageRules(interp *SourceInterpretation, msg *store.DiscordMessage, 
 			}
 		}
 		if scope == "" {
+			if ins.Action == ActionReduce {
+				applyReductionRatio(ins, scope, sources, rules.ReduceRatio)
+			}
 			continue
 		}
-		if ins.Action == ActionReduce && !explicitReduceRatio.MatchString(scope) && !explicitFraction.MatchString(scope) {
-			v := rules.ReduceRatio
-			ins.CloseRatio = &v
+		if ins.Action == ActionReduce {
+			applyReductionRatio(ins, scope, sources, rules.ReduceRatio)
+		}
+
+		if ins.Action == ActionClose && scope != "" {
+			v, explicit, err := explicitReductionRatio(scope)
+			if err != nil || (explicit && v < 100 && ins.CloseMode != CloseModePartial) {
+				ins.Classification = ClassificationAmbiguous
+				ins.Reasoning = "full close conflicts with explicit partial-exit evidence"
+			} else if explicit {
+				ins.CloseRatio = &v
+			}
 		}
 
 		if ins.Action == ActionReduce || ins.Action == ActionClose || ins.Action == ActionUpdateSL {
@@ -104,18 +148,32 @@ func ApplyMessageRules(interp *SourceInterpretation, msg *store.DiscordMessage, 
 			ins.Classification = ClassificationSignal
 			normalizeActionEvidence(ins, sources)
 		}
-		if rules.DualPriceMode == "" || rules.DualPriceMode == DualPriceLegacy {
+		if len(ins.EntryOrders) > 2 {
+			ins.Classification = ClassificationUnsupported
+			ins.Reasoning = "unsupported entry combination; no legs discarded"
 			continue
 		}
-		// An explicit range/two-order statement on the entry line overrides the
-		// ambiguity preference. The interpreter must retain that stated meaning.
+		mode := rules.DualPriceMode
+		// Explicit author meaning precedes the ambiguity preference, including
+		// legacy mode. An AI range/two-leg misreading cannot override the text.
 		explicit := false
 		for _, line := range strings.Split(scope, "\n") {
-			if dualMarketPrices.MatchString(line) && explicitEntryMeaning.MatchString(line) {
+			if !dualMarketPrices.MatchString(line) {
+				continue
+			}
+			isRange, isTwo := explicitEntryRange.MatchString(line), explicitEntryTwo.MatchString(line)
+			if isRange && isTwo {
+				mode = DualPriceReject
+				explicit = true
+			} else if isRange {
+				mode = DualPriceRange
+				explicit = true
+			} else if isTwo {
+				mode = DualPriceSplit
 				explicit = true
 			}
 		}
-		if explicit {
+		if !explicit && (mode == "" || mode == DualPriceLegacy) {
 			continue
 		}
 		matches := dualMarketPrices.FindAllStringSubmatch(scope, -1)
@@ -127,7 +185,7 @@ func ApplyMessageRules(interp *SourceInterpretation, msg *store.DiscordMessage, 
 		if a <= 0 || b <= 0 || !finite(a) || !finite(b) {
 			continue
 		}
-		switch rules.DualPriceMode {
+		switch mode {
 		case DualPriceReject:
 			ins.Classification = ClassificationAmbiguous
 			ins.EntryOrders = nil
@@ -136,13 +194,13 @@ func ApplyMessageRules(interp *SourceInterpretation, msg *store.DiscordMessage, 
 		case DualPriceSplit:
 			ins.EntryOrders = []EntryOrder{{OrderType: EntryMarket, Price: PriceSpec{Type: PriceMarket, Price: a}}, {OrderType: EntryLimit, Price: PriceSpec{Type: PriceFixed, Price: b}}}
 		}
-		if rules.DualPriceMode != DualPriceReject && ins.Classification == ClassificationAmbiguous && len(ins.StopLossLevels) > 0 && len(ins.TakeProfitLevels) > 0 && ins.Direction != "" && len(ins.EligibilityConditions) == 0 {
+		if mode != DualPriceReject && ins.Classification == ClassificationAmbiguous && len(ins.StopLossLevels) > 0 && len(ins.TakeProfitLevels) > 0 && ins.Direction != "" && len(ins.EligibilityConditions) == 0 {
 			ins.Classification = ClassificationSignal
 		}
 		normalizeActionEvidence(ins, sources)
-		ins.Warnings = append(ins.Warnings, "dual-price semantics: "+rules.DualPriceMode)
+		ins.Warnings = append(ins.Warnings, "dual-price semantics: "+mode)
 	}
-	return interp
+	return applyPresetPolicy(interp, msg, sources, rules)
 }
 
 var tpAfterEnglish = regexp.MustCompile(`(?i)after\s+(?:a\s+)?TP\s*([1-9][0-9]*)`)

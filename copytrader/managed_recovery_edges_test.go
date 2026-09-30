@@ -279,7 +279,7 @@ func TestDeferredRetryCannotExtendEntryLifetime(t *testing.T) {
 	e, _, model, msg := fixtureEngine(t, f, 1)
 	msg.MessageTimestamp = time.Now().Add(-6 * time.Minute)
 	due := time.Now().Add(-time.Second)
-	sig := &store.CopyTradeSignal{ID: "retry-expired", TraderID: e.traderID, ChannelID: msg.ChannelID, MessageID: msg.MessageID, Status: "retry_wait", ExecutionVersion: 1, RetryCount: 1, NextRetryAt: &due}
+	sig := &store.CopyTradeSignal{ID: "retry-expired", RulesSnapshotJSON: e.cfg.MessageRules().Snapshot(), TraderID: e.traderID, ChannelID: msg.ChannelID, MessageID: msg.MessageID, Status: "retry_wait", ExecutionVersion: 1, RetryCount: 1, NextRetryAt: &due}
 	if err := e.st.CopyTrade().CreateSignal(sig); err != nil {
 		t.Fatal(err)
 	}

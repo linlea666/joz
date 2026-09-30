@@ -1,4 +1,5 @@
 import type { CopyTradeEvent, CopyTradeSignal } from '../../types'
+import { CopyTradeRulesSnapshot } from './CopyTradeRulesSnapshot'
 import { t, type Language } from '../../i18n/translations'
 
 function actionStatusLabel(status: string, language: Language): string {
@@ -23,6 +24,9 @@ function readDecision(event: CopyTradeEvent): Record<string, unknown> | null {
       ...decision,
       symbol: context.symbol,
       source_order_type: context.source_order_type,
+      plan: context.plan,
+      legs: context.legs,
+      risk_budget: context.risk_budget,
     }
   } catch {
     return null
@@ -71,7 +75,7 @@ export function CopyTradeExecutionDetails({
       <h3 className="font-semibold text-nofx-text">
         {t('copytrade.executionDetails', language)}
       </h3>
-      {signal?.rules_snapshot_json && <details><summary>{t('copytrade.rulesSnapshot', language)}</summary><pre className="whitespace-pre-wrap break-all text-xs">{signal.rules_snapshot_json}</pre></details>}
+      {signal?.rules_snapshot_json && <CopyTradeRulesSnapshot snapshot={signal.rules_snapshot_json} language={language} />}
       <p className="text-xs text-nofx-text-muted">{t('copytrade.tpCapHint', language)}</p>
       {!!signal?.instruction_results?.length && (
         <div className="space-y-1">
@@ -180,6 +184,14 @@ export function CopyTradeExecutionDetails({
               {t('copytrade.entryDecision', language)} ·{' '}
               {String(d.symbol || '')} {String(d.direction || '')}
             </div>
+            {d.plan && typeof d.plan === 'object' && 'origin' in d.plan ? <div className="space-y-1">
+              <p>{language === 'zh' ? '采用规则：' : 'Applied rule: '}{String((d.plan as Record<string, unknown>).origin)}</p>
+              <p>{String((d.plan as Record<string, unknown>).policy_note || '')}</p>
+              <p>{language === 'zh' ? '共享风险预算：' : 'Shared risk budget: '}{numeric(d.risk_budget)} USD</p>
+              {Array.isArray(d.legs) && d.legs.map((leg, index) => <p key={index}>
+                {language === 'zh' ? '订单' : 'Leg'} {index + 1}: {orderType(leg.type)} · {numeric(leg.price)} · {language === 'zh' ? '数量' : 'Qty'} {numeric(leg.quantity)} · {language === 'zh' ? '风险份额' : 'Risk share'} {numeric(typeof leg.risk_fraction === 'number' ? leg.risk_fraction * 100 : undefined, true)}
+              </p>)}
+            </div> : null}
             <dl className="grid grid-cols-2 gap-x-4 gap-y-2">
               {fields.map(([label, value]) => (
                 <div key={label}>

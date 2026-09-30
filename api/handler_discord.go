@@ -559,3 +559,8 @@ func parseIntDefault(s string, def, min, max int) int {
 	}
 	return v
 }
+
+// Read-only catalog; recommendations are applied only to the user's edit draft.
+func (s *Server) handleGetCopyTradeProfiles(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{"profiles": copytrader.InterpretationPresets()})
+}

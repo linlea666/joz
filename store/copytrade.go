@@ -217,35 +217,38 @@ func (CopyTradeReplay) TableName() string { return "copytrade_replays" }
 // CopyTradeReplayItem stores the complete per-message dry-run result,
 // including prompts and model output for post-restart troubleshooting.
 type CopyTradeReplayItem struct {
-	ID             uint      `gorm:"primaryKey;autoIncrement" json:"id"`
-	ReplayID       string    `gorm:"index;not null" json:"replay_id"`
-	Sequence       int       `gorm:"index" json:"sequence"`
-	MessageID      string    `json:"message_id"`
-	Timestamp      time.Time `json:"timestamp"`
-	Author         string    `json:"author"`
-	Excerpt        string    `json:"excerpt"`
-	ImageCount     int       `json:"image_count"`
-	ImagesSent     int       `json:"images_sent"`
-	LLMMs          int64     `json:"llm_ms"`
-	Classification string    `json:"classification,omitempty"`
-	Action         string    `json:"action,omitempty"`
-	Symbol         string    `json:"symbol,omitempty"`
-	Canonical      string    `json:"canonical,omitempty"`
-	Direction      string    `json:"direction,omitempty"`
-	Entries        string    `json:"entries,omitempty"`
-	StopLoss       string    `json:"stop_loss,omitempty"`
-	TakeProfits    string    `json:"take_profits,omitempty"`
-	Verdict        string    `json:"verdict"`
-	VerdictDetail  string    `json:"verdict_detail,omitempty"`
-	Reasoning      string    `json:"reasoning,omitempty"`
-	WarningsJSON   string    `gorm:"column:warnings_json;type:text" json:"warnings_json,omitempty"`
-	Error          string    `json:"error,omitempty"`
-	ImageError     string    `json:"image_error,omitempty"`
-	SystemPrompt   string    `gorm:"type:text" json:"system_prompt,omitempty"`
-	UserPrompt     string    `gorm:"type:text" json:"user_prompt,omitempty"`
-	RawResponse    string    `gorm:"type:text" json:"raw_response,omitempty"`
-	ParsedJSON     string    `gorm:"type:text" json:"parsed_json,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
+	RulesSnapshotJSON  string    `gorm:"type:text" json:"rules_snapshot_json,omitempty"`
+	EvaluationScope    string    `json:"evaluation_scope,omitempty"`
+	UncheckedGatesJSON string    `gorm:"type:text" json:"unchecked_gates_json,omitempty"`
+	ID                 uint      `gorm:"primaryKey;autoIncrement" json:"id"`
+	ReplayID           string    `gorm:"index;not null" json:"replay_id"`
+	Sequence           int       `gorm:"index" json:"sequence"`
+	MessageID          string    `json:"message_id"`
+	Timestamp          time.Time `json:"timestamp"`
+	Author             string    `json:"author"`
+	Excerpt            string    `json:"excerpt"`
+	ImageCount         int       `json:"image_count"`
+	ImagesSent         int       `json:"images_sent"`
+	LLMMs              int64     `json:"llm_ms"`
+	Classification     string    `json:"classification,omitempty"`
+	Action             string    `json:"action,omitempty"`
+	Symbol             string    `json:"symbol,omitempty"`
+	Canonical          string    `json:"canonical,omitempty"`
+	Direction          string    `json:"direction,omitempty"`
+	Entries            string    `json:"entries,omitempty"`
+	StopLoss           string    `json:"stop_loss,omitempty"`
+	TakeProfits        string    `json:"take_profits,omitempty"`
+	Verdict            string    `json:"verdict"`
+	VerdictDetail      string    `json:"verdict_detail,omitempty"`
+	Reasoning          string    `json:"reasoning,omitempty"`
+	WarningsJSON       string    `gorm:"column:warnings_json;type:text" json:"warnings_json,omitempty"`
+	Error              string    `json:"error,omitempty"`
+	ImageError         string    `json:"image_error,omitempty"`
+	SystemPrompt       string    `gorm:"type:text" json:"system_prompt,omitempty"`
+	UserPrompt         string    `gorm:"type:text" json:"user_prompt,omitempty"`
+	RawResponse        string    `gorm:"type:text" json:"raw_response,omitempty"`
+	ParsedJSON         string    `gorm:"type:text" json:"parsed_json,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 func (CopyTradeReplayItem) TableName() string { return "copytrade_replay_items" }

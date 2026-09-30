@@ -63,7 +63,7 @@ func (e *Engine) claimInstruction(signalID string, msg *store.DiscordMessage, in
 	contextID := ""
 	direction := string(ins.Direction)
 	if ins.Action != ActionOpen && ins.Action != ActionAdd {
-		if c := e.correlateContext(ins, msg, canonical); c != nil {
+		if c := e.correlateContext(ins, msg, canonical, signalID); c != nil {
 			contextID = c.ID
 			direction = c.Direction
 		}
@@ -78,6 +78,12 @@ func (e *Engine) claimInstruction(signalID string, msg *store.DiscordMessage, in
 	if err != nil {
 		return a, false, err
 	}
+	if !legacy && ins.Action == ActionReduce {
+		legacy, err = e.st.CopyTrade().LegacyExecutedAction(e.traderID, msg.MessageID, canonical, string(ActionClose))
+		if err != nil {
+			return a, false, err
+		}
+	}
 	if legacy {
 		return a, false, nil
 	}
@@ -89,12 +95,23 @@ func (e *Engine) claimInstruction(signalID string, msg *store.DiscordMessage, in
 	}
 	retryable := false
 	for _, old := range previous {
-		if old.Symbol != canonical || old.Direction != direction || (old.ContextID != contextID && ins.Action != ActionOpen && ins.Action != ActionAdd) || old.Action != string(ins.Action) {
+		if old.Symbol != canonical || old.Direction != direction || (old.ContextID != contextID && ins.Action != ActionOpen && ins.Action != ActionAdd) {
 			continue
+		}
+		partialAlias := ins.Action == ActionReduce && old.Action == string(ActionClose)
+		if old.Action != string(ins.Action) && !partialAlias {
+			continue
+		}
+		// A close with an unknown outcome must settle before any new reduction.
+		if partialAlias && (old.Status == "executing" || old.Status == "uncertain") {
+			return old, false, nil
 		}
 		var parsed SourceInterpretation
 		if json.Unmarshal([]byte(old.PayloadJSON), &parsed) != nil {
 			return a, false, fmt.Errorf("existing action semantics unavailable; manual review required")
+		}
+		if partialAlias && parsed.CloseMode != CloseModePartial {
+			continue
 		}
 		if instructionSemantic(&parsed) != semantic {
 			continue
@@ -127,7 +144,7 @@ func (e *Engine) deferInterpretationRetry(sig *store.CopyTradeSignal, msg *store
 	if msg.EditedAt != nil && msg.EditedAt.After(ref) {
 		ref = *msg.EditedAt
 	}
-	ttl := e.interpretationRetryTTL(msg)
+	ttl := e.interpretationRetryTTL(msg, sig.ID)
 	if ttl <= 0 || IsExpired(ref, next, ttl) {
 		return false
 	}
@@ -136,11 +153,19 @@ func (e *Engine) deferInterpretationRetry(sig *store.CopyTradeSignal, msg *store
 	return true
 }
 
-func (e *Engine) interpretationRetryTTL(msg *store.DiscordMessage) time.Duration {
+func (e *Engine) interpretationRetryTTL(msg *store.DiscordMessage, signalIDs ...string) time.Duration {
+	profile := e.cfg.InterpretationProfile
+	if len(signalIDs) > 0 {
+		rules, err := e.rulesForSignal(signalIDs[0])
+		if err != nil {
+			return time.Nanosecond
+		}
+		profile = rules.Profile
+	}
 	openTTL := time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second
 	mgmtTTL := time.Duration(e.cfg.MgmtSignalTTLSeconds) * time.Second
 	current := ""
-	for _, s := range e.messageSources(msg) {
+	for _, s := range e.messageSources(msg, profile) {
 		if s.Role == "current" && !s.Image {
 			current += "\n" + s.Text
 		}

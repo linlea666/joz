@@ -1,3 +1,4 @@
+import { CopyTradeRulesSnapshot } from './CopyTradeRulesSnapshot'
 import { useState, useEffect, useCallback, Fragment } from 'react'
 import { X as IconX, RefreshCw, Radio, Download, Play } from 'lucide-react'
 import { toast } from 'sonner'
@@ -609,6 +610,9 @@ export function CopyTradeLogModal({
                           </span>
                         )}
                       </div>
+                      <p className="text-xs text-nofx-text-muted">{item.evaluation_scope || (language === 'zh' ? '历史检查范围未知' : 'Historical scope unknown')}</p>
+                      {!!item.unchecked_gates?.length && <p className="text-xs text-nofx-text-muted">{language === 'zh' ? '未检查：' : 'Unchecked: '}{item.unchecked_gates.join(', ')}</p>}
+                      {item.rules_snapshot_json && <CopyTradeRulesSnapshot snapshot={item.rules_snapshot_json} language={language} />}
                       {item.excerpt && (
                         <div className="text-nofx-text-muted break-all">
                           {item.excerpt}

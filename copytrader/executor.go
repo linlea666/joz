@@ -64,6 +64,7 @@ func positionSideOf(direction string) string {
 
 // OpenPlan is the fully resolved, deterministic plan for an OPEN.
 type OpenPlan struct {
+	EntryDecisionJSON json.RawMessage
 	RequestedStopLoss float64
 	ExchangeID        string
 	RulesSnapshotJSON string
@@ -134,6 +135,7 @@ func (x *Executor) ExecuteOpen(traceID, signalID string, plan *OpenPlan) (*store
 	if _, ok := x.ex.(types.ManagedOrderTrader); ok {
 		return x.executeManagedOpen(traceID, signalID, plan)
 	}
+	x.logEntryPlan(traceID, signalID, plan, []map[string]interface{}{{"type": plan.EntryType, "price": plan.EntryPrice, "quantity": plan.Quantity, "risk_fraction": 1}})
 	if err := x.ex.SetLeverage(plan.Symbol, plan.Leverage); err != nil {
 		return nil, fmt.Errorf("configured leverage rejected: %w", err)
 	}

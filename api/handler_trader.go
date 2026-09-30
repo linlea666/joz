@@ -798,24 +798,44 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 	// Remove old trader from memory first (this also stops if running)
 	s.traderManager.RemoveTrader(traderID)
 
+	reloadStatus, reloadError := "loaded", ""
 	// Reload traders into memory with fresh config
 	err = s.traderManager.LoadUserTradersFromStore(s.store, userID)
 	if err != nil {
 		logger.Infof("⚠️ Failed to reload user traders into memory: %v", err)
+		reloadStatus, reloadError = "failed", "Configuration saved, but runtime reload failed. Retry or start manually after checking configuration."
 	}
 
-	// If trader was running before, restart it with new config
-	if wasRunning {
-		if reloadedTrader, getErr := s.traderManager.GetTrader(traderID); getErr == nil {
-			go func() {
-				logger.Infof("▶️ Restarting trader %s with new config...", traderID)
-				if runErr := reloadedTrader.Run(); runErr != nil {
-					logger.Infof("❌ Trader %s runtime error: %v", traderID, runErr)
-				}
-			}()
+	isCopy := existingTrader.TraderType == string(copytrader.TraderTypeCopy)
+	reloadedTrader, getErr := s.traderManager.GetTrader(traderID)
+	if isCopy && getErr != nil {
+		reloadStatus, reloadError = "failed", "Configuration saved, but the runtime is unavailable. Retry or start manually after checking configuration."
+	}
+	restartRequested, manualRestart := false, wasRunning
+	if isCopy {
+		// addTraderFromStore already schedules Run when the saved IsRunning
+		// flag is true. Do not race that request with a second Run here.
+		restartRequested, manualRestart = copyTradeRestartState(existingTrader.IsRunning, wasRunning, reloadStatus == "loaded" && getErr == nil)
+	}
+	if manualRestart && getErr == nil {
+		restartRequested = true
+		go func() {
+			logger.Infof("▶️ Restarting trader %s with new config...", traderID)
+			if runErr := reloadedTrader.Run(); runErr != nil {
+				logger.Infof("❌ Trader %s runtime error: %v", traderID, runErr)
+			}
+		}()
+	}
+	if isCopy {
+		response := gin.H{"trader_id": traderID, "trader_name": req.Name, "ai_model": req.AIModelID, "config_reload_status": reloadStatus, "config_reload_error": reloadError, "restart_requested": restartRequested}
+		// An asynchronous Run request is not evidence that the engine is running.
+		// Existing status endpoints report its eventual state.
+		if !restartRequested {
+			response["is_running"] = false
 		}
+		c.JSON(http.StatusOK, response)
+		return
 	}
-
 	logger.Infof("✓ Trader updated successfully: %s (model: %s, exchange: %s, strategy: %s)", req.Name, req.AIModelID, req.ExchangeID, strategyID)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1019,4 +1039,16 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 
 	logger.Infof("⏹  Trader %s stopped", trader.GetName())
 	c.JSON(http.StatusOK, gin.H{"message": "Trader stopped"})
+}
+
+// The loader owns persisted restart requests; the handler only restores a
+// runtime that was running without a persisted restart flag.
+func copyTradeRestartState(persistedRunning, wasRunning, loaded bool) (requested, manual bool) {
+	if !loaded {
+		return false, false
+	}
+	if persistedRunning {
+		return true, false
+	}
+	return wasRunning, wasRunning
 }

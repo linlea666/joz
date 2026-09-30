@@ -179,6 +179,7 @@ type SourceInterpretation struct {
 	ActionEvidence        *ActionEvidence    `json:"action_evidence,omitempty"`
 	EligibilityConditions []string           `json:"eligibility_conditions,omitempty"`
 	EvidenceVerified      bool               `json:"-"`
+	RequiresOriginalCard  bool               `json:"requires_original_card,omitempty"`
 	RequiresTPFill        int                `json:"requires_tp_fill,omitempty"`
 	RequiresAddFill       bool               `json:"requires_add_fill,omitempty"` // management applies only if this trade's add leg actually filled
 

@@ -225,6 +225,12 @@ func (x *Executor) executeManagedOpen(traceID, signalID string, plan *OpenPlan) 
 	if q1*plan.EntryPrice < rules.MinNotional {
 		return nil, fmt.Errorf("entry below exchange minimum notional")
 	}
+	legs := []map[string]interface{}{{"type": plan.EntryType, "price": plan.EntryPrice, "quantity": q1, "risk_fraction": 1.0}}
+	if split {
+		legs[0]["risk_fraction"] = 0.5
+		legs = append(legs, map[string]interface{}{"type": EntryPlanLimit, "price": plan.SplitReference, "quantity": q2, "risk_fraction": 0.5})
+	}
+	x.logEntryPlan(traceID, signalID, plan, legs)
 	policy := EntryPolicyLegacy
 	if split {
 		policy = EntryPolicySplit
