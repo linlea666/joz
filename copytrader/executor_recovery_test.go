@@ -42,7 +42,9 @@ type mockExchange struct {
 	cancelSLLog       []string // symbols passed to CancelStopLossOrders
 }
 
-func (m *mockExchange) GetBalance() (map[string]interface{}, error) { return nil, nil }
+func (m *mockExchange) GetBalance() (map[string]interface{}, error) {
+	return map[string]interface{}{"totalEquity": 10000.0, "availableBalance": 10000.0}, nil
+}
 func (m *mockExchange) GetPositions() ([]map[string]interface{}, error) {
 	return m.positions, nil
 }
@@ -116,7 +118,7 @@ func newTestStore(t *testing.T) *store.Store {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	if err := gdb.AutoMigrate(
-		&store.CopyTradeContext{}, &store.CopyTradeEvent{},
+		&store.CopyTradeContext{}, &store.CopyTradeOwnership{}, &store.CopyTradeAccountFence{}, &store.CopyTradeEvent{},
 		&store.CopyTradeSignal{}, &store.CopyTradeAIRun{}, &store.CopyTradeAction{}, &store.CopyTradeOrder{},
 		&store.CopyTradeReplay{}, &store.CopyTradeReplayItem{}, &store.DiscordMessage{}, &store.Trader{},
 	); err != nil {
@@ -125,6 +127,9 @@ func newTestStore(t *testing.T) *store.Store {
 	st, err := store.NewFromGorm(gdb)
 	if err != nil {
 		t.Fatalf("store: %v", err)
+	}
+	if err := st.Trader().Create(&store.Trader{ID: "trader-1", UserID: "test", Name: "test", ExchangeID: "account-1"}); err != nil {
+		t.Fatal(err)
 	}
 	return st
 }

@@ -555,6 +555,7 @@ export function CopyTradeLogModal({
               ) : (
                 <div className="space-y-2">
                   <ReplayStats items={replay.items} language={language} />
+                  <p className="text-xs text-nofx-text-muted">{t('copytrade.replayScope', language)}</p>
                   {replay.items.map((item) => (
                     <div
                       key={item.message_id}

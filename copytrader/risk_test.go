@@ -9,7 +9,8 @@ func TestComputePositionSizeByLoss(t *testing.T) {
 	// Real jonzi card: entry 77005.1, SL 76851.3 => "for every $100 risk,
 	// position = 0.6502 BTC". With $50 risk expect ~0.3251 (matches the
 	// reference project's quantity_plan rawTotalQuantity 0.32509752...).
-	res, err := ComputePositionSize(SizingInput{
+	res, err := ComputePositionSize(SizingInput{AvailableMarginUSD: 1000000,
+
 		RiskMode:      RiskModeByLoss,
 		RiskAmountUSD: 50,
 		EntryPrice:    77005.1,
@@ -33,7 +34,8 @@ func TestComputePositionSizeByLoss(t *testing.T) {
 func TestComputePositionSizeMaxNotionalCap(t *testing.T) {
 	// Razor-thin stop must not create huge notional: entry 100, SL 99.90 (0.1%)
 	// risk $50 => raw qty 500 => notional $50k, capped to $10k.
-	res, err := ComputePositionSize(SizingInput{
+	res, err := ComputePositionSize(SizingInput{AvailableMarginUSD: 1000000,
+
 		RiskMode:               RiskModeByLoss,
 		RiskAmountUSD:          50,
 		EntryPrice:             100,
@@ -54,7 +56,8 @@ func TestComputePositionSizeMaxNotionalCap(t *testing.T) {
 
 func TestComputePositionSizeRejectsTinyStopDistance(t *testing.T) {
 	// entry 100, SL 99.99 => 0.01% distance, below the 0.05% floor.
-	_, err := ComputePositionSize(SizingInput{
+	_, err := ComputePositionSize(SizingInput{AvailableMarginUSD: 1000000,
+
 		RiskMode:      RiskModeByLoss,
 		RiskAmountUSD: 50,
 		EntryPrice:    100,
@@ -86,7 +89,8 @@ func TestComputePositionSizeMarginCap(t *testing.T) {
 }
 
 func TestComputePositionSizePercentMode(t *testing.T) {
-	res, err := ComputePositionSize(SizingInput{
+	res, err := ComputePositionSize(SizingInput{AvailableMarginUSD: 1000000,
+
 		RiskMode:      RiskModePercent,
 		RiskAmountUSD: 10, // 10% of equity
 		EquityUSD:     5000,

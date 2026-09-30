@@ -48,7 +48,7 @@ func (t *FuturesTrader) MarketRules(symbol string) (*types.ManagedMarketRules, e
 				r.MinNotional = managedNumber(f["notional"])
 			}
 		}
-		if r.Status != "TRADING" || r.ContractType != "PERPETUAL" || r.QuoteAsset != "USDT" || r.QuantityStep <= 0 || r.PriceTick <= 0 {
+		if r.Status != "TRADING" || (r.ContractType != "PERPETUAL" && r.ContractType != "TRADIFI_PERPETUAL") || r.QuoteAsset != "USDT" || r.QuantityStep <= 0 || r.PriceTick <= 0 {
 			return nil, fmt.Errorf("%s is not a supported tradable USDT perpetual or has incomplete rules", symbol)
 		}
 		return r, nil
@@ -95,14 +95,7 @@ func (t *FuturesTrader) SubmitManagedOrder(req *types.ManagedOrderRequest) (*typ
 	// In hedge mode side+positionSide encode a close; reduceOnly is prohibited.
 	o, err := svc.Do(context.Background())
 	if err != nil {
-		var apiErr *common.APIError
-		if errors.As(err, &apiErr) {
-			switch apiErr.Code {
-			case -1100, -1102, -1111, -1116, -1117, -1121, -2019, -2020, -2021, -2022, -2027, -4003, -4004, -4005, -4014, -4023, -4164:
-				return nil, fmt.Errorf("%w: %v", types.ErrManagedOrderRejected, err)
-			}
-		}
-		return nil, err
+		return nil, classifyManagedRejection(err)
 	}
 	t.InvalidatePositionCache()
 	return &types.ManagedOrderResult{OrderID: strconv.FormatInt(o.OrderID, 10), ClientID: o.ClientOrderID, Symbol: o.Symbol, Type: string(o.Type), Side: string(o.Side), PositionSide: string(o.PositionSide), Status: string(o.Status), Quantity: managedNumber(o.OrigQuantity), ExecutedQty: managedNumber(o.ExecutedQuantity), AvgPrice: managedNumber(o.AvgPrice), Price: managedNumber(o.Price)}, nil
@@ -156,4 +149,15 @@ func (t *FuturesTrader) CancelManagedOrder(symbol, orderID, clientID string) (*t
 func (t *FuturesTrader) GetFreshPositions() ([]map[string]interface{}, error) {
 	t.InvalidatePositionCache()
 	return t.GetPositions()
+}
+
+func classifyManagedRejection(err error) error {
+	var apiErr *common.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case -1100, -1102, -1111, -1116, -1117, -1121, -2019, -2020, -2021, -2022, -2027, -4003, -4004, -4005, -4014, -4023, -4164:
+			return fmt.Errorf("%w: %v", types.ErrManagedOrderRejected, err)
+		}
+	}
+	return err
 }

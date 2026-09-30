@@ -695,6 +695,17 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 	}
 
 	exchangeChanged := req.ExchangeID != "" && req.ExchangeID != existingTrader.ExchangeID
+	if exchangeChanged {
+		busy, err := s.store.CopyTrade().AccountBusy(existingTrader.ExchangeID)
+		if err != nil {
+			SafeInternalError(c, "Check active copy trades", err)
+			return
+		}
+		if busy {
+			c.JSON(http.StatusConflict, gin.H{"error": "Active copy trades or unresolved actions prevent changing the exchange binding"})
+			return
+		}
+	}
 	resetInitialBalance := exchangeChanged && req.InitialBalance <= 0
 
 	initialBalance := existingTrader.InitialBalance

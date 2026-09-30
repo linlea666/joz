@@ -207,7 +207,7 @@ export function TraderConfigModal({
       .find((ex) => ex.id === formData.exchange_id)
       ?.exchange_type?.toLowerCase() === 'binance'
   const invalidEntryPolicy =
-    copyConfig.entry_policy === 'market_reference_split' && !splitAvailable
+    (copyConfig.entry_policy === 'market_reference_split' || copyConfig.market_dual_price_mode === 'market_then_limit') && !splitAvailable
   const entryTimeoutMinutes = Number(entryTimeoutInput)
   // Go converts minutes to int64 nanoseconds; reject values that overflow it.
   const invalidEntryTimeout =
@@ -215,6 +215,15 @@ export function TraderConfigModal({
     !Number.isSafeInteger(entryTimeoutMinutes) ||
     entryTimeoutMinutes < 0 ||
     entryTimeoutMinutes > 153722867
+
+  const invalidMessageRules =
+    !Number.isFinite(copyConfig.default_reduce_ratio ?? 50) ||
+    (copyConfig.default_reduce_ratio ?? 50) <= 0 ||
+    (copyConfig.default_reduce_ratio ?? 50) > 100 ||
+    [copyConfig.open_signal_ttl_seconds, copyConfig.management_signal_ttl_seconds].some(
+      value => !Number.isSafeInteger(value) || value < 0 || value > 9223372036
+    )
+  const unsupportedFields = !!copyConfig.source_channel_ids?.length || !!copyConfig.reasoning_effort
 
   const handleInputChange = (field: keyof FormState, value: any) => {
     setFormData((prev) => ({ ...prev, [field]: value }))
@@ -232,7 +241,7 @@ export function TraderConfigModal({
   }
 
   const handleSave = async () => {
-    if (!onSave || (isCopyTrading && invalidEntryTimeout)) return
+    if (!onSave || (isCopyTrading && (invalidEntryTimeout || invalidEntryPolicy || invalidMessageRules || unsupportedFields))) return
 
     setIsSaving(true)
     try {
@@ -486,6 +495,21 @@ export function TraderConfigModal({
                   <p className="text-xs text-nofx-text-muted mt-1">
                     {t('copytrade.profileHint', language)}
                   </p>
+                </div>
+                <div>
+                  <label htmlFor="copy-dual-price" className="text-sm text-nofx-text block mb-2">{t('copytrade.dualPriceLabel', language)}</label>
+                  <select id="copy-dual-price" value={copyConfig.market_dual_price_mode || 'legacy'} onChange={e => handleCopyConfigChange('market_dual_price_mode', e.target.value)} className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text">
+                    <option value="legacy">{t('copytrade.dualPriceLegacy', language)}</option>
+                    <option value="range">{t('copytrade.dualPriceRange', language)}</option>
+                    <option value="market_then_limit" disabled={!splitAvailable}>{t('copytrade.dualPriceSplit', language)}</option>
+                    <option value="reject">{t('copytrade.dualPriceReject', language)}</option>
+                  </select>
+                  <label htmlFor="copy-default-reduce" className="text-sm text-nofx-text block mt-3 mb-2">{t('copytrade.reduceDefault', language)}</label>
+                  <input id="copy-default-reduce" type="number" min="0.01" max="100" step="any" value={copyConfig.default_reduce_ratio ?? 50} onChange={e => handleCopyConfigChange('default_reduce_ratio', Number(e.target.value))} className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text" />
+                  <p className="text-xs text-nofx-text-muted mt-2">{t('copytrade.rulesHint', language)}</p>
+                  <p className="text-xs text-nofx-text-muted mt-2">{t('copytrade.tpCapHint', language)}</p>
+                  {invalidMessageRules && <p role="alert" className="text-xs text-nofx-danger">{t('copytrade.rulesInvalid', language)}</p>}
+                  {unsupportedFields && <div role="alert"><p>{t('copytrade.reservedUnsupported', language)}</p><button type="button" onClick={() => setCopyConfig(prev => ({...prev, source_channel_ids: [], reasoning_effort: ''}))}>{language === 'zh' ? '清除预留字段' : 'Clear reserved fields'}</button></div>}
                 </div>
                 {/* Channel profile */}
                 <div>
@@ -1137,7 +1161,7 @@ export function TraderConfigModal({
                 !formData.trader_name ||
                 !formData.ai_model ||
                 !formData.exchange_id ||
-                (isCopyTrading && (!copyConfig.primary_channel_id.trim() || invalidEntryPolicy || invalidEntryTimeout))
+                (isCopyTrading && (!copyConfig.primary_channel_id.trim() || invalidEntryPolicy || invalidEntryTimeout || invalidMessageRules || unsupportedFields))
               }
               className="px-8 py-3 bg-nofx-gold text-white rounded-lg hover:bg-nofx-gold/90 transition-all duration-200 disabled:bg-nofx-bg-deeper disabled:text-nofx-text-muted disabled:cursor-not-allowed font-medium shadow-lg"
             >

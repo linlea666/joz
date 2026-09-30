@@ -38,6 +38,9 @@ func (rt *recordingTransport) RoundTrip(req *http.Request) (*http.Response, erro
 	})
 
 	response := `{"code":"0","msg":"","data":[]}`
+	if req.URL.Path == okxAlgoOrderPath {
+		response = `{"code":"0","msg":"","data":[{"algoId":"456","sCode":"0"}]}`
+	}
 	switch req.URL.Path {
 	case okxInstrumentsPath:
 		response = `{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","ctVal":"0.01","ctMult":"1","lotSz":"1","minSz":"1","maxMktSz":"100000","tickSz":"0.1","ctType":"linear"}]}`

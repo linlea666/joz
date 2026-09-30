@@ -328,14 +328,35 @@ func (s *ExchangeStore) Update(userID, id string, enabled bool, apiKey, secretKe
 		updates["lighter_api_key_private_key"] = crypto.EncryptedString(lighterApiKeyPrivateKey)
 	}
 
-	result := s.db.Model(&Exchange{}).Where("id = ? AND user_id = ?", id, userID).Updates(updates)
-	if result.Error != nil {
-		return result.Error
-	}
-	if result.RowsAffected == 0 {
-		return fmt.Errorf("exchange not found: id=%s, userID=%s", id, userID)
-	}
-	return nil
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if tx.Migrator().HasTable(&CopyTradeAccountFence{}) {
+			if err := lockCopyTradeAccount(tx, id); err != nil {
+				return err
+			}
+			var old Exchange
+			if err := tx.First(&old, "id = ? AND user_id = ?", id, userID).Error; err != nil {
+				return err
+			}
+			changed := (apiKey != "" && apiKey != string(old.APIKey)) || (secretKey != "" && secretKey != string(old.SecretKey)) || (passphrase != "" && passphrase != string(old.Passphrase)) || old.Testnet != testnet
+			if changed {
+				busy, err := NewCopyTradeStore(tx).AccountBusy(id)
+				if err != nil {
+					return err
+				}
+				if busy {
+					return fmt.Errorf("active copy trades or unresolved actions prevent replacing account credentials")
+				}
+			}
+		}
+		result := tx.Model(&Exchange{}).Where("id = ? AND user_id = ?", id, userID).Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return fmt.Errorf("exchange not found: id=%s", id)
+		}
+		return nil
+	})
 }
 
 // UpdateAccountName updates the account name for an exchange

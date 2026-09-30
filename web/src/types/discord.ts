@@ -48,6 +48,10 @@ export interface CopyTradingConfig {
   channel_notes?: string
   interpretation_profile?: 'default' | 'tyler_v1'
   entry_policy?: 'legacy' | 'market_reference_split'
+  market_dual_price_mode?: 'legacy' | 'range' | 'market_then_limit' | 'reject'
+  default_reduce_ratio?: number
+  source_channel_ids?: string[] // Reserved; not supported
+  reasoning_effort?: string // Reserved; not supported
 
   parse_images: boolean
   send_position_snapshot: boolean
@@ -80,6 +84,8 @@ export const DEFAULT_COPY_TRADING_CONFIG: CopyTradingConfig = {
   channel_notes: '',
   interpretation_profile: 'default',
   entry_policy: 'legacy',
+  market_dual_price_mode: 'legacy',
+  default_reduce_ratio: 50,
   parse_images: true,
   send_position_snapshot: true,
   signal_context_enabled: true,
@@ -145,6 +151,9 @@ export interface CopyTradeOrderLeg {
   last_error?: string
 }
 export interface CopyTradeInstructionResult {
+  action_ids?: string[]
+  context_ids?: string[]
+  order_ids?: string[]
   index: number
   action: string
   symbol: string
@@ -154,6 +163,7 @@ export interface CopyTradeInstructionResult {
   detail?: string
 }
 export interface CopyTradeSignal {
+  rules_snapshot_json?: string
   action_results?: CopyTradeActionResult[]
   order_legs?: CopyTradeOrderLeg[]
   instruction_results?: CopyTradeInstructionResult[]
@@ -234,6 +244,8 @@ export interface CopyTradeAIStat {
 
 // Dry-run recognition replay (accuracy testing, no execution/persistence).
 export interface CopyTradeReplayItem {
+  evaluation_scope?: string
+  unchecked_gates?: string[]
   message_id: string
   timestamp: string
   author: string
@@ -262,6 +274,7 @@ export interface CopyTradeReplayItem {
 }
 
 export interface CopyTradeAIRun {
+  rules_snapshot_json?: string
   id: number
   trader_id: string
   channel_id: string

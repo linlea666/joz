@@ -109,11 +109,15 @@ func (x *Executor) submitManaged(row *store.CopyTradeOrder, rules *types.Managed
 	result, err := x.ex.(types.ManagedOrderTrader).SubmitManagedOrder(&types.ManagedOrderRequest{Symbol: row.Symbol, Type: row.OrderType, Side: side, PositionSide: row.Direction, ClientID: row.ClientID, Quantity: row.Quantity, Price: row.Price, ReferencePrice: row.Price, ReduceOnly: reduce, Rules: rules})
 	if err != nil {
 		if errors.Is(err, types.ErrManagedOrderRejected) {
+			if persistErr := x.st.CopyTrade().UpdateOrder(row.ID, map[string]interface{}{"status": "REJECTED", "last_error": err.Error()}); persistErr != nil {
+				return fmt.Errorf("record rejection: %w (exchange: %v)", persistErr, err)
+			}
 			row.Status = "REJECTED"
-			_ = x.st.CopyTrade().UpdateOrder(row.ID, map[string]interface{}{"status": "REJECTED", "last_error": err.Error()})
 			return err
 		}
-		_ = x.st.CopyTrade().UpdateOrder(row.ID, map[string]interface{}{"status": "UNKNOWN", "last_error": err.Error()})
+		if persistErr := x.st.CopyTrade().UpdateOrder(row.ID, map[string]interface{}{"status": "UNKNOWN", "last_error": err.Error()}); persistErr != nil {
+			return fmt.Errorf("record uncertain submission: %w (exchange: %v)", persistErr, err)
+		}
 		row.Status = "UNKNOWN"
 		if queryErr := x.queryManaged(row); queryErr != nil {
 			return fmt.Errorf("submission uncertain; client ID %s must be reconciled: %w (query: %v)", row.ClientID, err, queryErr)
@@ -190,30 +194,12 @@ func splitQuantities(plan *OpenPlan, rules *types.ManagedMarketRules) (float64, 
 }
 
 func (x *Executor) executeManagedOpen(traceID, signalID string, plan *OpenPlan) (*store.CopyTradeContext, error) {
-	managedAdmission.Lock()
-	defer managedAdmission.Unlock()
 	m := x.ex.(types.ManagedOrderTrader)
 	rules, err := m.MarketRules(plan.Symbol)
 	if err != nil {
 		return nil, err
 	}
 	split := plan.SplitReference > 0
-	if split {
-		owners, err := x.st.CopyTrade().AccountContexts(x.traderID, plan.Symbol, string(plan.Direction))
-		if err != nil {
-			return nil, err
-		}
-		if len(owners) > 0 {
-			return nil, fmt.Errorf("split requires exclusive ownership of this account/symbol/direction")
-		}
-		pos, err := x.freshPosition(plan.Symbol, string(plan.Direction))
-		if err != nil {
-			return nil, err
-		}
-		if pos != nil && pos.qty > 0 {
-			return nil, fmt.Errorf("split refused: existing exchange position on this symbol/direction")
-		}
-	}
 	if err = x.ex.SetLeverage(plan.Symbol, plan.Leverage); err != nil {
 		return nil, fmt.Errorf("configured leverage rejected: %w", err)
 	}
@@ -245,7 +231,7 @@ func (x *Executor) executeManagedOpen(traceID, signalID string, plan *OpenPlan) 
 	}
 	state := managedEntryPlan{Version: 1, RiskBudget: plan.RiskBudget, StopLoss: plan.StopLoss, MaxNotional: plan.MaxNotional, MarginBudget: plan.AvailableMargin * .9, SignalExpiresAt: plan.SignalExpiresAt, Rules: *rules}
 	b, _ := json.Marshal(state)
-	ctx := &store.CopyTradeContext{ID: uuid.NewString(), TraderID: x.traderID, ChannelID: plan.ChannelID, RootMessageID: plan.RootMsgID, Symbol: plan.Symbol, RawSymbol: plan.RawSymbol, Direction: string(plan.Direction), State: string(StateEntryPending), ExecutionVersion: 1, EntryPolicy: policy, EntryPlanJSON: string(b), PlannedEntryPrice: plan.EntryPrice, StopLossPrice: plan.StopLoss, Leverage: plan.Leverage, TPRecipeJSON: planRecipeJSON(plan), EntryWorking: true}
+	ctx := &store.CopyTradeContext{ID: uuid.NewString(), ExchangeID: plan.ExchangeID, RulesSnapshotJSON: plan.RulesSnapshotJSON, EntrySignalID: signalID, RequestedStopLoss: plan.RequestedStopLoss, TraderID: x.traderID, ChannelID: plan.ChannelID, RootMessageID: plan.RootMsgID, Symbol: plan.Symbol, RawSymbol: plan.RawSymbol, Direction: string(plan.Direction), State: string(StateEntryPending), ExecutionVersion: 1, EntryPolicy: policy, EntryPlanJSON: string(b), PlannedEntryPrice: plan.EntryPrice, StopLossPrice: plan.StopLoss, Leverage: plan.Leverage, TPRecipeJSON: planRecipeJSON(plan), EntryWorking: true}
 	ctx.BreakevenAfterTP, ctx.BreakevenTPLevel = plan.BreakevenTPLevel > 0, plan.BreakevenTPLevel
 	if plan.EntryTimeout > 0 {
 		deadline := time.Now().UTC().Add(plan.EntryTimeout)
@@ -415,7 +401,11 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 	if err = x.settleManagedFills(ctx, orders); err != nil {
 		return err
 	}
-	if x.refreshTPProgress(traceID, ctx) || ctx.Quantity+1e-10 < oldQty {
+	advanced, err := x.refreshTPProgressChecked(traceID, ctx)
+	if err != nil {
+		return err
+	}
+	if advanced || ctx.Quantity+1e-10 < oldQty {
 		ctx.EntryDisabled = true
 	}
 	if ctx.BreakevenApplied || ctx.State == string(StateBreakeven) || (ctx.EntryDeadline != nil && !time.Now().Before(*ctx.EntryDeadline)) {
@@ -432,6 +422,9 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 	}
 	if ctx.Quantity > 0 {
 		if err = x.ensureStopProtection(traceID, "", ctx, ctx.Quantity); err != nil {
+			if errors.Is(err, ErrProtectionUnconfirmed) {
+				return err
+			}
 			_ = x.closeEntryEligibility(traceID, ctx, "PROTECTION_FAILED")
 			// A protected first leg is mandatory before any additional exposure.
 			_, closeErr := x.executeManagedClose(traceID, "emergency-"+ctx.ID, ctx, 100)
@@ -475,7 +468,9 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 				}
 				// Recovery may have submitted the first leg and its protections
 				// earlier in this same pass. Recheck exits before adding exposure.
-				x.refreshTPProgress(traceID, ctx)
+				if _, err = x.refreshTPProgressChecked(traceID, ctx); err != nil {
+					return err
+				}
 				for _, tp := range readTPPlan(ctx) {
 					if tp.Filled || tp.FilledQuantity > 0 || tp.PriorFilledQuantity > 0 {
 						if err = x.closeEntryEligibility(traceID, ctx, "TP_FILL"); err != nil {
@@ -507,10 +502,14 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 				if plan.MarginBudget > 0 {
 					want = math.Min(want, math.Max(0, plan.MarginBudget*float64(ctx.Leverage)-usedNotional)/o.Price)
 				}
+				_, available, balanceErr := readAccountBalances(x.ex)
+				if balanceErr != nil {
+					return balanceErr
+				}
+				want = math.Min(want, available*.9*float64(ctx.Leverage)/o.Price)
 				want, err = plan.Rules.FloorQuantity(want, false)
 				if err != nil || want*o.Price < plan.Rules.MinNotional {
-					_ = x.closeEntryEligibility(traceID, ctx, "SECOND_LEG_BELOW_MINIMUM")
-					return nil
+					return x.closeEntryEligibility(traceID, ctx, "SECOND_LEG_BELOW_MINIMUM")
 				}
 				if err = x.st.CopyTrade().UpdateOrder(o.ID, map[string]interface{}{"quantity": want}); err != nil {
 					return err
@@ -549,7 +548,9 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 		if ctx.EntryDeadline != nil && time.Now().After(*ctx.EntryDeadline) {
 			state = StateExpired
 		}
-		x.markContext(ctx, state, nil)
+		if err = x.markContext(ctx, state, nil); err != nil {
+			return err
+		}
 	}
 	if ctx.LastError != "" {
 		hasRejected := false
@@ -721,7 +722,9 @@ func (x *Executor) reconcileManagedClose(traceID string, ctx *store.CopyTradeCon
 		return fmt.Errorf("close fill pending: %s", row.Status)
 	}
 	if pos == nil || pos.qty <= 0 {
-		x.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
+		if err = x.finishTradeOrders(ctx); err != nil {
+			return err
+		}
 		now := time.Now().UTC()
 		return x.finalizeManagedExit(ctx, row.SignalID, map[string]interface{}{"state": string(StateClosed), "closed_at": &now, "quantity": 0, "close_pending_json": "", "last_action": "CLOSE"})
 	}
@@ -755,8 +758,8 @@ func (e *Engine) recoverPendingActions(ctx *store.CopyTradeContext) {
 		return
 	}
 	for _, a := range actions {
-		if TradeState(ctx.State).IsTerminal() {
-			return
+		if TradeState(ctx.State).IsTerminal() && a.Action != string(ActionCancel) && a.Action != string(ActionClose) && a.Action != string(ActionReduce) {
+			continue
 		}
 		var ins SourceInterpretation
 		if json.Unmarshal([]byte(a.PayloadJSON), &ins) != nil {
@@ -791,13 +794,31 @@ func (e *Engine) recoverPendingActions(ctx *store.CopyTradeContext) {
 			if !completed {
 				ratio := 100.0
 				if ins.Action == ActionReduce || ins.CloseMode == CloseModePartial {
-					ratio = 50
+					rules, rerr := e.rulesForSignal(a.SignalID)
+					if rerr != nil {
+						continue
+					}
+					ratio = rules.ReduceRatio
 					if ins.CloseRatio != nil {
 						ratio = *ins.CloseRatio
 					}
 				}
 				_, err = e.exec.ExecuteClose(trace, a.SignalID, ctx, ratio)
 			}
+		case ActionCancel:
+			if TradeState(ctx.State).IsTerminal() && !ctx.EntryWorking {
+				break
+			}
+			_, err = e.exec.ExecuteCancel(trace, a.SignalID, ctx)
+		case ActionUpdateTP:
+			if ctx.LastTPSignalID == a.SignalID && ctx.TPUpdateIntentJSON == "" {
+				break
+			}
+			if ctx.TPUpdateIntentJSON == "" {
+				continue
+			} // no durable prices: never infer an old target
+			_, err = e.exec.updateTakeProfits(trace, a.SignalID, ctx, nil, nil)
+
 		case ActionUpdateSL:
 			if len(ins.ConditionalRules) > 0 {
 				err = e.applyConditionalRules(trace, a.SignalID, a.MessageID, &ins, ctx)
@@ -820,6 +841,49 @@ func (e *Engine) recoverPendingActions(ctx *store.CopyTradeContext) {
 		}
 		if err == nil {
 			_ = e.st.CopyTrade().UpdateAction(a.ID, map[string]interface{}{"status": "done", "error": ""})
+		}
+	}
+}
+
+// Orphan intents have no exchange side effects if they never passed preflight.
+// Older ambiguous rows remain unresolved, with a diagnostic instead of a new order.
+func (e *Engine) recoverOrphanActions() {
+	actions, err := e.st.CopyTrade().UnresolvedActions(e.traderID)
+	if err != nil {
+		return
+	}
+	for _, a := range actions {
+		if a.ContextID != "" {
+			if c, cerr := e.st.CopyTrade().GetContext(a.ContextID); cerr == nil && c != nil && TradeState(c.State).IsTerminal() {
+				e.recoverPendingActions(c)
+			}
+			continue
+		}
+		orders, qerr := e.st.CopyTrade().GetOrdersForSignal(e.traderID, a.SignalID)
+		if qerr != nil {
+			continue
+		}
+		ids := map[string]bool{}
+		for _, o := range orders {
+			if o.Symbol == a.Symbol && o.Direction == a.Direction {
+				ids[o.ContextID] = true
+			}
+		}
+		if len(ids) == 1 {
+			for id := range ids {
+				if err = e.st.CopyTrade().UpdateAction(a.ID, map[string]interface{}{"context_id": id}); err == nil {
+					if c, cerr := e.st.CopyTrade().GetContext(id); cerr == nil && c != nil {
+						e.recoverPendingActions(c)
+					}
+				}
+			}
+			continue
+		}
+		if len(ids) == 0 && a.Phase == "preflight" {
+			_ = e.st.CopyTrade().UpdateAction(a.ID, map[string]interface{}{"status": "preflight_rejected", "error": "interrupted before durable execution intent"})
+		} else if a.Error != "orphan action outcome unresolved; manual audit required" {
+			_ = e.st.CopyTrade().UpdateAction(a.ID, map[string]interface{}{"error": "orphan action outcome unresolved; manual audit required"})
+			e.events.Warn("reconcile-action-"+a.ID, a.SignalID, a.MessageID, EvExecutionError, "orphan action outcome unresolved; manual audit required", nil)
 		}
 	}
 }

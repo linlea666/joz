@@ -10,7 +10,7 @@ import (
 
 // PromptVersion tags every AI run so output quality can be compared across
 // prompt iterations.
-const PromptVersion = "copytrade-v5"
+const PromptVersion = "copytrade-v6"
 
 // SystemPrompt is the fixed interpretation contract. It deliberately does NOT
 // ask the AI for quantities, leverage or risk decisions — those belong to the
@@ -93,6 +93,7 @@ Channels may mix English/Chinese/slang ("song it", "run it back turbo", "半仓"
 
 // PromptInput carries everything needed to build the user prompt.
 type PromptInput struct {
+	MessageRules MessageRules
 	// Current message
 	Message               *store.DiscordMessage
 	EmbedsText            string // flattened embeds
@@ -134,9 +135,11 @@ func BuildUserPrompt(in PromptInput) string {
 	for _, source := range sources {
 		fmt.Fprintf(&b, "--- source_id=%s role=%s timestamp=%s author=%s reason=%s ---\n%s\n--- end source ---\n", source.ID, source.Role, source.Timestamp, source.Author, source.Reason, source.Text)
 	}
+	fmt.Fprintf(&b, "effective_message_rules: %s\n", in.MessageRules.Snapshot())
+	b.WriteString("Explicit author meaning takes precedence. For an ambiguous 市价 A—B entry, use market_dual_price_mode: legacy=original interpretation, range=one RANGE entry, market_then_limit=MARKET reference A plus LIMIT B, reject=AMBIGUOUS. Never discard an entry leg. Author position percentages and leverage describe their sizing, not eligibility. Retain genuine conditions (heavy position, added position, after TP fill) on every applicable child action. Operator notes cannot override risk or source authority.\n")
 	fmt.Fprintf(&b, "interpretation_profile: %s\n", in.InterpretationProfile)
 	if in.InterpretationProfile == "tyler_v1" {
-		b.WriteString("TYLER: celebration / TP hit alone is IGNORE. Explicit discretionary partial profit (止盈或者减仓) is 50% remaining unless an explicit ratio is stated; full exit remains CLOSE. Retain all eligibility conditions.\n")
+		b.WriteString("TYLER: celebration / TP hit alone is IGNORE. Explicit discretionary partial profit (止盈或者减仓) uses default_reduce_ratio of the remaining position unless an explicit ratio is stated; full exit remains CLOSE. Retain all eligibility conditions.\n")
 	}
 	if in.ImageCount > 0 {
 		fmt.Fprintf(&b, "attached_images: %d (provided below if vision is enabled)\n", in.ImageCount)

@@ -767,7 +767,8 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 		quantity, _ := strconv.ParseFloat(order.OrigQuantity, 64)
 
 		result = append(result, types.OpenOrder{
-			OrderID:       fmt.Sprintf("%d", order.OrderID),
+			OrderID:  fmt.Sprintf("%d", order.OrderID),
+			ClientID: order.ClientOrderID, OrderKind: "NORMAL",
 			Symbol:        order.Symbol,
 			Side:          string(order.Side),
 			PositionSide:  string(order.PositionSide),
@@ -796,7 +797,8 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 		quantity, _ := strconv.ParseFloat(algoOrder.Quantity, 64)
 
 		result = append(result, types.OpenOrder{
-			OrderID:       fmt.Sprintf("%d", algoOrder.AlgoId),
+			OrderID:  fmt.Sprintf("%d", algoOrder.AlgoId),
+			ClientID: algoOrder.ClientAlgoId, OrderKind: "ALGO",
 			Symbol:        algoOrder.Symbol,
 			Side:          string(algoOrder.Side),
 			PositionSide:  string(algoOrder.PositionSide),
@@ -815,6 +817,10 @@ func (t *FuturesTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) 
 // SetStopLoss sets stop-loss order using new Algo Order API
 // Binance has migrated stop orders to Algo Order system (error -4120 STOP_ORDER_SWITCH_ALGO)
 func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
+	return t.SetManagedStopLoss(symbol, positionSide, quantity, stopPrice, getBrOrderID())
+}
+
+func (t *FuturesTrader) SetManagedStopLoss(symbol string, positionSide string, quantity, stopPrice float64, clientID string) error {
 	var side futures.SideType
 	var posSide futures.PositionSideType
 
@@ -846,11 +852,11 @@ func (t *FuturesTrader) SetStopLoss(symbol string, positionSide string, quantity
 		TriggerPrice(strconv.FormatFloat(normalizedPrice, 'f', -1, 64)).
 		WorkingType(futures.WorkingTypeContractPrice).
 		ClosePosition(true).
-		ClientAlgoId(getBrOrderID()).
+		ClientAlgoId(clientID).
 		Do(context.Background())
 
 	if err != nil {
-		return fmt.Errorf("failed to set stop-loss: %w", err)
+		return fmt.Errorf("failed to set stop-loss: %w", classifyManagedRejection(err))
 	}
 
 	logger.Infof("  Stop-loss price set (Algo Order): %.12g", normalizedPrice)
@@ -938,4 +944,18 @@ func (t *FuturesTrader) GetOrderStatus(symbol string, orderID string) (map[strin
 	result["commission"] = 0.0
 
 	return result, nil
+}
+
+// CancelStopOrder only cancels the exact protection identified by the caller.
+func (t *FuturesTrader) CancelStopOrder(symbol string, order types.OpenOrder) error {
+	id, err := strconv.ParseInt(order.OrderID, 10, 64)
+	if err != nil {
+		return err
+	}
+	if order.OrderKind == "ALGO" {
+		_, err = t.client.NewCancelAlgoOrderService().AlgoID(id).Do(context.Background())
+	} else {
+		_, err = t.client.NewCancelOrderService().Symbol(symbol).OrderID(id).Do(context.Background())
+	}
+	return err
 }

@@ -3,8 +3,10 @@ package copytrader
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // TraderType distinguishes the autonomous market-scan trader from the
@@ -31,6 +33,10 @@ const (
 const (
 	EntryPolicyLegacy = "legacy"
 	EntryPolicySplit  = "market_reference_split"
+	DualPriceLegacy   = "legacy"
+	DualPriceRange    = "range"
+	DualPriceSplit    = "market_then_limit"
+	DualPriceReject   = "reject"
 )
 
 // CopyTradingConfig is the per-trader copy-trading configuration.
@@ -46,6 +52,8 @@ type CopyTradingConfig struct {
 	ChannelNotes          string   `json:"channel_notes,omitempty"`     // free-text channel profile injected into the prompt
 	InterpretationProfile string   `json:"interpretation_profile,omitempty"`
 	EntryPolicy           string   `json:"entry_policy,omitempty"`
+	MarketDualPriceMode   string   `json:"market_dual_price_mode,omitempty"`
+	DefaultReduceRatio    *float64 `json:"default_reduce_ratio,omitempty"`
 
 	// AI parsing
 	ParseImages          bool `json:"parse_images"`
@@ -131,13 +139,32 @@ func (c *CopyTradingConfig) Encode() (string, error) {
 
 // Validate checks the configuration for a copy-trading trader.
 func (c *CopyTradingConfig) Validate() error {
+	switch c.MarketDualPriceMode {
+	case "", DualPriceLegacy, DualPriceRange, DualPriceSplit, DualPriceReject:
+	default:
+		return fmt.Errorf("unknown market_dual_price_mode %q", c.MarketDualPriceMode)
+	}
+	if c.DefaultReduceRatio != nil && (!finite(*c.DefaultReduceRatio) || *c.DefaultReduceRatio <= 0 || *c.DefaultReduceRatio > 100) {
+		return fmt.Errorf("default_reduce_ratio must be within (0,100]")
+	}
+	if c.EntryTimeoutMinutes < 0 || int64(c.EntryTimeoutMinutes) > math.MaxInt64/int64(time.Minute) || c.OpenSignalTTLSeconds < 0 || int64(c.OpenSignalTTLSeconds) > math.MaxInt64/int64(time.Second) || c.MgmtSignalTTLSeconds < 0 || int64(c.MgmtSignalTTLSeconds) > math.MaxInt64/int64(time.Second) {
+		return fmt.Errorf("timeouts must be nonnegative and fit a time.Duration")
+	}
+	for _, v := range []float64{c.RiskAmountUSD, c.MaxPositionNotionalUSD, c.MajorPriceOffsetPct, c.AltcoinPriceOffsetPct} {
+		if !finite(v) || v < 0 {
+			return fmt.Errorf("risk and price settings must be finite and nonnegative")
+		}
+	}
+	if len(c.SourceChannelIDs) > 0 || c.ReasoningEffort != "" {
+		return fmt.Errorf("source_channel_ids and reasoning_effort are reserved and not supported")
+	}
 	if c.InterpretationProfile != "" && c.InterpretationProfile != "default" && c.InterpretationProfile != "tyler_v1" {
 		return fmt.Errorf("unknown interpretation_profile %q", c.InterpretationProfile)
 	}
 	if c.EntryPolicy != "" && c.EntryPolicy != EntryPolicyLegacy && c.EntryPolicy != EntryPolicySplit {
 		return fmt.Errorf("unknown entry_policy %q", c.EntryPolicy)
 	}
-	if c.EntryPolicy == EntryPolicySplit && c.RiskMode != RiskModeByLoss {
+	if (c.EntryPolicy == EntryPolicySplit || c.MarketDualPriceMode == DualPriceSplit) && c.RiskMode != RiskModeByLoss {
 		return fmt.Errorf("market_reference_split requires by_loss risk mode")
 	}
 	if strings.TrimSpace(c.PrimaryChannelID) == "" {
@@ -183,7 +210,7 @@ func (c *CopyTradingConfig) ValidateExchange(exchangeType string) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	if c.EntryPolicy == EntryPolicySplit && strings.ToLower(exchangeType) != "binance" {
+	if (c.EntryPolicy == EntryPolicySplit || c.MarketDualPriceMode == DualPriceSplit) && strings.ToLower(exchangeType) != "binance" {
 		return fmt.Errorf("market_reference_split currently supports Binance only")
 	}
 	return nil
@@ -224,7 +251,7 @@ func ParseTPRatios(s string) ([]float64, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid TP ratio %q", p)
 		}
-		if v <= 0 || v > 100 {
+		if !finite(v) || v <= 0 || v > 100 {
 			return nil, fmt.Errorf("TP ratio %v out of range (0, 100]", v)
 		}
 		ratios = append(ratios, v)
@@ -234,4 +261,13 @@ func ParseTPRatios(s string) ([]float64, error) {
 		return nil, fmt.Errorf("TP ratios sum to %.2f, must not exceed 100", total)
 	}
 	return ratios, nil
+}
+
+func finite(v float64) bool { return !math.IsNaN(v) && !math.IsInf(v, 0) }
+
+func (c *CopyTradingConfig) ReduceRatio() float64 {
+	if c.DefaultReduceRatio != nil {
+		return *c.DefaultReduceRatio
+	}
+	return 50
 }

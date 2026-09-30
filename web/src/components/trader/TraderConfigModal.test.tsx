@@ -91,6 +91,38 @@ describe('copy-trading opt-in settings', () => {
     })
   })
 
+  it('saves independent message rules without changing risk or the original split policy', async () => {
+    const save = setup()
+    const dual = screen.getByLabelText('市价 A—B 的双价格语义')
+    const reduce = screen.getByLabelText('明确减仓但未注明比例（剩余仓位 %）')
+    expect(dual).toHaveValue('legacy')
+    expect(reduce).toHaveValue(50)
+    fireEvent.change(dual, { target: { value: 'market_then_limit' } })
+    fireEvent.change(reduce, { target: { value: '25' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(JSON.parse(save.mock.calls[0][0].copy_trading_config)).toMatchObject(
+      {
+        market_dual_price_mode: 'market_then_limit',
+        default_reduce_ratio: 25,
+        entry_policy: 'legacy',
+        risk_amount_usd: 15,
+      }
+    )
+  })
+
+  it.each(['0', '-1', '101'])(
+    'rejects an invalid default reduction %s',
+    (value) => {
+      setup()
+      fireEvent.change(
+        screen.getByLabelText('明确减仓但未注明比例（剩余仓位 %）'),
+        { target: { value } }
+      )
+      expect(screen.getByRole('button', { name: '保存修改' })).toBeDisabled()
+    }
+  )
+
   it.each([30, 0])('saves an explicit entry lifetime of %i minutes', async (minutes) => {
     const save = setup()
     const timeout = screen.getByLabelText('未成交挂单有效期（分钟）')

@@ -19,17 +19,17 @@ func NewTraderStore(db *gorm.DB) *TraderStore {
 
 // Trader trader configuration
 type Trader struct {
-	ID                  string    `gorm:"primaryKey" json:"id"`
-	UserID              string    `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
-	Name                string    `gorm:"column:name;not null" json:"name"`
-	AIModelID           string    `gorm:"column:ai_model_id;not null" json:"ai_model_id"`
-	ExchangeID          string    `gorm:"column:exchange_id;not null" json:"exchange_id"`
-	StrategyID          string    `gorm:"column:strategy_id;default:''" json:"strategy_id"`
-	InitialBalance      float64   `gorm:"column:initial_balance;not null" json:"initial_balance"`
-	ScanIntervalMinutes int       `gorm:"column:scan_interval_minutes;default:15" json:"scan_interval_minutes"`
-	IsRunning           bool      `gorm:"column:is_running;default:false" json:"is_running"`
-	IsCrossMargin       bool      `gorm:"column:is_cross_margin;default:true" json:"is_cross_margin"`
-	ShowInCompetition   bool      `gorm:"column:show_in_competition;default:true" json:"show_in_competition"`
+	ID                  string  `gorm:"primaryKey" json:"id"`
+	UserID              string  `gorm:"column:user_id;not null;default:default;index" json:"user_id"`
+	Name                string  `gorm:"column:name;not null" json:"name"`
+	AIModelID           string  `gorm:"column:ai_model_id;not null" json:"ai_model_id"`
+	ExchangeID          string  `gorm:"column:exchange_id;not null" json:"exchange_id"`
+	StrategyID          string  `gorm:"column:strategy_id;default:''" json:"strategy_id"`
+	InitialBalance      float64 `gorm:"column:initial_balance;not null" json:"initial_balance"`
+	ScanIntervalMinutes int     `gorm:"column:scan_interval_minutes;default:15" json:"scan_interval_minutes"`
+	IsRunning           bool    `gorm:"column:is_running;default:false" json:"is_running"`
+	IsCrossMargin       bool    `gorm:"column:is_cross_margin;default:true" json:"is_cross_margin"`
+	ShowInCompetition   bool    `gorm:"column:show_in_competition;default:true" json:"show_in_competition"`
 	// TraderType: "ai_scan" (autonomous market scan, default) or "copy_trading"
 	// (Discord channel following). The two modes are mutually exclusive.
 	TraderType string `gorm:"column:trader_type;default:ai_scan" json:"trader_type"`
@@ -164,9 +164,25 @@ func (s *TraderStore) Update(trader *Trader) error {
 		fmt.Printf("⚠️ TraderStore.Update: scan_interval_minutes=%d (<=0, NOT updating)\n", trader.ScanIntervalMinutes)
 	}
 
-	return s.db.Model(&Trader{}).
-		Where("id = ? AND user_id = ?", trader.ID, trader.UserID).
-		Updates(updates).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var existing Trader
+		if err := tx.First(&existing, "id = ? AND user_id = ?", trader.ID, trader.UserID).Error; err != nil {
+			return err
+		}
+		if existing.ExchangeID != trader.ExchangeID && tx.Migrator().HasTable(&CopyTradeAccountFence{}) {
+			if err := lockCopyTradeAccount(tx, existing.ExchangeID); err != nil {
+				return err
+			}
+			busy, err := NewCopyTradeStore(tx).AccountBusy(existing.ExchangeID)
+			if err != nil {
+				return err
+			}
+			if busy {
+				return fmt.Errorf("active copy trades or unresolved actions prevent changing account binding")
+			}
+		}
+		return tx.Model(&Trader{}).Where("id = ? AND user_id = ?", trader.ID, trader.UserID).Updates(updates).Error
+	})
 }
 
 // UpdateInitialBalance updates initial balance
@@ -188,11 +204,34 @@ func (s *TraderStore) UpdateCustomPrompt(userID, id string, customPrompt string,
 
 // Delete deletes trader and associated data
 func (s *TraderStore) Delete(userID, id string) error {
-	// Delete associated equity snapshots first
-	s.db.Where("trader_id = ?", id).Delete(&EquitySnapshot{})
-
-	// Delete the trader
-	return s.db.Where("id = ? AND user_id = ?", id, userID).Delete(&Trader{}).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var current Trader
+		if err := tx.First(&current, "id = ? AND user_id = ?", id, userID).Error; err != nil {
+			return err
+		}
+		if tx.Migrator().HasTable(&CopyTradeAccountFence{}) {
+			if err := lockCopyTradeAccount(tx, current.ExchangeID); err != nil {
+				return err
+			}
+			var count int64
+			if err := tx.Model(&CopyTradeContext{}).Where("trader_id = ? AND (state IN ? OR entry_working = ? OR stop_intent_json <> '' OR tp_update_intent_json <> '')", id, activeStates, true).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return fmt.Errorf("active copy trades prevent deleting their trader")
+			}
+			if err := tx.Model(&CopyTradeAction{}).Where("trader_id = ? AND status IN ?", id, []string{"executing", "uncertain"}).Count(&count).Error; err != nil {
+				return err
+			}
+			if count > 0 {
+				return fmt.Errorf("unresolved copy actions prevent deleting their trader")
+			}
+		}
+		if err := tx.Where("trader_id = ?", id).Delete(&EquitySnapshot{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ? AND user_id = ?", id, userID).Delete(&Trader{}).Error
+	})
 }
 
 // GetFullConfig gets trader full configuration

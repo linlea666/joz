@@ -3,6 +3,7 @@ package okx
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"nofx/logger"
 	"nofx/trader/types"
 	"strconv"
@@ -410,6 +411,10 @@ func (t *OKXTrader) CloseShort(symbol string, quantity float64) (map[string]inte
 
 // SetStopLoss sets stop loss order
 func (t *OKXTrader) SetStopLoss(symbol string, positionSide string, quantity, stopPrice float64) error {
+	return t.SetManagedStopLoss(symbol, positionSide, quantity, stopPrice, genOkxClOrdID())
+}
+
+func (t *OKXTrader) SetManagedStopLoss(symbol string, positionSide string, quantity, stopPrice float64, clientID string) error {
 	instId := t.convertSymbol(symbol)
 
 	// Get instrument info
@@ -418,6 +423,14 @@ func (t *OKXTrader) SetStopLoss(symbol string, positionSide string, quantity, st
 		return fmt.Errorf("failed to get instrument info: %w", err)
 	}
 
+	rules, err := t.MarketRules(symbol)
+	if err != nil {
+		return err
+	}
+	stopPrice, err = rules.NormalizePrice(stopPrice)
+	if err != nil {
+		return err
+	}
 	// Calculate contract size: quantity (in base asset) / ctVal (asset per contract)
 	sz := quantity / inst.CtVal
 	szStr := t.formatSize(sz, inst)
@@ -442,13 +455,31 @@ func (t *OKXTrader) SetStopLoss(symbol string, positionSide string, quantity, st
 		"slTriggerPx": fmt.Sprintf("%.8f", stopPrice),
 		"slOrdPx":     "-1", // Market price
 		"tag":         okxTag,
+		"algoClOrdId": clientID,
 	}
 
-	_, err = t.doRequest("POST", okxAlgoOrderPath, body)
+	data, err := t.doRequest("POST", okxAlgoOrderPath, body)
 	if err != nil {
 		return fmt.Errorf("failed to set stop loss: %w", err)
 	}
 
+	var replies []struct {
+		SCode  string `json:"sCode"`
+		SMsg   string `json:"sMsg"`
+		AlgoID string `json:"algoId"`
+	}
+	if err = json.Unmarshal(data, &replies); err != nil {
+		return err
+	}
+	if len(replies) != 1 {
+		return fmt.Errorf("missing stop acknowledgement")
+	}
+	if replies[0].SCode != "0" && replies[0].SCode != "" {
+		return fmt.Errorf("%w: %s %s", types.ErrManagedOrderRejected, replies[0].SCode, replies[0].SMsg)
+	}
+	if replies[0].AlgoID == "" {
+		return fmt.Errorf("missing stop order identity")
+	}
 	logger.Infof("  Stop loss price set: %.4f", stopPrice)
 	return nil
 }
@@ -793,17 +824,22 @@ func (t *OKXTrader) GetOrderStatus(symbol string, orderID string) (map[string]in
 // GetOpenOrders gets all open/pending orders for a symbol
 func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 	instId := t.convertSymbol(symbol)
+	inst, err := t.getInstrument(symbol)
+	if err != nil || inst == nil || inst.CtVal <= 0 {
+		return nil, fmt.Errorf("instrument units unavailable: %v", err)
+	}
 	var result []types.OpenOrder
 
 	// 1. Get pending limit orders
 	path := fmt.Sprintf("%s?instId=%s&instType=SWAP", okxPendingOrdersPath, instId)
 	data, err := t.doRequest("GET", path, nil)
 	if err != nil {
-		logger.Warnf("[OKX] Failed to get pending orders: %v", err)
+		return nil, fmt.Errorf("pending order lookup: %w", err)
 	}
 	if err == nil && data != nil {
 		var orders []struct {
 			OrdId   string `json:"ordId"`
+			ClOrdID string `json:"clOrdId"`
 			InstId  string `json:"instId"`
 			Side    string `json:"side"`    // buy/sell
 			PosSide string `json:"posSide"` // long/short/net
@@ -812,10 +848,16 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 			Sz      string `json:"sz"`      // size
 			State   string `json:"state"`   // live/partially_filled
 		}
-		if err := json.Unmarshal(data, &orders); err == nil {
+		if err := json.Unmarshal(data, &orders); err != nil {
+			return nil, fmt.Errorf("decode pending orders: %w", err)
+		} else {
 			for _, order := range orders {
 				price, _ := strconv.ParseFloat(order.Px, 64)
-				quantity, _ := strconv.ParseFloat(order.Sz, 64)
+				contracts, err := strconv.ParseFloat(order.Sz, 64)
+				if err != nil || contracts < 0 || math.IsNaN(contracts) || math.IsInf(contracts, 0) {
+					return nil, fmt.Errorf("invalid order quantity %q", order.Sz)
+				}
+				quantity := types.SanitizeBaseQuantity(contracts * inst.CtVal)
 
 				// Convert OKX side to standard format
 				side := strings.ToUpper(order.Side)
@@ -825,7 +867,8 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 				}
 
 				result = append(result, types.OpenOrder{
-					OrderID:      order.OrdId,
+					OrderID:  order.OrdId,
+					ClientID: order.ClOrdID, OrderKind: "NORMAL",
 					Symbol:       symbol,
 					Side:         side,
 					PositionSide: positionSide,
@@ -844,24 +887,35 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 	algoPath := fmt.Sprintf("%s?instId=%s&instType=SWAP&ordType=conditional", okxAlgoPendingPath, instId)
 	algoData, err := t.doRequest("GET", algoPath, nil)
 	if err != nil {
-		logger.Warnf("[OKX] Failed to get algo orders: %v", err)
+		return nil, fmt.Errorf("algo order lookup: %w", err)
 	}
 	if err == nil && algoData != nil {
 		var algoOrders []struct {
-			AlgoId      string `json:"algoId"`
-			InstId      string `json:"instId"`
-			Side        string `json:"side"`
-			PosSide     string `json:"posSide"`
-			OrdType     string `json:"ordType"` // conditional/oco/trigger
-			TriggerPx   string `json:"triggerPx"`
-			SlTriggerPx string `json:"slTriggerPx"` // Stop loss trigger price
-			TpTriggerPx string `json:"tpTriggerPx"` // Take profit trigger price
-			Sz          string `json:"sz"`
-			State       string `json:"state"`
+			AlgoId        string `json:"algoId"`
+			AlgoClOrdID   string `json:"algoClOrdId"`
+			CloseFraction string `json:"closeFraction"`
+			InstId        string `json:"instId"`
+			Side          string `json:"side"`
+			PosSide       string `json:"posSide"`
+			OrdType       string `json:"ordType"` // conditional/oco/trigger
+			TriggerPx     string `json:"triggerPx"`
+			SlTriggerPx   string `json:"slTriggerPx"` // Stop loss trigger price
+			TpTriggerPx   string `json:"tpTriggerPx"` // Take profit trigger price
+			Sz            string `json:"sz"`
+			State         string `json:"state"`
 		}
-		if err := json.Unmarshal(algoData, &algoOrders); err == nil {
+		if err := json.Unmarshal(algoData, &algoOrders); err != nil {
+			return nil, fmt.Errorf("decode algo orders: %w", err)
+		} else {
 			for _, order := range algoOrders {
-				quantity, _ := strconv.ParseFloat(order.Sz, 64)
+				contracts, err := strconv.ParseFloat(order.Sz, 64)
+				if order.CloseFraction == "1" {
+					contracts, err = 0, nil
+				}
+				if err != nil || contracts < 0 || math.IsNaN(contracts) || math.IsInf(contracts, 0) {
+					return nil, fmt.Errorf("invalid order quantity %q", order.Sz)
+				}
+				quantity := types.SanitizeBaseQuantity(contracts * inst.CtVal)
 
 				side := strings.ToUpper(order.Side)
 				positionSide := strings.ToUpper(order.PosSide)
@@ -874,7 +928,8 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 					slPrice, _ := strconv.ParseFloat(order.SlTriggerPx, 64)
 					if slPrice > 0 {
 						result = append(result, types.OpenOrder{
-							OrderID:      order.AlgoId + "_sl",
+							OrderID:  order.AlgoId + "_sl",
+							ClientID: order.AlgoClOrdID, OrderKind: "ALGO", ClosePosition: order.CloseFraction == "1",
 							Symbol:       symbol,
 							Side:         side,
 							PositionSide: positionSide,
@@ -892,7 +947,8 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 					tpPrice, _ := strconv.ParseFloat(order.TpTriggerPx, 64)
 					if tpPrice > 0 {
 						result = append(result, types.OpenOrder{
-							OrderID:      order.AlgoId + "_tp",
+							OrderID:  order.AlgoId + "_tp",
+							ClientID: order.AlgoClOrdID, OrderKind: "ALGO", ClosePosition: order.CloseFraction == "1",
 							Symbol:       symbol,
 							Side:         side,
 							PositionSide: positionSide,
@@ -910,7 +966,8 @@ func (t *OKXTrader) GetOpenOrders(symbol string) ([]types.OpenOrder, error) {
 					triggerPrice, _ := strconv.ParseFloat(order.TriggerPx, 64)
 					if triggerPrice > 0 {
 						result = append(result, types.OpenOrder{
-							OrderID:      order.AlgoId,
+							OrderID:  order.AlgoId,
+							ClientID: order.AlgoClOrdID, OrderKind: "ALGO", ClosePosition: order.CloseFraction == "1",
 							Symbol:       symbol,
 							Side:         side,
 							PositionSide: positionSide,
@@ -1098,4 +1155,26 @@ func (t *OKXTrader) GetOrderBook(symbol string, depth int) (bids, asks [][]float
 	}
 
 	return bids, asks, nil
+}
+
+func (t *OKXTrader) CancelStopOrder(symbol string, order types.OpenOrder) error {
+	if order.OrderKind != "ALGO" {
+		return t.CancelOrder(symbol, order.OrderID)
+	}
+	id := strings.TrimSuffix(strings.TrimSuffix(order.OrderID, "_sl"), "_tp")
+	data, err := t.doRequest("POST", "/api/v5/trade/cancel-algos", []map[string]string{{"instId": t.convertSymbol(symbol), "algoId": id}})
+	if err != nil {
+		return err
+	}
+	var rows []struct {
+		SCode string `json:"sCode"`
+		SMsg  string `json:"sMsg"`
+	}
+	if err = json.Unmarshal(data, &rows); err != nil {
+		return err
+	}
+	if len(rows) != 1 || rows[0].SCode != "0" {
+		return fmt.Errorf("stop cancellation not confirmed: %s", string(data))
+	}
+	return nil
 }

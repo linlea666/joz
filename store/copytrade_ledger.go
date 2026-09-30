@@ -13,19 +13,21 @@ import (
 // CopyTradeAction is a durable intent. Its ID is semantic, not an instruction
 // array index or message revision, so editing a recap cannot reduce twice.
 type CopyTradeAction struct {
-	ID          string    `gorm:"primaryKey" json:"id"`
-	TraderID    string    `gorm:"index;not null" json:"trader_id"`
-	SignalID    string    `gorm:"index" json:"signal_id"`
-	MessageID   string    `gorm:"index" json:"message_id"`
-	ContextID   string    `gorm:"index" json:"context_id"`
-	Symbol      string    `json:"symbol"`
-	Direction   string    `json:"direction"`
-	Action      string    `json:"action"`
-	Status      string    `gorm:"index" json:"status"`
-	PayloadJSON string    `json:"payload_json"`
-	Error       string    `json:"error,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	MessageRevision int       `gorm:"default:0" json:"message_revision"`
+	Phase           string    `gorm:"default:''" json:"phase,omitempty"`
+	ID              string    `gorm:"primaryKey" json:"id"`
+	TraderID        string    `gorm:"index;not null" json:"trader_id"`
+	SignalID        string    `gorm:"index" json:"signal_id"`
+	MessageID       string    `gorm:"index" json:"message_id"`
+	ContextID       string    `gorm:"index" json:"context_id"`
+	Symbol          string    `json:"symbol"`
+	Direction       string    `json:"direction"`
+	Action          string    `json:"action"`
+	Status          string    `gorm:"index" json:"status"`
+	PayloadJSON     string    `json:"payload_json"`
+	Error           string    `json:"error,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 func (CopyTradeAction) TableName() string { return "copytrade_actions" }
@@ -94,6 +96,9 @@ func (s *CopyTradeStore) GetOrdersForSignal(traderID, signalID string) ([]*CopyT
 
 func (s *CopyTradeStore) CreateManagedPlan(ctx *CopyTradeContext, orders []*CopyTradeOrder) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := claimCopyTradeOwnership(tx, ctx); err != nil {
+			return err
+		}
 		if err := tx.Create(ctx).Error; err != nil {
 			return err
 		}
@@ -131,8 +136,8 @@ func (s *CopyTradeStore) DueRetries(traderID string, now time.Time) ([]*CopyTrad
 func (s *CopyTradeStore) AccountContexts(traderID, symbol, direction string) ([]*CopyTradeContext, error) {
 	var rows []*CopyTradeContext
 	err := s.db.Table("copytrade_trade_contexts AS c").Select("c.*").
-		Joins("JOIN traders AS t ON t.id = c.trader_id").
-		Where("t.exchange_id = (SELECT exchange_id FROM traders WHERE id = ?) AND c.symbol = ? AND c.direction = ? AND c.state IN ?", traderID, symbol, direction, activeStates).
+		Joins("LEFT JOIN traders AS t ON t.id = c.trader_id").
+		Where("COALESCE(NULLIF(c.exchange_id, ''), t.exchange_id) = (SELECT exchange_id FROM traders WHERE id = ?) AND c.symbol = ? AND c.direction = ? AND c.state IN ?", traderID, symbol, direction, activeStates).
 		Find(&rows).Error
 	return rows, err
 }
@@ -271,5 +276,11 @@ func (s *CopyTradeStore) attachExecutionViews(traderID string, views []*CopyTrad
 func (s *CopyTradeStore) PendingActions(traderID, contextID string) ([]*CopyTradeAction, error) {
 	var rows []*CopyTradeAction
 	err := s.db.Where("trader_id = ? AND context_id = ? AND status IN ?", traderID, contextID, []string{"executing", "uncertain"}).Order("created_at ASC").Find(&rows).Error
+	return rows, err
+}
+
+func (s *CopyTradeStore) UnresolvedActions(traderID string) ([]*CopyTradeAction, error) {
+	var rows []*CopyTradeAction
+	err := s.db.Where("trader_id = ? AND status IN ?", traderID, []string{"executing", "uncertain"}).Order("created_at ASC").Find(&rows).Error
 	return rows, err
 }

@@ -25,9 +25,9 @@ const (
 	ReplayAborted = "aborted"
 )
 
-// Replay verdict values (what the live pipeline WOULD have done).
+// Recognition verdicts only. EXECUTE is retained as a wire-compatibility value.
 const (
-	VerdictExecute = "EXECUTE" // would enter the execution path
+	VerdictExecute = "EXECUTE" // recognition gates passed; execution gates are not simulated
 	VerdictSkip    = "SKIP"    // classified but skipped by a gate
 	VerdictInvalid = "INVALID" // interpretation rejected by validation
 	VerdictError   = "ERROR"   // LLM call or parse failed
@@ -35,31 +35,33 @@ const (
 
 // ReplayItem is the dry-run interpretation result of one stored message.
 type ReplayItem struct {
-	MessageID      string    `json:"message_id"`
-	Timestamp      time.Time `json:"timestamp"`
-	Author         string    `json:"author"`
-	Excerpt        string    `json:"excerpt"`
-	ImageCount     int       `json:"image_count"` // image attachments on the message
-	ImagesSent     int       `json:"images_sent"` // actually downloaded & sent to the LLM
-	LLMMs          int64     `json:"llm_ms"`
-	Classification string    `json:"classification,omitempty"`
-	Action         string    `json:"action,omitempty"`
-	Symbol         string    `json:"symbol,omitempty"`
-	Canonical      string    `json:"canonical,omitempty"`
-	Direction      string    `json:"direction,omitempty"`
-	Entries        string    `json:"entries,omitempty"`
-	StopLoss       string    `json:"stop_loss,omitempty"`
-	TakeProfits    string    `json:"take_profits,omitempty"`
-	Verdict        string    `json:"verdict"`
-	VerdictDetail  string    `json:"verdict_detail,omitempty"`
-	Reasoning      string    `json:"reasoning,omitempty"`
-	Warnings       []string  `json:"warnings,omitempty"`
-	Error          string    `json:"error,omitempty"`
-	ImageError     string    `json:"image_error,omitempty"`
-	SystemPrompt   string    `json:"system_prompt,omitempty"`
-	UserPrompt     string    `json:"user_prompt,omitempty"`
-	RawResponse    string    `json:"raw_response,omitempty"`
-	ParsedJSON     string    `json:"parsed_json,omitempty"`
+	EvaluationScope string    `json:"evaluation_scope"`
+	UncheckedGates  []string  `json:"unchecked_gates"`
+	MessageID       string    `json:"message_id"`
+	Timestamp       time.Time `json:"timestamp"`
+	Author          string    `json:"author"`
+	Excerpt         string    `json:"excerpt"`
+	ImageCount      int       `json:"image_count"` // image attachments on the message
+	ImagesSent      int       `json:"images_sent"` // actually downloaded & sent to the LLM
+	LLMMs           int64     `json:"llm_ms"`
+	Classification  string    `json:"classification,omitempty"`
+	Action          string    `json:"action,omitempty"`
+	Symbol          string    `json:"symbol,omitempty"`
+	Canonical       string    `json:"canonical,omitempty"`
+	Direction       string    `json:"direction,omitempty"`
+	Entries         string    `json:"entries,omitempty"`
+	StopLoss        string    `json:"stop_loss,omitempty"`
+	TakeProfits     string    `json:"take_profits,omitempty"`
+	Verdict         string    `json:"verdict"`
+	VerdictDetail   string    `json:"verdict_detail,omitempty"`
+	Reasoning       string    `json:"reasoning,omitempty"`
+	Warnings        []string  `json:"warnings,omitempty"`
+	Error           string    `json:"error,omitempty"`
+	ImageError      string    `json:"image_error,omitempty"`
+	SystemPrompt    string    `json:"system_prompt,omitempty"`
+	UserPrompt      string    `json:"user_prompt,omitempty"`
+	RawResponse     string    `json:"raw_response,omitempty"`
+	ParsedJSON      string    `json:"parsed_json,omitempty"`
 }
 
 // ReplayReport is the full state of one replay run. The engine keeps a live
@@ -267,10 +269,12 @@ func replayReportFromStore(replay *store.CopyTradeReplay, items []*store.CopyTra
 // but never executes and never persists.
 func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 	item := ReplayItem{
-		MessageID: msg.MessageID,
-		Timestamp: msg.MessageTimestamp,
-		Author:    msg.AuthorName,
-		Excerpt:   excerpt(msg.Content, 160),
+		EvaluationScope: "current_rules_context_and_prices; historical execution state unavailable",
+		UncheckedGates:  []string{"account_ownership", "balance", "contract_capability", "order_limits", "ttl", "live_execution"},
+		MessageID:       msg.MessageID,
+		Timestamp:       msg.MessageTimestamp,
+		Author:          msg.AuthorName,
+		Excerpt:         excerpt(msg.Content, 160),
 	}
 	for _, media := range MediaSources(msg, e.messageSources(msg)) {
 		if media.Role == "current" {

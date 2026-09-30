@@ -47,6 +47,21 @@ func (e *Engine) reconcileLoop() {
 }
 
 func (e *Engine) reconcileOnce() {
+	e.recoverOrphanActions()
+	if terminal, err := e.st.CopyTrade().TerminalPendingContexts(e.traderID); err == nil {
+		bound, bindErr := e.st.CopyTrade().TraderExchangeID(e.traderID)
+		if bindErr == nil {
+			for _, c := range terminal {
+				if c.ExchangeID != "" && c.ExchangeID != bound {
+					continue
+				}
+				if err = e.exec.finishTradeOrders(c); err != nil && c.LastError != err.Error() {
+					e.exec.updateContext(c, map[string]interface{}{"last_error": err.Error()})
+					e.events.Warn("reconcile-"+c.ID, "", "", EvExecutionError, err.Error(), nil)
+				}
+			}
+		}
+	}
 	ctxs, err := e.st.CopyTrade().GetActiveContexts(e.traderID)
 	if err != nil {
 		return
@@ -56,6 +71,22 @@ func (e *Engine) reconcileOnce() {
 		return
 	}
 	for _, ctx := range ctxs {
+		bound, bindErr := e.st.CopyTrade().TraderExchangeID(e.traderID)
+		if bindErr != nil || (ctx.ExchangeID != "" && ctx.ExchangeID != bound) {
+			e.events.Error("reconcile-"+ctx.ID, "", "", EvExecutionError, "frozen exchange binding mismatch; recovery blocked", nil)
+			continue
+		}
+		if ctx.ExchangeID == "" {
+			if err := e.exec.persistContext(ctx, map[string]interface{}{"exchange_id": bound}); err != nil {
+				continue
+			}
+		}
+		if ctx.TPUpdateIntentJSON != "" {
+			if _, err := e.exec.updateTakeProfits("reconcile-"+ctx.ID, "", ctx, nil, nil); err != nil {
+				e.events.Warn("reconcile-"+ctx.ID, "", "", EvExecutionError, err.Error(), nil)
+				continue
+			}
+		}
 		e.recoverPendingActions(ctx)
 		if TradeState(ctx.State).IsTerminal() {
 			continue
@@ -91,7 +122,7 @@ func (e *Engine) reconcileOnce() {
 			e.reconcileClosePending(ctx)
 		case StateNew:
 			// NEW older than 10 minutes means the open saga crashed mid-way.
-			if time.Since(ctx.CreatedAt) > 10*time.Minute {
+			if time.Since(ctx.CreatedAt) > 10*time.Minute && ctx.LastAction != "ENTRY_SUBMITTING" {
 				e.exec.markContext(ctx, StateInvalid, map[string]interface{}{
 					"last_error": "stale NEW context (open saga did not complete)",
 				})
@@ -212,8 +243,13 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 			return
 		}
 		// Position gone: SL hit, TP ladder completed, or closed manually.
-		e.exec.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
-		e.exec.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "RECONCILE_CLOSED"})
+		if err := e.exec.finishTradeOrders(ctx); err != nil {
+			e.events.Warn(traceID, "", "", EvExecutionError, err.Error(), nil)
+			return
+		}
+		if err := e.exec.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "RECONCILE_CLOSED"}); err != nil {
+			return
+		}
 		e.events.Info(traceID, "", "", EvTradeClosed,
 			fmt.Sprintf("%s position no longer on exchange (SL/TP hit or manual close); trade closed", ctx.Symbol), nil)
 		// Keep watching for a few cycles: if the position reappears the close
@@ -287,33 +323,22 @@ func (e *Engine) applyBreakeven(traceID string, ctx *store.CopyTradeContext, qty
 	if tighterStop(ctx.Direction, ctx.StopLossPrice, entry) {
 		entry = ctx.StopLossPrice
 	}
-	if err := e.exec.cancelStopLossOrders(ctx.Symbol, ctx.Direction); err != nil {
-		e.events.Warn(traceID, "", "", EvExecutionError, fmt.Sprintf("breakeven: cancel old SL failed: %v", err), nil)
-	}
-	if err := e.exec.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), qty, entry); err != nil {
-		e.events.Error(traceID, "", "", EvExecutionError,
-			fmt.Sprintf("breakeven SL failed (will retry next cycle): %v", err), nil)
-		// The old SL may already be cancelled: restore protection at the
-		// previous price so the position is not naked until the retry.
-		if ctx.StopLossPrice > 0 && ctx.StopLossPrice != entry {
-			if rerr := e.exec.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), qty, ctx.StopLossPrice); rerr != nil {
-				e.events.Error(traceID, "", "", EvExecutionError,
-					fmt.Sprintf("breakeven: restore previous SL @ %.8g also failed (SL guard will retry): %v", ctx.StopLossPrice, rerr), nil)
-			}
-		}
+	if err := e.exec.setStopProtection(traceID, "", ctx, qty, entry); err != nil {
+		e.events.Error(traceID, "", "", EvExecutionError, err.Error(), nil)
 		return
 	}
+	entry = ctx.StopLossPrice
+
 	updates := map[string]interface{}{
 		"stop_loss_price":   entry,
 		"breakeven_applied": true,
 	}
 	if CanTransition(TradeState(ctx.State), StateBreakeven) {
 		updates["state"] = string(StateBreakeven)
-		ctx.State = string(StateBreakeven)
 	}
 	e.exec.updateContext(ctx, updates)
 	e.events.Success(traceID, "", "", EvSLSet,
-		fmt.Sprintf("auto-breakeven: %s SL moved to entry %.8g after TP fill", ctx.Symbol, entry), 0, nil)
+		fmt.Sprintf("auto-breakeven: %s SL confirmed at %.8g after TP fill", ctx.Symbol, entry), 0, nil)
 }
 
 // reconcileClosePending confirms a submitted close actually landed.

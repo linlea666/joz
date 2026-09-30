@@ -1,4 +1,4 @@
-import type { TraderConfigData } from '../../types'
+import type { CopyTradingConfig, TraderConfigData } from '../../types'
 import { t } from '../../i18n/translations'
 import { useLanguage } from '../../contexts/LanguageContext'
 import { PunkAvatar, getTraderAvatar } from '../common/PunkAvatar'
@@ -22,6 +22,11 @@ export function TraderConfigViewModal({
 }: TraderConfigViewModalProps) {
   const { language } = useLanguage()
   if (!isOpen || !traderData) return null
+
+  let copyConfig: Partial<CopyTradingConfig> | null = null
+  if (traderData.trader_type === 'copy_trading') {
+    try { copyConfig = JSON.parse(traderData.copy_trading_config || '{}') } catch { /* show no guessed settings */ }
+  }
 
   const InfoRow = ({
     label,
@@ -134,6 +139,12 @@ export function TraderConfigViewModal({
               />
             </div>
           </div>
+
+          {copyConfig && <div className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5">
+            <InfoRow label={t('copytrade.dualPriceLabel', language)} value={t(`copytrade.${({legacy:'dualPriceLegacy',range:'dualPriceRange',market_then_limit:'dualPriceSplit',reject:'dualPriceReject'} as const)[copyConfig.market_dual_price_mode || 'legacy']}`, language)} />
+            <InfoRow label={t('copytrade.reduceDefault', language)} value={`${copyConfig.default_reduce_ratio ?? 50}%`} />
+            <p className="text-xs text-nofx-text-muted mt-2">{t('copytrade.rulesHint', language)}</p>
+          </div>}
 
           {/* Strategy Info - only show if strategy is bound */}
           {traderData.strategy_id && (

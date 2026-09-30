@@ -31,7 +31,7 @@ func TestManagedOrderUsesStableIDAndPreciseCancel(t *testing.T) {
 		calls = append(calls, form)
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/fapi/v1/exchangeInfo" {
-			_, _ = w.Write([]byte(`{"symbols":[{"symbol":"SNDKUSDT","status":"TRADING","contractType":"PERPETUAL","quoteAsset":"USDT","filters":[{"filterType":"LOT_SIZE","minQty":"0.005","maxQty":"10000","stepSize":"0.005"},{"filterType":"MARKET_LOT_SIZE","minQty":"0.005","maxQty":"10000","stepSize":"0.005"},{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"100000","tickSize":"0.01"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}`))
+			_, _ = w.Write([]byte(`{"symbols":[{"symbol":"SNDKUSDT","status":"TRADING","contractType":"TRADIFI_PERPETUAL","quoteAsset":"USDT","filters":[{"filterType":"LOT_SIZE","minQty":"0.005","maxQty":"10000","stepSize":"0.005"},{"filterType":"MARKET_LOT_SIZE","minQty":"0.005","maxQty":"10000","stepSize":"0.005"},{"filterType":"PRICE_FILTER","minPrice":"0.01","maxPrice":"100000","tickSize":"0.01"},{"filterType":"MIN_NOTIONAL","notional":"5"}]}]}`))
 			return
 		}
 		if r.FormValue("origClientOrderId") == "missing" {

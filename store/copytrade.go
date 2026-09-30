@@ -16,10 +16,18 @@ import (
 // CopyTradeContext is a followed trade's living state. RootMessageID is the
 // correlation anchor: replies/links/lifecycle edits map back to it.
 type CopyTradeContext struct {
-	ID            string `gorm:"primaryKey" json:"id"`
-	TraderID      string `gorm:"column:trader_id;not null;index:idx_ctc_trader_state,priority:1" json:"trader_id"`
-	ChannelID     string `gorm:"column:channel_id;not null" json:"channel_id"`
-	RootMessageID string `gorm:"column:root_message_id;not null;index" json:"root_message_id"`
+	EntrySignalID      string  `gorm:"default:'';index" json:"entry_signal_id,omitempty"`
+	LastTPSignalID     string  `gorm:"default:''" json:"last_tp_signal_id,omitempty"`
+	ID                 string  `gorm:"primaryKey" json:"id"`
+	TraderID           string  `gorm:"column:trader_id;not null;index:idx_ctc_trader_state,priority:1" json:"trader_id"`
+	ExchangeID         string  `gorm:"default:'';index" json:"exchange_id,omitempty"`
+	RulesSnapshotJSON  string  `gorm:"default:''" json:"rules_snapshot_json,omitempty"`
+	RequestedStopLoss  float64 `gorm:"default:0" json:"requested_stop_loss,omitempty"`
+	StopIntentJSON     string  `gorm:"default:''" json:"stop_intent_json,omitempty"`
+	StopOrderID        string  `gorm:"default:''" json:"stop_order_id,omitempty"`
+	TPUpdateIntentJSON string  `gorm:"default:''" json:"tp_update_intent_json,omitempty"`
+	ChannelID          string  `gorm:"column:channel_id;not null" json:"channel_id"`
+	RootMessageID      string  `gorm:"column:root_message_id;not null;index" json:"root_message_id"`
 
 	Symbol    string `gorm:"column:symbol;not null" json:"symbol"` // canonical (BTCUSDT)
 	RawSymbol string `gorm:"column:raw_symbol;default:''" json:"raw_symbol"`
@@ -71,19 +79,20 @@ func (CopyTradeContext) TableName() string { return "copytrade_trade_contexts" }
 
 // CopyTradeAIRun records one LLM interpretation call end to end.
 type CopyTradeAIRun struct {
-	ID            int64  `gorm:"primaryKey;autoIncrement" json:"id"`
-	TraderID      string `gorm:"column:trader_id;not null;index" json:"trader_id"`
-	ChannelID     string `gorm:"column:channel_id;not null" json:"channel_id"`
-	MessageID     string `gorm:"column:message_id;not null;index" json:"message_id"`
-	Model         string `gorm:"column:model;default:''" json:"model"`
-	Provider      string `gorm:"column:provider;default:''" json:"provider"`
-	PromptVersion string `gorm:"column:prompt_version;default:''" json:"prompt_version"`
-	SystemPrompt  string `gorm:"column:system_prompt;default:''" json:"system_prompt"`
-	InputPrompt   string `gorm:"column:input_prompt;default:''" json:"input_prompt"`
-	ImageCount    int    `gorm:"column:image_count;default:0" json:"image_count"`
-	RawResponse   string `gorm:"column:raw_response;default:''" json:"raw_response"`
-	ParsedJSON    string `gorm:"column:parsed_json;default:''" json:"parsed_json"`
-	Error         string `gorm:"column:error;default:''" json:"error"`
+	ID                int64  `gorm:"primaryKey;autoIncrement" json:"id"`
+	TraderID          string `gorm:"column:trader_id;not null;index" json:"trader_id"`
+	ChannelID         string `gorm:"column:channel_id;not null" json:"channel_id"`
+	MessageID         string `gorm:"column:message_id;not null;index" json:"message_id"`
+	Model             string `gorm:"column:model;default:''" json:"model"`
+	Provider          string `gorm:"column:provider;default:''" json:"provider"`
+	PromptVersion     string `gorm:"column:prompt_version;default:''" json:"prompt_version"`
+	RulesSnapshotJSON string `gorm:"default:''" json:"rules_snapshot_json,omitempty"`
+	SystemPrompt      string `gorm:"column:system_prompt;default:''" json:"system_prompt"`
+	InputPrompt       string `gorm:"column:input_prompt;default:''" json:"input_prompt"`
+	ImageCount        int    `gorm:"column:image_count;default:0" json:"image_count"`
+	RawResponse       string `gorm:"column:raw_response;default:''" json:"raw_response"`
+	ParsedJSON        string `gorm:"column:parsed_json;default:''" json:"parsed_json"`
+	Error             string `gorm:"column:error;default:''" json:"error"`
 
 	StartedAt  time.Time `gorm:"column:started_at" json:"started_at"`
 	FinishedAt time.Time `gorm:"column:finished_at" json:"finished_at"`
@@ -110,13 +119,14 @@ const (
 
 // CopyTradeSignal is the per-trader record of one interpreted message.
 type CopyTradeSignal struct {
-	ID              string `gorm:"primaryKey" json:"id"`
-	TraderID        string `gorm:"column:trader_id;not null;index:idx_cts_trader_time,priority:1" json:"trader_id"`
-	ChannelID       string `gorm:"column:channel_id;not null;index" json:"channel_id"`
-	MessageID       string `gorm:"column:message_id;not null;index" json:"message_id"`
-	MessageRevision int    `gorm:"column:message_revision;default:0" json:"message_revision"`
-	AIRunID         int64  `gorm:"column:ai_run_id;default:0" json:"ai_run_id"`
-	TradeContextID  string `gorm:"column:trade_context_id;default:'';index" json:"trade_context_id"`
+	ID                string `gorm:"primaryKey" json:"id"`
+	TraderID          string `gorm:"column:trader_id;not null;index:idx_cts_trader_time,priority:1" json:"trader_id"`
+	ChannelID         string `gorm:"column:channel_id;not null;index" json:"channel_id"`
+	MessageID         string `gorm:"column:message_id;not null;index" json:"message_id"`
+	MessageRevision   int    `gorm:"column:message_revision;default:0" json:"message_revision"`
+	RulesSnapshotJSON string `gorm:"default:''" json:"rules_snapshot_json,omitempty"`
+	AIRunID           int64  `gorm:"column:ai_run_id;default:0" json:"ai_run_id"`
+	TradeContextID    string `gorm:"column:trade_context_id;default:'';index" json:"trade_context_id"`
 
 	Classification     string `gorm:"column:classification;default:''" json:"classification"`
 	Action             string `gorm:"column:action;default:''" json:"action"`
@@ -257,6 +267,7 @@ func NewCopyTradeStore(db *gorm.DB) *CopyTradeStore {
 func (s *CopyTradeStore) initTables() error {
 	return s.db.AutoMigrate(
 		&CopyTradeContext{},
+		&CopyTradeOwnership{}, &CopyTradeAccountFence{},
 		&CopyTradeAIRun{},
 		&CopyTradeSignal{},
 		&CopyTradeEvent{},
@@ -271,7 +282,18 @@ func (s *CopyTradeStore) initTables() error {
 
 // CreateContext inserts a new trade context.
 func (s *CopyTradeStore) CreateContext(ctx *CopyTradeContext) error {
-	return s.db.Create(ctx).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := claimCopyTradeOwnership(tx, ctx); err != nil {
+			return err
+		}
+		if err := tx.Create(ctx).Error; err != nil {
+			return err
+		}
+		if ctx.EntrySignalID != "" {
+			return tx.Model(&CopyTradeAction{}).Where("signal_id = ? AND symbol = ? AND direction = ? AND action IN ?", ctx.EntrySignalID, ctx.Symbol, ctx.Direction, []string{"OPEN", "ADD"}).Updates(map[string]interface{}{"context_id": ctx.ID, "phase": "execution"}).Error
+		}
+		return nil
+	})
 }
 
 // GetContext fetches one context by id.

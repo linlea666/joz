@@ -7,7 +7,7 @@ import (
 )
 
 // ErrUnsupportedInstrument marks symbols that must never reach the exchange
-// API (TradFi futures, stocks, forex, indices...). The reference project hit
+// API without a verified product mapping (index futures, forex...). The project hit
 // repeated exchange errors ("bitget does not have market symbol NQ/USDT:USDT")
 // because this check was missing; we resolve before execution.
 type ErrUnsupportedInstrument struct {
@@ -53,7 +53,9 @@ var symbolCleaner = strings.NewReplacer(
 // ResolveInstrument converts a raw symbol as stated by the channel author
 // ("BTC", "btc/usdt", "BTCUSDT.P", "ZEC/USDT:USDT") into the project's
 // canonical perp symbol format ("BTCUSDT"), or returns
-// *ErrUnsupportedInstrument for non-crypto instruments.
+// *ErrUnsupportedInstrument for instruments without an unambiguous mapping.
+// Stock-linked perpetuals use their exact listed ticker; exchange capability
+// validation decides whether that specific USDT contract is tradable.
 //
 // Exchange-level existence (does OKX list this perp?) is verified later by
 // the executor capability check; this resolver handles semantic mapping.

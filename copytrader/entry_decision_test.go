@@ -298,6 +298,8 @@ func TestMarketReferenceLimitLifecycleVisibility(t *testing.T) {
 				x.orderStatus["avgPrice"] = ctx.PlannedEntryPrice
 			}
 			ctx.CreatedAt = time.Now().Add(-241 * time.Minute)
+			deadline := time.Now().Add(-time.Minute)
+			ctx.EntryDeadline = &deadline
 			e.reconcileEntryPending(ctx)
 			views, err := e.st.CopyTrade().SignalViews(e.traderID, sigs)
 			if err != nil || len(views) != 1 || views[0].TradeState != tc.wantState || views[0].Status != store.SignalStatusExecuted {

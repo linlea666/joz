@@ -585,7 +585,7 @@ func ValidateActionEvidenceDetailed(ins *SourceInterpretation, segments []Source
 	if sourceAddCondition.MatchString(scope) && !ins.RequiresAddFill {
 		return SkipNeedsContext, "requires a confirmed add fill for this trade", nil
 	}
-	if sourceConditional.MatchString(scope) && !ins.RequiresAddFill && len(ins.ConditionalRules) == 0 {
+	if sourceConditional.MatchString(scope) && !ins.RequiresAddFill && len(ins.ConditionalRules) == 0 && ins.RequiresTPFill == 0 {
 		return SkipNeedsContext, "conditional eligibility is not verified", nil
 	}
 	if sourceActionNegation.MatchString(scope) {

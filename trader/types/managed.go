@@ -11,6 +11,18 @@ import (
 var ErrManagedOrderNotFound = errors.New("managed order not found")
 var ErrManagedOrderRejected = errors.New("managed order definitely rejected")
 
+// MarketRulesReader is optional and does not imply managed entry support.
+// Quantities are always base-asset units, including contract venues.
+type MarketRulesReader interface {
+	MarketRules(symbol string) (*ManagedMarketRules, error)
+}
+
+// StopOrderTrader adds stable identities without changing legacy Trader users.
+type StopOrderTrader interface {
+	SetManagedStopLoss(symbol, side string, qty, price float64, clientID string) error
+	CancelStopOrder(symbol string, order OpenOrder) error
+}
+
 // ManagedOrderTrader is optional: ordinary Trader/Grid callers keep their
 // existing behavior. These methods never implicitly cancel another order.
 type ManagedOrderTrader interface {

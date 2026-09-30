@@ -39,6 +39,14 @@ type SizingResult struct {
 // Returned quantity is unrounded; the executor applies exchange precision
 // (FormatQuantity) right before submitting.
 func ComputePositionSize(in SizingInput) (*SizingResult, error) {
+	for _, v := range []float64{in.EntryPrice, in.StopLossPrice, in.RiskAmountUSD, in.EquityUSD, in.AvailableMarginUSD, in.MaxPositionNotionalUSD, in.MarginBufferPct} {
+		if !finite(v) || v < 0 {
+			return nil, fmt.Errorf("risk inputs must be finite and nonnegative")
+		}
+	}
+	if in.AvailableMarginUSD <= 0 {
+		return nil, fmt.Errorf("no available margin for new risk")
+	}
 	if in.EntryPrice <= 0 {
 		return nil, fmt.Errorf("entry price must be > 0")
 	}

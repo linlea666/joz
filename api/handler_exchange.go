@@ -246,6 +246,16 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 			SafeInternalError(c, fmt.Sprintf("Load exchange %s", exchangeID), err)
 			return
 		}
+		busy, busyErr := s.store.CopyTrade().AccountBusy(exchangeID)
+		if busyErr != nil {
+			SafeInternalError(c, "Check active copy trades", busyErr)
+			return
+		}
+		if busy && ((strings.TrimSpace(exchangeData.APIKey) != "" && strings.TrimSpace(exchangeData.APIKey) != string(existing.APIKey)) || (strings.TrimSpace(exchangeData.SecretKey) != "" && strings.TrimSpace(exchangeData.SecretKey) != string(existing.SecretKey)) || (strings.TrimSpace(exchangeData.Passphrase) != "" && strings.TrimSpace(exchangeData.Passphrase) != string(existing.Passphrase))) {
+			c.JSON(http.StatusConflict, gin.H{"error": "Active copy trades or unresolved actions prevent replacing account credentials"})
+			return
+		}
+
 		effectiveAPIKey := strings.TrimSpace(exchangeData.APIKey)
 		if effectiveAPIKey == "" {
 			effectiveAPIKey = strings.TrimSpace(string(existing.APIKey))

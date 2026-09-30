@@ -1,6 +1,12 @@
 import type { CopyTradeEvent, CopyTradeSignal } from '../../types'
 import { t, type Language } from '../../i18n/translations'
 
+function actionStatusLabel(status: string, language: Language): string {
+  const key = `copytrade.actionStates.${status}`
+  const label = t(key, language)
+  return label === key ? status : `${label} (${status})`
+}
+
 function numeric(value: unknown, percent = false): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
   return `${value.toLocaleString(undefined, { maximumFractionDigits: 10 })}${percent ? '%' : ''}`
@@ -65,16 +71,20 @@ export function CopyTradeExecutionDetails({
       <h3 className="font-semibold text-nofx-text">
         {t('copytrade.executionDetails', language)}
       </h3>
+      {signal?.rules_snapshot_json && <details><summary>{t('copytrade.rulesSnapshot', language)}</summary><pre className="whitespace-pre-wrap break-all text-xs">{signal.rules_snapshot_json}</pre></details>}
+      <p className="text-xs text-nofx-text-muted">{t('copytrade.tpCapHint', language)}</p>
       {!!signal?.instruction_results?.length && (
         <div className="space-y-1">
           <h4 className="font-semibold">
             {t('copytrade.actionResults', language)}
           </h4>
           {signal.instruction_results.map((result) => (
-            <p key={result.index}>
+            <p key={result.index} className="break-all">
               {result.symbol} {result.direction} · {result.action} ·{' '}
               {result.status}
               {result.skip_reason ? ` (${result.skip_reason})` : ''}
+              {result.context_ids?.length ? ` · ${result.context_ids.join(', ')}` : ''}
+              {result.action_ids?.length ? ` · ${result.action_ids.join(', ')}` : ''}
               {result.status !== 'executed' && result.detail
                 ? `: ${result.detail}`
                 : ''}
@@ -87,7 +97,7 @@ export function CopyTradeExecutionDetails({
           {signal.action_results.map((action) => (
             <p key={action.id}>
               {action.symbol} {action.direction} · {action.action} ·{' '}
-              {action.status}
+              {actionStatusLabel(action.status, language)}
               {action.trade_state
                 ? ` · ${tradeStateLabel(action.trade_state, language)}`
                 : ''}

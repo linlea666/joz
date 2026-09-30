@@ -12,6 +12,9 @@ import (
 )
 
 type InstructionResult struct {
+	ActionIDs  []string   `json:"action_ids,omitempty"`
+	ContextIDs []string   `json:"context_ids,omitempty"`
+	OrderIDs   []string   `json:"order_ids,omitempty"`
 	Index      int        `json:"index"`
 	Action     Action     `json:"action"`
 	Symbol     string     `json:"symbol"`
@@ -21,8 +24,12 @@ type InstructionResult struct {
 	Detail     string     `json:"detail,omitempty"`
 }
 
-func (e *Engine) messageSources(msg *store.DiscordMessage) []SourceSegment {
-	segments := BuildSourceSegments(msg, e.cfg.InterpretationProfile)
+func (e *Engine) messageSources(msg *store.DiscordMessage, profiles ...string) []SourceSegment {
+	profile := e.cfg.InterpretationProfile
+	if len(profiles) > 0 {
+		profile = profiles[0]
+	}
+	segments := BuildSourceSegments(msg, profile)
 	history, _ := e.st.DiscordMessage().GetRecentByChannel(msg.ChannelID, msg.MessageTimestamp.AddDate(0, 0, -7), 200)
 	if active, err := e.st.CopyTrade().GetActiveContexts(e.traderID); err == nil {
 		for _, c := range active {
@@ -63,18 +70,10 @@ func (e *Engine) claimInstruction(signalID string, msg *store.DiscordMessage, in
 	}
 	// Entry/exit quantities are frozen for a message's first actionable version.
 	// Revising an executed reduction's wording or percentage cannot reduce again.
-	semantic := ""
-	if ins.Action == ActionUpdateSL || ins.Action == ActionUpdateTP {
-		b, _ := json.Marshal(struct {
-			SL    []SLLevel
-			TP    []TPLevel
-			Rules []ConditionalRule
-		}{ins.StopLossLevels, ins.TakeProfitLevels, ins.ConditionalRules})
-		semantic = string(b)
-	}
+	semantic := instructionSemantic(ins)
 	id := stableID(e.traderID, msg.MessageID, canonical, direction, contextID, string(ins.Action), semantic)
 	payload, _ := json.Marshal(ins)
-	a := &store.CopyTradeAction{ID: id, TraderID: e.traderID, SignalID: signalID, MessageID: msg.MessageID, ContextID: contextID, Symbol: canonical, Direction: direction, Action: string(ins.Action), Status: "executing", PayloadJSON: string(payload)}
+	a := &store.CopyTradeAction{ID: id, MessageRevision: msg.Revision, Phase: "preflight", TraderID: e.traderID, SignalID: signalID, MessageID: msg.MessageID, ContextID: contextID, Symbol: canonical, Direction: direction, Action: string(ins.Action), Status: "executing", PayloadJSON: string(payload)}
 	legacy, err := e.st.CopyTrade().LegacyExecutedAction(e.traderID, msg.MessageID, canonical, string(ins.Action))
 	if err != nil {
 		return a, false, err
@@ -82,6 +81,34 @@ func (e *Engine) claimInstruction(signalID string, msg *store.DiscordMessage, in
 	if legacy {
 		return a, false, nil
 	}
+	// Compare historical payloads as well as the new identity. This preserves
+	// deduplication of completed pre-upgrade nil/empty-array variants.
+	previous, err := e.st.CopyTrade().GetActionsForMessage(e.traderID, msg.MessageID)
+	if err != nil {
+		return a, false, err
+	}
+	retryable := false
+	for _, old := range previous {
+		if old.Symbol != canonical || old.Direction != direction || (old.ContextID != contextID && ins.Action != ActionOpen && ins.Action != ActionAdd) || old.Action != string(ins.Action) {
+			continue
+		}
+		var parsed SourceInterpretation
+		if json.Unmarshal([]byte(old.PayloadJSON), &parsed) != nil {
+			return a, false, fmt.Errorf("existing action semantics unavailable; manual review required")
+		}
+		if instructionSemantic(&parsed) != semantic {
+			continue
+		}
+		if old.Status == "preflight_rejected" || (old.Status == "rejected" && msg.Revision > old.MessageRevision) {
+			retryable = true
+			continue
+		}
+		return old, false, nil
+	}
+	if retryable {
+		a.ID = stableID(id, signalID)
+	}
+
 	claimed, err := e.st.CopyTrade().ClaimAction(a)
 	return a, claimed, err
 }
@@ -134,6 +161,14 @@ func transientModelError(err error) bool {
 		return false
 	}
 	s := strings.ToLower(err.Error())
+	for _, permanent := range []string{"401", "402", "403", "insufficient balance", "insufficient quota", "invalid api key", "authentication", "unauthorized", "余额不足"} {
+		if strings.Contains(s, permanent) {
+			return false
+		}
+	}
+	if strings.Contains(s, "llm empty response") {
+		return true
+	}
 	if !strings.Contains(s, "llm call failed") {
 		return false
 	}

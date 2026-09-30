@@ -30,13 +30,25 @@ func (x *Executor) saveTPPlan(ctx *store.CopyTradeContext, plan []TPPlanEntry) e
 // evidence. An anonymous legacy trigger order remains unknown. FILLED flags
 // from older records are preserved, but an old tp_hit_count is not evidence.
 func (x *Executor) refreshTPProgress(traceID string, ctx *store.CopyTradeContext) bool {
+	advanced, err := x.refreshTPProgressChecked(traceID, ctx)
+	if err != nil {
+		x.events.Warn(traceID, "", "", EvExecutionError, fmt.Sprintf("TP progress unavailable: %v", err), nil)
+	}
+	return advanced
+}
+
+// Callers that will replace TP orders or add exposure must stop when fill
+// evidence cannot be read or durably recorded. Exits may still proceed.
+func (x *Executor) refreshTPProgressChecked(traceID string, ctx *store.CopyTradeContext) (bool, error) {
 	plan := readTPPlan(ctx)
 	ledger := map[string]*store.CopyTradeOrder{}
 	if _, ok := x.ex.(types.ManagedOrderTrader); ok {
-		if rows, err := x.st.CopyTrade().GetOrdersForContext(x.traderID, ctx.ID); err == nil {
-			for _, row := range rows {
-				ledger[row.ClientID] = row
-			}
+		rows, err := x.st.CopyTrade().GetOrdersForContext(x.traderID, ctx.ID)
+		if err != nil {
+			return false, err
+		}
+		for _, row := range rows {
+			ledger[row.ClientID] = row
 		}
 	}
 	changed, advanced, hits := false, false, 0
@@ -52,7 +64,7 @@ func (x *Executor) refreshTPProgress(traceID string, ctx *store.CopyTradeContext
 				status, err = x.ex.GetOrderStatus(ctx.Symbol, tp.OrderID)
 			}
 			if err != nil {
-				continue
+				return false, fmt.Errorf("TP%d fill lookup: %w", tp.Ordinal, err)
 			}
 			st, _ := status["status"].(string)
 			q := executedQtyOf(status)
@@ -83,13 +95,15 @@ func (x *Executor) refreshTPProgress(traceID string, ctx *store.CopyTradeContext
 	}
 	if changed {
 		b, _ := json.Marshal(plan)
-		x.updateContext(ctx, map[string]interface{}{"tp_plan_json": string(b), "tp_hit_count": hits})
+		if err := x.persistContext(ctx, map[string]interface{}{"tp_plan_json": string(b), "tp_hit_count": hits}); err != nil {
+			return false, err
+		}
 	}
 	if advanced {
 		x.events.Success(traceID, "", "", EvReconcile,
 			fmt.Sprintf("%s confirmed take-profit order fill (%d levels with fills)", ctx.Symbol, hits), 0, nil)
 	}
-	return advanced
+	return advanced, nil
 }
 
 func confirmedTPLevel(ctx *store.CopyTradeContext, level int) bool {
@@ -135,41 +149,18 @@ func (x *Executor) ensureStopProtection(traceID, signalID string, ctx *store.Cop
 	if ctx.StopLossPrice <= 0 || qty <= 0 {
 		return nil
 	}
-	orders, err := x.ex.GetOpenOrders(ctx.Symbol)
-	if err != nil {
-		return err
-	}
-	price := ctx.StopLossPrice
-	found, valid := false, false
-	for _, o := range orders {
-		if (o.Symbol != "" && o.Symbol != ctx.Symbol) || !isStopOrder(o) || !stopMatchesSide(o, ctx.Direction) {
-			continue
-		}
-		found = true
-		if o.StopPrice > 0 && tighterStop(ctx.Direction, o.StopPrice, price) {
-			price = o.StopPrice
-		}
-		priceOK := o.StopPrice > 0 && (math.Abs(o.StopPrice-ctx.StopLossPrice) <= math.Abs(ctx.StopLossPrice)*1e-8 || tighterStop(ctx.Direction, o.StopPrice, ctx.StopLossPrice))
-		sizeOK := o.ClosePosition || math.Abs(o.Quantity-qty) <= math.Max(qty*1e-6, 1e-12)
-		valid = valid || (priceOK && sizeOK)
-	}
-	if price != ctx.StopLossPrice {
-		x.updateContext(ctx, map[string]interface{}{"stop_loss_price": price})
-	}
-	if valid {
-		return nil
-	}
-	if found {
-		if err := x.cancelStopLossOrders(ctx.Symbol, ctx.Direction); err != nil {
+	requested := ctx.RequestedStopLoss
+	if ctx.StopIntentJSON != "" {
+		var intent stopIntent
+		if err := json.Unmarshal([]byte(ctx.StopIntentJSON), &intent); err != nil {
 			return err
 		}
+		requested = intent.Requested
 	}
-	if err := x.ex.SetStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), qty, price); err != nil {
-		return err
+	if requested <= 0 {
+		requested = ctx.StopLossPrice
 	}
-	x.events.Success(traceID, signalID, "", EvSLSet,
-		fmt.Sprintf("SL guard restored %s %s stop @ %.8g (qty %.8g)", ctx.Symbol, ctx.Direction, price, qty), 0, nil)
-	return nil
+	return x.setStopProtection(traceID, signalID, ctx, qty, requested)
 }
 
 // restoreRemainingProtections checks the remaining SL/TP set after every
@@ -181,7 +172,9 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 	if qty <= 0 || x.gridEx == nil {
 		return nil
 	}
-	x.refreshTPProgress(traceID, ctx)
+	if _, err := x.refreshTPProgressChecked(traceID, ctx); err != nil {
+		return err
+	}
 	plan := readTPPlan(ctx)
 	var rules *types.ManagedMarketRules
 	managed, hasManaged := x.ex.(types.ManagedOrderTrader)
@@ -313,7 +306,11 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 		}
 		if hasManaged {
 			role := fmt.Sprintf("TP_%d_%d", tp.Ordinal, tp.Generation)
-			row := x.newManagedOrder(ctx, signalID, role, "LIMIT", tp.Price, want)
+			orderSignalID := signalID
+			if orderSignalID == "" {
+				orderSignalID = ctx.EntrySignalID
+			}
+			row := x.newManagedOrder(ctx, orderSignalID, role, "LIMIT", tp.Price, want)
 			if tp.ClientID != "" {
 				rows, err := x.st.CopyTrade().GetOrdersForContext(x.traderID, ctx.ID)
 				if err != nil {

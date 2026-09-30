@@ -109,7 +109,8 @@ func TestEntryStopResolvesAfterCancelRace(t *testing.T) {
 	if _, err = x.ExecuteUpdateSLSpec("cost", "cost-signal", ctx, PriceSpec{Type: PriceEntry}); err != nil {
 		t.Fatal(err)
 	}
-	if ctx.AvgFillPrice == before || math.Abs(ctx.StopLossPrice-v.avg) > 1e-9 || math.Abs(ctx.Quantity-v.qty) > 1e-9 {
+	expectedStop, _ := v.rules.NormalizePrice(v.avg)
+	if ctx.AvgFillPrice == before || math.Abs(ctx.StopLossPrice-expectedStop) > 1e-9 || math.Abs(ctx.Quantity-v.qty) > 1e-9 {
 		t.Fatalf("stop used pre-cancel position: stop=%g avg=%g qty=%g/%g", ctx.StopLossPrice, v.avg, ctx.Quantity, v.qty)
 	}
 	if !ctx.EntryDisabled || !ctx.BreakevenApplied {

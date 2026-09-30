@@ -2,6 +2,7 @@ package copytrader
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -19,7 +20,7 @@ func (x *Executor) settleLegacyEntry(traceID string, ctx *store.CopyTradeContext
 	}
 	if filled <= 0 {
 		if terminal && ctx.OpenedAt == nil {
-			x.markContext(ctx, StateCancelled, map[string]interface{}{"entry_working": false, "quantity": 0, "last_action": "ENTRY_" + st})
+			return x.markContext(ctx, StateCancelled, map[string]interface{}{"entry_working": false, "quantity": 0, "last_action": "ENTRY_" + st})
 		}
 		return nil
 	}
@@ -67,6 +68,9 @@ func (x *Executor) settleLegacyEntry(traceID string, ctx *store.CopyTradeContext
 	x.events.Success(traceID, "", "", EvEntryFilled, fmt.Sprintf("entry %s: %s filled %.8g @ %.8g; unfilled remainder active=%t", st, ctx.Symbol, filled, avg, !terminal), 0, nil)
 	if qty > 0 {
 		if err := x.ensureStopProtection(traceID, "", ctx, qty); err != nil {
+			if errors.Is(err, ErrProtectionUnconfirmed) {
+				return err
+			}
 			_ = x.persistContext(ctx, map[string]interface{}{"entry_disabled": true, "last_error": "UNPROTECTED: " + err.Error()})
 			if !terminal && x.gridEx != nil {
 				_ = x.gridEx.CancelOrder(ctx.Symbol, ctx.EntryOrderID)
@@ -115,6 +119,12 @@ func (x *Executor) cancelTrackedTPs(ctx *store.CopyTradeContext) error {
 		if tp.Filled {
 			continue
 		}
+		if tp.OrderID == "" && tp.Status == "PLANNED" {
+			continue
+		}
+		if orderTerminal(tp.Status) {
+			continue
+		}
 		if tp.OrderID == "" {
 			return fmt.Errorf("legacy anonymous TP cannot be cancelled precisely; manual review required")
 		}
@@ -149,7 +159,7 @@ func (e *Engine) reconcileLegacyEntry(traceID string, ctx *store.CopyTradeContex
 		e.events.Error(traceID, "", "", EvExecutionError, err.Error(), nil)
 		return
 	}
-	if (ctx.EntryWorking || ctx.State == string(StateEntryPending)) && (ctx.EntryDisabled || (e.cfg.EntryTimeoutMinutes > 0 && time.Since(ctx.CreatedAt) > time.Duration(e.cfg.EntryTimeoutMinutes)*time.Minute)) {
+	if (ctx.EntryWorking || ctx.State == string(StateEntryPending)) && (ctx.EntryDisabled || entryExpired(ctx, e.cfg.EntryTimeoutMinutes)) {
 		if err = e.exec.closeEntryEligibility(traceID, ctx, "ENTRY_TIMEOUT_OR_CANCEL"); err != nil {
 			e.events.Warn(traceID, "", "", EvExecutionError, err.Error(), nil)
 			return
@@ -170,4 +180,14 @@ func recipePlan(ctx *store.CopyTradeContext) *OpenPlan {
 		}
 	}
 	return &OpenPlan{Symbol: ctx.Symbol, Direction: Direction(ctx.Direction), StopLoss: ctx.StopLossPrice, TPPrices: r.Prices, TPRatios: r.Ratios, Leverage: ctx.Leverage}
+}
+
+func entryExpired(ctx *store.CopyTradeContext, legacyMinutes int) bool {
+	if ctx.EntryDeadline != nil {
+		return time.Now().After(*ctx.EntryDeadline)
+	}
+	if ctx.EntrySignalID != "" {
+		return false
+	} // new explicit zero deadline disables expiry
+	return legacyMinutes > 0 && time.Since(ctx.CreatedAt) > time.Duration(legacyMinutes)*time.Minute
 }
