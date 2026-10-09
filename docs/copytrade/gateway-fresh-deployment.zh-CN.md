@@ -22,17 +22,16 @@ Discord Gateway → Python 持久缓冲 → 私有 Unix Socket → Go 入库事�
 
 ## 安装
 
-1. 重新安装系统并安装 Docker Engine 与 Compose 插件，获取本仓库的 `main`。
-2. 按仓库 `.env.example` 和部署说明创建 `.env`，设置新的 JWT、数据加密等必要配置。Discord 凭证在页面中保存，不写在 Compose、命令行或日志中。
-3. 确認这是新的 `data` 目录、账户空仓无挂单。使用**源码构建**的 Compose 文件：
+Ubuntu 24.04 amd64 的一键安装、原更新命令和前端邮件配置见 [安装与邮件说明](install-and-email.zh-CN.md)。
 
-```sh
-git checkout main
-git pull --ff-only origin main
-docker compose -f docker-compose.yml build
-docker compose -f docker-compose.yml up -d
-docker compose -f docker-compose.yml ps
+```bash
+curl -fsSL https://raw.githubusercontent.com/linlea666/joz/main/install.sh -o /tmp/nofx-install.sh
+sudo bash /tmp/nofx-install.sh
+# 日常更新
+cd /opt/nofx && ./start.sh update
 ```
+
+首次部署前确认账户空仓且无普通/条件挂单。安装自动生成配置和密钥，新数据库默认仅采集验证。邮件在页面单独保存，无须手写 SMTP 环境变量。
 
 本方案使用 `docker-compose.yml`，其中新增 `discord-collector`。不要混用旧的 `docker-compose.prod.yml` 镜像部署入口；旧发布镜像不包含此次代码。
 

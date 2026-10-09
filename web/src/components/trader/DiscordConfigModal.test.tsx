@@ -12,6 +12,7 @@ import { toast } from 'sonner'
 vi.mock('../../lib/api', () => ({
   api: {
     getDiscordConfig: vi.fn(),
+    getDiscordEmail: vi.fn(),
     updateDiscordConfig: vi.fn(),
     deleteDiscordToken: vi.fn(),
   },
@@ -22,6 +23,17 @@ vi.mock('sonner', () => ({
 afterEach(cleanup)
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(api.getDiscordEmail).mockResolvedValue({
+    host: '',
+    port: 465,
+    security: 'tls',
+    user: '',
+    recipient: '',
+    enabled: true,
+    source: 'none',
+    password_set: false,
+    configured: false,
+  })
   vi.mocked(api.getDiscordConfig).mockResolvedValue({
     configured: true,
     token_masked: '****',

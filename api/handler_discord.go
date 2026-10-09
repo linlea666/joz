@@ -11,7 +11,6 @@ import (
 
 	"nofx/copytrader"
 	"nofx/discord"
-	"nofx/logger"
 	"nofx/notify"
 	"nofx/store"
 )
@@ -43,7 +42,13 @@ func (s *Server) handleGetDiscordConfig(c *gin.Context) {
 		"alert_email":     "",
 		"monitor_enabled": true,
 
-		"smtp_configured": notify.EmailConfigured(),
+		"smtp_configured": false,
+	}
+	mailSettings, mailErr := notify.ResolveEmail(s.store)
+	if mailErr != nil {
+		resp["smtp_error"] = mailErr.Error()
+	} else {
+		resp["smtp_configured"] = mailSettings.Configured
 	}
 	if cfg != nil {
 		resp["configured"] = cfg.Token != ""
@@ -135,39 +140,6 @@ func (s *Server) handleUpdateDiscordConfig(c *gin.Context) {
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"saved": true, "applied": applied, "apply_error": detail, "message": "Discord configuration saved"})
-}
-
-// handleTestDiscordAlertEmail sends a test email so the user can verify the
-// SMTP setup and recipient before relying on token-invalid alerts.
-func (s *Server) handleTestDiscordAlertEmail(c *gin.Context) {
-	var req struct {
-		Email string `json:"email"`
-	}
-	_ = c.ShouldBindJSON(&req)
-
-	email := strings.TrimSpace(req.Email)
-	if email == "" {
-		cfg, err := s.store.DiscordConfig().Get()
-		if err != nil || cfg == nil || cfg.AlertEmail == "" {
-			SafeBadRequest(c, "No alert email configured")
-			return
-		}
-		email = cfg.AlertEmail
-	}
-	if !notify.EmailConfigured() {
-		c.JSON(http.StatusOK, gin.H{"ok": false, "error": "SMTP not configured on the server (SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS)"})
-		return
-	}
-	body := "这是一封来自 NOFX 的测试邮件。\n\n" +
-		"收到本邮件说明 Discord Token 状态监控的邮件通知链路工作正常：\n" +
-		"当 Discord Token 失效或退出登录时，告警会发送到本邮箱。\n\n" +
-		"发送时间：" + time.Now().Format("2006-01-02 15:04:05 MST")
-	if err := notify.SendEmail(email, "【NOFX 测试】邮件通知配置成功", body); err != nil {
-		logger.Warnf("[DiscordMonitor] test email to %s failed: %v", email, err)
-		c.JSON(http.StatusOK, gin.H{"ok": false, "error": SanitizeError(err, "email send failed")})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "email": email})
 }
 
 // handleDeleteDiscordToken clears the stored token and stops collection.

@@ -70,7 +70,7 @@ func NewTokenMonitor(st *store.Store, source *SourceManager) *TokenMonitor {
 		}
 		return nil
 	}
-	tm.send = notify.SendEmail
+	tm.send = func(_ string, subject, body string) error { return notify.SendAlert(st, subject, body) }
 	return tm
 }
 

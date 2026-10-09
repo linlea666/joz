@@ -8,6 +8,7 @@ import time
 from contextlib import suppress
 
 import discord
+from healthcheck import write_status
 from core import Outbox, OutboxFull, baseline_snowflake, bounded_history, merge_message, snowflake_time, utcnow
 
 logging.basicConfig(level=logging.WARNING)
@@ -345,6 +346,7 @@ class Worker:
                 if self.last_heartbeat:
                     data['last_heartbeat'] = self.last_heartbeat
                 await self.send({'type': 'status', 'data': data})
+                write_status(bool(self.writer and self.configured.is_set()), self.state, bool(self.token))
             await asyncio.sleep(5)
 
     async def connect_backend(self):

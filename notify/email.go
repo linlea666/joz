@@ -1,16 +1,4 @@
-// Package notify provides outbound email notifications (SMTP).
-//
-// SMTP sender credentials come from environment variables so secrets never
-// enter the database or the repository:
-//
-//	SMTP_HOST=smtp.163.com
-//	SMTP_PORT=465
-//	SMTP_USER=sender@163.com
-//	SMTP_PASS=<authorization code>
-//
-// Port 465 uses implicit TLS (the connection is TLS from the first byte),
-// which net/smtp.SendMail does not support — so we dial TLS ourselves and
-// hand the connection to smtp.NewClient. Port 587/25 uses STARTTLS.
+// Package notify provides bounded, certificate-verified SMTP delivery.
 package notify
 
 import (
@@ -19,109 +7,82 @@ import (
 	"mime"
 	"net"
 	"net/smtp"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// smtpConfig is resolved from the environment on every send so operators can
-// fix .env and restart without any DB state involved.
-type smtpConfig struct {
-	Host string
-	Port int
-	User string
-	Pass string
+func SendWithConfig(cfg SMTPConfig, to, subject, body string) error {
+	return sendSMTP(cfg, to, subject, body, 20*time.Second, nil)
 }
 
-func loadSMTPConfig() smtpConfig {
-	port := 465
-	if v := os.Getenv("SMTP_PORT"); v != "" {
-		if p, err := strconv.Atoi(v); err == nil && p > 0 {
-			port = p
-		}
+// tlsConfig is an internal test seam for a local CA, never an API option.
+func sendSMTP(cfg SMTPConfig, to, subject, body string, timeout time.Duration, tlsConfig *tls.Config) error {
+	if err := cfg.Validate(); err != nil {
+		return err
 	}
-	return smtpConfig{
-		Host: os.Getenv("SMTP_HOST"),
-		Port: port,
-		User: os.Getenv("SMTP_USER"),
-		Pass: os.Getenv("SMTP_PASS"),
+	if err := ValidateAddress(to); err != nil {
+		return err
 	}
-}
-
-// EmailConfigured reports whether SMTP sender credentials are present.
-func EmailConfigured() bool {
-	cfg := loadSMTPConfig()
-	return cfg.Host != "" && cfg.User != "" && cfg.Pass != ""
-}
-
-// SendEmail sends a UTF-8 plain-text email to a single recipient.
-// Returns a descriptive error when SMTP is unconfigured or delivery fails.
-func SendEmail(to, subject, body string) error {
-	cfg := loadSMTPConfig()
-	if cfg.Host == "" || cfg.User == "" || cfg.Pass == "" {
-		return fmt.Errorf("SMTP not configured (set SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS in .env)")
+	deadline := time.Now().Add(timeout)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)), timeout)
+	if err != nil {
+		return smtpError("connection", err)
 	}
-	if to == "" {
-		return fmt.Errorf("recipient email is empty")
+	defer conn.Close()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return smtpError("deadline", err)
 	}
-
-	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-	auth := smtp.PlainAuth("", cfg.User, cfg.Pass, cfg.Host)
-
-	var client *smtp.Client
-	var err error
-	if cfg.Port == 465 {
-		// Implicit TLS.
-		conn, dialErr := tls.DialWithDialer(
-			&net.Dialer{Timeout: 15 * time.Second},
-			"tcp", addr,
-			&tls.Config{ServerName: cfg.Host},
-		)
-		if dialErr != nil {
-			return fmt.Errorf("SMTP TLS dial failed: %w", dialErr)
-		}
-		client, err = smtp.NewClient(conn, cfg.Host)
-		if err != nil {
-			conn.Close()
-			return fmt.Errorf("SMTP handshake failed: %w", err)
-		}
-	} else {
-		// Plain connection, upgrade via STARTTLS when offered.
-		client, err = smtp.Dial(addr)
-		if err != nil {
-			return fmt.Errorf("SMTP dial failed: %w", err)
-		}
-		if ok, _ := client.Extension("STARTTLS"); ok {
-			if err := client.StartTLS(&tls.Config{ServerName: cfg.Host}); err != nil {
-				client.Close()
-				return fmt.Errorf("SMTP STARTTLS failed: %w", err)
-			}
-		}
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{ServerName: cfg.Host, MinVersion: tls.VersionTLS12}
+	}
+	if cfg.Security == "tls" {
+		conn = tls.Client(conn, tlsConfig)
+	}
+	client, err := smtp.NewClient(conn, cfg.Host)
+	if err != nil {
+		return smtpError("TLS/greeting", err)
 	}
 	defer client.Close()
-
-	if err := client.Auth(auth); err != nil {
-		return fmt.Errorf("SMTP auth failed: %w", err)
+	if cfg.Security == "starttls" {
+		if ok, _ := client.Extension("STARTTLS"); !ok {
+			return fmt.Errorf("SMTP STARTTLS unavailable; connection refused")
+		}
+		if err := client.StartTLS(tlsConfig); err != nil {
+			return smtpError("STARTTLS", err)
+		}
+	}
+	if err := client.Auth(smtp.PlainAuth("", cfg.User, cfg.Pass, cfg.Host)); err != nil {
+		return smtpError("authentication", err)
 	}
 	if err := client.Mail(cfg.User); err != nil {
-		return fmt.Errorf("SMTP MAIL FROM failed: %w", err)
+		return smtpError("sender", err)
 	}
 	if err := client.Rcpt(to); err != nil {
-		return fmt.Errorf("SMTP RCPT TO failed: %w", err)
+		return smtpError("recipient", err)
 	}
 	w, err := client.Data()
 	if err != nil {
-		return fmt.Errorf("SMTP DATA failed: %w", err)
+		return smtpError("DATA", err)
 	}
 	if _, err := w.Write(buildMessage(cfg.User, to, subject, body)); err != nil {
-		w.Close()
-		return fmt.Errorf("SMTP write failed: %w", err)
+		return smtpError("write", err)
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("SMTP delivery failed: %w", err)
+		return smtpError("delivery", err)
 	}
-	return client.Quit()
+	// The server accepted DATA. A failed QUIT must not report delivery failure
+	// and encourage sending a second copy.
+	_ = client.Quit()
+	return nil
+}
+
+// Do not relay remote SMTP text: a hostile/erroring server may echo credentials.
+func smtpError(stage string, err error) error {
+	if e, ok := err.(net.Error); ok && e.Timeout() {
+		return fmt.Errorf("SMTP %s timed out", stage)
+	}
+	return fmt.Errorf("SMTP %s failed (check credentials, certificate and server settings)", stage)
 }
 
 // buildMessage assembles RFC 5322 headers + body with UTF-8 subject encoding

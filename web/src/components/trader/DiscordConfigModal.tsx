@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { MessageSquare, Trash2, PlugZap, RefreshCw, Mail } from 'lucide-react'
+import { MessageSquare, Trash2, PlugZap, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
+import { DiscordEmailSettings } from './DiscordEmailSettings'
 import { api } from '../../lib/api'
 import type { DiscordConfig } from '../../types'
 import { t, type Language } from '../../i18n/translations'
@@ -26,19 +27,12 @@ export function DiscordConfigModal({
   const [testChannelId, setTestChannelId] = useState('')
   const [isTestingChannel, setIsTestingChannel] = useState(false)
   const [channelPreview, setChannelPreview] = useState<string[]>([])
-  // Token status monitoring (email alerts)
-  const [monitorEnabled, setMonitorEnabled] = useState(true)
-  const [alertEmail, setAlertEmail] = useState('')
-  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false)
-
   const loadConfig = async () => {
     try {
       const cfg = await api.getDiscordConfig()
       setConfig(cfg)
       setRunMode(cfg.run_mode || 'observe')
       setEnabled(cfg.enabled)
-      setMonitorEnabled(cfg.monitor_enabled ?? true)
-      setAlertEmail(cfg.alert_email || '')
     } catch {
       // First load may 404 before any config exists — keep defaults
     } finally {
@@ -58,8 +52,6 @@ export function DiscordConfigModal({
         token: token.trim(),
         run_mode: runMode,
         enabled,
-        alert_email: alertEmail.trim(),
-        monitor_enabled: monitorEnabled,
       })
       if (result.applied) toast.success(t('discord.saved', language))
       else
@@ -112,27 +104,6 @@ export function DiscordConfigModal({
       toast.error(t('discord.clearFailed', language))
     } finally {
       setIsClearing(false)
-    }
-  }
-
-  const handleTestEmail = async () => {
-    if (isSendingTestEmail) return
-    const email = alertEmail.trim()
-    if (!email) return
-    setIsSendingTestEmail(true)
-    try {
-      const res = await api.testDiscordAlertEmail(email)
-      if (res.ok) {
-        toast.success(`${t('discord.testEmailOk', language)} (${res.email})`)
-      } else {
-        toast.error(
-          `${t('discord.testEmailFailed', language)}: ${res.error || ''}`
-        )
-      }
-    } catch {
-      toast.error(t('discord.testEmailFailed', language))
-    } finally {
-      setIsSendingTestEmail(false)
     }
   }
 
@@ -445,85 +416,7 @@ export function DiscordConfigModal({
                   </div>
                 )}
 
-                {/* Monitor toggle + interval */}
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <label
-                      className="text-sm font-semibold"
-                      style={{ color: '#1A1813' }}
-                    >
-                      {t('discord.monitorEnable', language)}
-                    </label>
-                    <div className="flex gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setMonitorEnabled(true)}
-                        className="flex-1 px-3 py-3 rounded-xl text-sm font-semibold"
-                        style={{
-                          background: monitorEnabled ? '#2E8B57' : '#E8E2D5',
-                          color: monitorEnabled ? '#fff' : '#8A8478',
-                        }}
-                      >
-                        {t('discord.on', language)}
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setMonitorEnabled(false)}
-                        className="flex-1 px-3 py-3 rounded-xl text-sm font-semibold"
-                        style={{
-                          background: !monitorEnabled ? '#D6433A' : '#E8E2D5',
-                          color: !monitorEnabled ? '#fff' : '#8A8478',
-                        }}
-                      >
-                        {t('discord.off', language)}
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Alert email + test send */}
-                <div className="space-y-2">
-                  <label
-                    className="text-sm font-semibold"
-                    style={{ color: '#1A1813' }}
-                  >
-                    {t('discord.alertEmail', language)}
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="email"
-                      value={alertEmail}
-                      onChange={(e) => setAlertEmail(e.target.value)}
-                      placeholder={t('discord.alertEmailPlaceholder', language)}
-                      className="flex-1 px-4 py-2.5 rounded-xl text-sm"
-                      style={{
-                        background: '#F1ECE2',
-                        border: '1px solid rgba(26,24,19,0.14)',
-                        color: '#1A1813',
-                      }}
-                    />
-                    <button
-                      onClick={handleTestEmail}
-                      disabled={isSendingTestEmail || !alertEmail.trim()}
-                      className="px-4 py-2.5 rounded-xl text-sm font-bold disabled:opacity-50 flex items-center gap-1.5"
-                      style={{ background: '#2E8B57', color: '#fff' }}
-                      title={t('discord.sendTestEmail', language)}
-                    >
-                      {isSendingTestEmail ? (
-                        '...'
-                      ) : (
-                        <Mail className="w-4 h-4" />
-                      )}
-                      {!isSendingTestEmail &&
-                        t('discord.sendTestEmail', language)}
-                    </button>
-                  </div>
-                  {config && !config.smtp_configured && (
-                    <div className="text-xs" style={{ color: '#D6433A' }}>
-                      {t('discord.smtpNotConfigured', language)}
-                    </div>
-                  )}
-                </div>
+                <DiscordEmailSettings language={language} />
               </div>
 
               {/* Safety note */}

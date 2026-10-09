@@ -1,5 +1,7 @@
 import type {
   DiscordConfig,
+  EmailDraft,
+  EmailSettings,
   CopyTradePreset,
   DiscordChannelPreviewMessage,
   CopyTradeEvent,
@@ -9,7 +11,18 @@ import type {
   CopyTradeReplayReport,
   CopyTradeAIRun,
 } from '../../types'
-import { API_BASE, httpClient } from './helpers'
+import { API_BASE, httpClient, CryptoService } from './helpers'
+
+async function emailPayload(data: unknown) {
+  const config = await CryptoService.fetchCryptoConfig()
+  if (!config.transport_encryption) return data
+  await CryptoService.initialize(await CryptoService.fetchPublicKey())
+  return CryptoService.encryptSensitiveData(
+    JSON.stringify(data),
+    localStorage.getItem('user_id') || '',
+    sessionStorage.getItem('session_id') || ''
+  )
+}
 
 export const discordApi = {
   async getCopyTradeProfiles(): Promise<CopyTradePreset[]> {
@@ -45,7 +58,27 @@ export const discordApi = {
     return result.data!
   },
 
-  async testDiscordAlertEmail(email?: string): Promise<{
+  async getDiscordEmail(): Promise<EmailSettings> {
+    const result = await httpClient.get<EmailSettings>(
+      `${API_BASE}/discord/email`
+    )
+    if (!result.success || !result.data)
+      throw new Error(result.message || 'Failed to load email settings')
+    return result.data
+  },
+  async saveDiscordEmail(draft: EmailDraft): Promise<void> {
+    const result = await httpClient.post(
+      `${API_BASE}/discord/email`,
+      await emailPayload(draft)
+    )
+    if (!result.success)
+      throw new Error(result.message || 'Failed to save email settings')
+  },
+
+  async testDiscordAlertEmail(
+    email?: string,
+    draft?: EmailDraft
+  ): Promise<{
     ok: boolean
     email?: string
     error?: string
@@ -54,7 +87,10 @@ export const discordApi = {
       ok: boolean
       email?: string
       error?: string
-    }>(`${API_BASE}/discord/test-email`, { email: email ?? '' })
+    }>(
+      `${API_BASE}/discord/test-email`,
+      draft ? await emailPayload({ draft }) : { email: email ?? '' }
+    )
     if (!result.success) throw new Error('Failed to send test email')
     return result.data!
   },

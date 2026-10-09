@@ -28,10 +28,11 @@ NOFX is an open-source trading terminal where the strategy is a language model. 
 Traders compose freely: any model, any of nine exchanges, any strategy. Run several side by side and compare them on a public leaderboard by realized return. Everything runs on your own machine; exchange credentials are encrypted at rest and never leave it.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NoFxAiOS/nofx/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/linlea666/joz/main/install.sh -o /tmp/nofx-install.sh
+sudo bash /tmp/nofx-install.sh
 ```
 
-The terminal opens at `http://127.0.0.1:3000`.
+The installer supports **Ubuntu 24.04 LTS amd64**, installs in `/opt/nofx`, and serves the UI at `http://SERVER_IP:3000`. Copy-trading starts in observation mode; installation does not enable live execution. See the [installation and email configuration guide](docs/copytrade/install-and-email.zh-CN.md).
 
 **First run**
 
@@ -163,60 +164,35 @@ Crypto perpetuals on all nine exchanges. On Hyperliquid, the same runtime also t
 
 ## Install
 
-**Linux / macOS**
+**Ubuntu 24.04 LTS / amd64**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/NoFxAiOS/nofx/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/linlea666/joz/main/install.sh -o /tmp/nofx-install.sh
+sudo bash /tmp/nofx-install.sh
 ```
 
-**Railway**
+The installer uses this repository's `main` source, installs Docker from its official Ubuntu repository when missing, generates new-install keys, and builds the backend, frontend and Discord collector sequentially. It preserves existing runtime data and never enables live copy-trading automatically. Configure SMTP sender credentials and the alert recipient in the Discord settings UI after installation.
 
-[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/nofx?referralCode=nofx)
-
-**Docker**
+**Update** — keeps the existing command:
 
 ```bash
-curl -O https://raw.githubusercontent.com/NoFxAiOS/nofx/main/docker-compose.prod.yml
-docker compose -f docker-compose.prod.yml up -d
+cd /opt/nofx && ./start.sh update
 ```
 
-**Windows** — install [Docker Desktop](https://www.docker.com/products/docker-desktop/), then:
-
-```powershell
-curl -o docker-compose.prod.yml https://raw.githubusercontent.com/NoFxAiOS/nofx/main/docker-compose.prod.yml
-docker compose -f docker-compose.prod.yml up -d
-```
-
-**From source** — Go 1.21+, Node.js 18+:
+Only a clean `main` checkout with the correct `origin` can fast-forward. Builds complete before containers are updated; failed builds leave existing containers running. Keys, database, collection buffer, email configuration and saved execution mode are retained.
 
 ```bash
-git clone https://github.com/NoFxAiOS/nofx.git && cd nofx
-go build -o nofx && ./nofx            # backend
-cd web && npm install && npm run dev  # frontend, in a second terminal
+cd /opt/nofx
+./start.sh status
+./start.sh logs backend
+./start.sh logs discord-collector
 ```
 
-**Update** — re-run the install script; it upgrades in place.
+This deployment uses `docker-compose.yml` with all three services. The old upstream `docker-compose.prod.yml` images do not include this fork's collector. The current one-click installer does not claim macOS, Windows or Railway support.
 
-<details>
-<summary>Server deployment</summary>
+For HTTPS, configure a reverse proxy with a valid certificate, then optionally set `TRANSPORT_ENCRYPTION=true` in `.env` and redeploy. Browser transport encryption requires HTTPS or localhost.
 
-<br/>
-
-**HTTP**
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NoFxAiOS/nofx/main/install.sh | bash
-# http://YOUR_IP:3000
-```
-
-**HTTPS via Cloudflare**
-
-1. Add the domain to [Cloudflare](https://dash.cloudflare.com) (free plan)
-2. A record → server IP, proxied
-3. SSL/TLS → Flexible
-4. `TRANSPORT_ENCRYPTION=true` in `.env`
-
-</details>
+See [installation, frontend email configuration and troubleshooting](docs/copytrade/install-and-email.zh-CN.md), and [Gateway verification and trader source examples](docs/copytrade/gateway-fresh-deployment.zh-CN.md).
 
 <br/>
 

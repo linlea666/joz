@@ -327,3 +327,18 @@ export interface CopyTradePreset {
     'market_dual_price_mode' | 'default_reduce_ratio' | 'channel_notes'
   >
 }
+
+export interface EmailDraft {
+  host: string
+  port: number
+  security: 'tls' | 'starttls'
+  user: string
+  password: string
+  recipient: string
+  enabled: boolean
+}
+export interface EmailSettings extends Omit<EmailDraft, 'password'> {
+  source: 'none' | 'environment' | 'database'
+  password_set: boolean
+  configured: boolean
+}

@@ -47,3 +47,21 @@ web/dist/
 tmp/
 temp/
 *.tmp
+
+# Private configuration, credentials and persistent runtime data
+.env
+.env.*
+!.env.example
+data/
+backups/
+backup/
+*.db
+*.db-*
+*.sqlite*
+*.pem
+*.key
+discord-buffer/
+discord-runtime/
+.collector-buffer/
+*.bak
+.env.install.tmp

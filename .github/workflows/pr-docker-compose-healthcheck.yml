@@ -1,152 +1,62 @@
-name: PR Docker Compose Healthcheck
-
-# Verify docker-compose.yml healthcheck config works correctly in Alpine containers
+name: Deployment and Docker Compose Healthcheck
 on:
+  workflow_dispatch:
   pull_request:
-    branches:
-      - main
-      - dev
+    branches: [main]
     paths:
+      - 'install.sh'
+      - 'start.sh'
+      - 'scripts/deploy-*'
+      - 'scripts/tests/**'
       - 'docker-compose.yml'
-      - 'docker/Dockerfile.backend'
-      - 'docker/Dockerfile.frontend'
+      - 'docker/**'
+      - 'collector/**'
+      - '.env.example'
+      - '.dockerignore'
       - '.github/workflows/pr-docker-compose-healthcheck.yml'
-
+  push:
+    branches: [main]
+    paths:
+      - 'install.sh'
+      - 'start.sh'
+      - 'scripts/deploy-*'
+      - 'docker-compose.yml'
+      - 'collector/**'
+      - '.github/workflows/pr-docker-compose-healthcheck.yml'
+permissions:
+  contents: read
 jobs:
   healthcheck-test:
-    name: Test Docker Compose Healthcheck
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Create minimal .env for testing
+      - uses: actions/checkout@v4
+      - name: Shell syntax and mocked install/update failures
         run: |
-          cat > .env <<EOF
-          # Minimal config for healthcheck testing
-          NOFX_BACKEND_PORT=8080
-          NOFX_FRONTEND_PORT=3000
-          NOFX_TIMEZONE=UTC
-          DATA_ENCRYPTION_KEY=test-key-32-chars-minimum-length
-          JWT_SECRET=test-jwt-secret-minimum-32-chars
-          EOF
-
-      - name: Create minimal config.json
+          bash -n install.sh start.sh scripts/deploy-common.sh
+          python3 -m unittest discover -s scripts/tests -v
+      - name: Fresh source deployment (no Discord or SMTP credentials)
+        run: ./start.sh start --build
+      - name: Verify IPC and observation defaults; repeat without replacing keys
         run: |
-          cat > config.json <<EOF
-          {
-            "ai_models": [],
-            "exchanges": [],
-            "traders": []
-          }
-          EOF
-
-      - name: Start services with docker compose
-        run: |
-          docker compose up -d
-          echo "✅ Services started, waiting for healthcheck..."
-
-      - name: Wait for healthcheck start_period
-        run: |
-          echo "⏳ Waiting 70 seconds for healthcheck start_period to complete..."
-          sleep 70
-
-      - name: Verify backend healthcheck
-        run: |
-          echo "🔍 Checking backend container health..."
-
-          BACKEND_HEALTH=$(docker inspect nofx-trading --format='{{.State.Health.Status}}')
-          echo "Backend health status: $BACKEND_HEALTH"
-
-          if [ "$BACKEND_HEALTH" != "healthy" ]; then
-            echo "❌ Backend container is not healthy!"
-            echo "Health status: $BACKEND_HEALTH"
-            echo ""
-            echo "Health logs:"
-            docker inspect nofx-trading --format='{{json .State.Health}}' | jq
-            echo ""
-            echo "Container logs:"
-            docker logs nofx-trading
-            exit 1
-          fi
-
-          echo "✅ Backend container is healthy"
-
-      - name: Verify frontend healthcheck
-        run: |
-          echo "🔍 Checking frontend container health..."
-
-          FRONTEND_HEALTH=$(docker inspect nofx-frontend --format='{{.State.Health.Status}}')
-          echo "Frontend health status: $FRONTEND_HEALTH"
-
-          if [ "$FRONTEND_HEALTH" != "healthy" ]; then
-            echo "❌ Frontend container is not healthy!"
-            echo "Health status: $FRONTEND_HEALTH"
-            echo ""
-            echo "Health logs:"
-            docker inspect nofx-frontend --format='{{json .State.Health}}' | jq
-            echo ""
-            echo "Container logs:"
-            docker logs nofx-frontend
-            exit 1
-          fi
-
-          echo "✅ Frontend container is healthy"
-
-      - name: Verify healthcheck commands are Alpine-compatible
-        run: |
-          echo "🔍 Verifying healthcheck commands use Alpine-compatible tools..."
-
-          # Check that docker-compose.yml uses wget (not curl)
-          if grep -q 'test:.*curl' docker-compose.yml; then
-            echo "❌ ERROR: docker-compose.yml uses 'curl' which doesn't exist in Alpine!"
-            echo ""
-            echo "Alpine Linux (used by our containers) includes 'wget' but not 'curl'."
-            echo "Please use 'wget --no-verbose --tries=1 --spider' instead."
-            exit 1
-          fi
-
-          if ! grep -q 'test:.*wget' docker-compose.yml; then
-            echo "⚠️  WARNING: No wget healthcheck found in docker-compose.yml"
-          else
-            echo "✅ Healthcheck uses Alpine-compatible 'wget' command"
-          fi
-
-      - name: Test healthcheck commands inside containers
-        run: |
-          echo "🧪 Testing healthcheck commands directly..."
-
-          # Test backend healthcheck command
-          echo "Testing backend healthcheck..."
-          docker exec nofx-trading wget --no-verbose --tries=1 --spider http://localhost:8080/api/health
-          echo "✅ Backend healthcheck command works"
-
-          # Test frontend healthcheck command
-          echo "Testing frontend healthcheck..."
-          docker exec nofx-frontend wget --no-verbose --tries=1 --spider http://127.0.0.1/health
-          echo "✅ Frontend healthcheck command works"
-
-      - name: Show container status
-        if: always()
-        run: |
-          echo "📊 Final container status:"
-          docker ps --format "table {{.Names}}\t{{.Status}}"
-
-      - name: Show logs on failure
+          sha256sum .env > /tmp/env.sha256
+          ./start.sh status
+          docker compose -p nofx -f docker-compose.yml exec -T discord-collector python healthcheck.py --describe
+          python3 - <<'PY'
+          import sqlite3
+          db = sqlite3.connect('data/data.db')
+          assert db.execute("SELECT count(*) FROM discord_configs WHERE run_mode = 'live'").fetchone()[0] == 0
+          assert db.execute('SELECT count(*) FROM email_configs').fetchone()[0] == 0
+          PY
+          ./start.sh start --build
+          sha256sum --check /tmp/env.sha256
+          test "$(stat -c %a .env)" = 600
+          test "$(stat -c %a data)" = 700
+      - name: Failure diagnostics (no environment dump)
         if: failure()
         run: |
-          echo "📋 Backend logs:"
-          docker logs nofx-trading
-          echo ""
-          echo "📋 Frontend logs:"
-          docker logs nofx-frontend
-
-      - name: Cleanup
+          docker compose -p nofx -f docker-compose.yml ps -a
+          docker compose -p nofx -f docker-compose.yml logs --tail 150
+      - name: Cleanup isolated CI resources
         if: always()
-        run: |
-          docker compose down -v
-          rm -f .env config.json
+        run: docker compose -p nofx -f docker-compose.yml down -v

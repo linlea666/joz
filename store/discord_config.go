@@ -52,7 +52,7 @@ func NewDiscordConfigStore(db *gorm.DB) *DiscordConfigStore {
 }
 
 func (s *DiscordConfigStore) initTables() error {
-	return s.db.AutoMigrate(&DiscordConfig{})
+	return s.db.AutoMigrate(&DiscordConfig{}, &EmailConfig{})
 }
 
 // Get returns the current config, or (nil, nil) when not configured yet.
