@@ -29,6 +29,10 @@ const (
 // reset ProcessingStatus so lifecycle changes carried by edits are reprocessed
 // (jonzi-style trade cards mutate in place: opened -> SL moved -> closed).
 type DiscordMessage struct {
+	DeliveryID       int64      `gorm:"-" json:"delivery_id,omitempty"`
+	SourceEventID    string     `gorm:"-" json:"source_event_id,omitempty"`
+	RulesSnapshot    string     `gorm:"-" json:"rules_snapshot,omitempty"`
+	ExecutionKey     string     `gorm:"-" json:"-"`
 	ID               int64      `gorm:"primaryKey;autoIncrement" json:"id"`
 	ChannelID        string     `gorm:"column:channel_id;not null;uniqueIndex:idx_discord_msg_channel_message,priority:1;index:idx_discord_msg_channel_time,priority:1" json:"channel_id"`
 	MessageID        string     `gorm:"column:message_id;not null;uniqueIndex:idx_discord_msg_channel_message,priority:2" json:"message_id"`
@@ -85,7 +89,7 @@ func NewDiscordMessageStore(db *gorm.DB) *DiscordMessageStore {
 }
 
 func (s *DiscordMessageStore) initTables() error {
-	return s.db.AutoMigrate(&DiscordMessage{}, &DiscordChannelBaseline{})
+	return s.db.AutoMigrate(&DiscordMessage{}, &DiscordChannelBaseline{}, &DiscordInbound{}, &DiscordDelivery{}, &DiscordRoute{}, &DiscordSourceState{}, &DiscordSourceConfig{})
 }
 
 // UpsertResult describes what the upsert observed.
@@ -311,6 +315,8 @@ func (s *DiscordMessageStore) CleanOldMessages(days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days)
 	result := s.db.Where("message_timestamp < ? AND processing_status IN ?", cutoff,
 		[]string{DiscordMsgDone, DiscordMsgSkipped, DiscordMsgFailed}).
+		Where("message_id NOT IN (?)", s.db.Model(&CopyTradeContext{}).Select("root_message_id").Where("state IN ?", activeStates)).
+		Where("message_id NOT IN (?)", s.db.Model(&CopyTradeSignal{}).Select("message_id")).
 		Delete(&DiscordMessage{})
 	return result.RowsAffected, result.Error
 }
@@ -365,4 +371,14 @@ func semanticDiscordJSON(raw string) string {
 	}
 	data, _ := json.Marshal(clean(value))
 	return string(data)
+}
+
+func (s *DiscordMessageStore) GetRecentByChannels(channels []string, since time.Time, limit int) ([]*DiscordMessage, error) {
+	var rows []*DiscordMessage
+	q := s.db.Where("channel_id IN ?", channels)
+	if !since.IsZero() {
+		q = q.Where("message_timestamp >= ?", since)
+	}
+	err := q.Order("message_timestamp DESC").Limit(limit).Find(&rows).Error
+	return rows, err
 }

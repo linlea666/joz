@@ -3,6 +3,7 @@ package trader
 import (
 	"fmt"
 	"math"
+	"nofx/discord"
 	"nofx/kernel"
 	"nofx/logger"
 	"nofx/market"
@@ -83,6 +84,11 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		"ai_provider":     aiProvider,
 	}
 
+	if at.IsCopyTrading() {
+		if source := discord.Global(); source != nil {
+			result["source_applied"] = source.RouteApplied(at.id)
+		}
+	}
 	// Add strategy info
 	if at.config.StrategyConfig != nil {
 		result["strategy_type"] = at.config.StrategyConfig.StrategyType

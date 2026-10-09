@@ -119,6 +119,11 @@ const (
 
 // CopyTradeSignal is the per-trader record of one interpreted message.
 type CopyTradeSignal struct {
+	SourceEventID    string `json:"source_event_id,omitempty"`
+	DeliveryID       int64  `json:"delivery_id,omitempty"`
+	LogicalChannelID string `json:"logical_channel_id,omitempty"`
+	QueueMs          int64  `json:"queue_ms"`
+
 	ID                string `gorm:"primaryKey" json:"id"`
 	TraderID          string `gorm:"column:trader_id;not null;index:idx_cts_trader_time,priority:1" json:"trader_id"`
 	ChannelID         string `gorm:"column:channel_id;not null;index" json:"channel_id"`
@@ -643,4 +648,10 @@ func (s *CopyTradeStore) CleanOldAIRuns(days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days)
 	result := s.db.Where("created_at < ?", cutoff).Delete(&CopyTradeAIRun{})
 	return result.RowsAffected, result.Error
+}
+
+func (s *CopyTradeStore) GetContextSignalsForSources(traderID string, channels []string, since time.Time, limit int) ([]*CopyTradeSignal, error) {
+	var rows []*CopyTradeSignal
+	err := s.db.Where("trader_id = ? AND channel_id IN ? AND message_timestamp >= ? AND classification != ''", traderID, channels, since.UTC()).Order("message_timestamp DESC").Limit(limit).Find(&rows).Error
+	return rows, err
 }

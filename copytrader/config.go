@@ -1,6 +1,7 @@
 package copytrader
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -43,10 +44,9 @@ const (
 // Stored as JSON in traders.copy_trading_config; parse via ParseCopyTradingConfig.
 type CopyTradingConfig struct {
 	// Signal source
-	PrimaryChannelID string `json:"primary_channel_id"`
-	// SourceChannelIDs is RESERVED and not wired anywhere yet: extra channels
-	// feeding the same trades (multi-channel authors). Kept in the schema so
-	// stored configs stay forward-compatible; setting it has NO effect in V1.
+	PrimaryChannelID      string   `json:"primary_channel_id"`
+	SourceMode            string   `json:"source_mode,omitempty"`
+	SourceAuthorNames     []string `json:"source_author_names,omitempty"`
 	SourceChannelIDs      []string `json:"source_channel_ids,omitempty"`
 	SourceAuthorIDs       []string `json:"source_author_ids,omitempty"` // empty = accept all authors
 	ChannelNotes          string   `json:"channel_notes,omitempty"`     // free-text channel profile injected into the prompt
@@ -139,6 +139,30 @@ func (c *CopyTradingConfig) Encode() (string, error) {
 
 // Validate checks the configuration for a copy-trading trader.
 func (c *CopyTradingConfig) Validate() error {
+	switch c.SourceMode {
+	case "", "channel", "chroma":
+	default:
+		return fmt.Errorf("unknown source_mode")
+	}
+	if c.SourceMode == "chroma" && (len(c.SourceChannelIDs) == 0 || (len(c.SourceAuthorIDs) == 0 && len(c.SourceAuthorNames) == 0)) {
+		return fmt.Errorf("Chroma requires actual source channels and an exact author filter")
+	}
+	seen := map[string]bool{}
+	for _, id := range c.SourceChannelIDs {
+		n, err := strconv.ParseUint(id, 10, 64)
+		if err != nil || n == 0 || seen[id] {
+			return fmt.Errorf("source_channel_ids must contain unique numeric IDs")
+		}
+		seen[id] = true
+	}
+	if len(seen) > 20 {
+		return fmt.Errorf("at most 20 source channels")
+	}
+	for _, name := range c.SourceAuthorNames {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("author names cannot be blank")
+		}
+	}
 	switch c.MarketDualPriceMode {
 	case "", DualPriceLegacy, DualPriceRange, DualPriceSplit, DualPriceReject:
 	default:
@@ -155,8 +179,8 @@ func (c *CopyTradingConfig) Validate() error {
 			return fmt.Errorf("risk and price settings must be finite and nonnegative")
 		}
 	}
-	if len(c.SourceChannelIDs) > 0 || c.ReasoningEffort != "" {
-		return fmt.Errorf("source_channel_ids and reasoning_effort are reserved and not supported")
+	if c.ReasoningEffort != "" {
+		return fmt.Errorf("reasoning_effort is reserved and not supported")
 	}
 	if _, ok := LookupInterpretationPreset(c.InterpretationProfile); !ok {
 		return fmt.Errorf("unknown interpretation_profile %q", c.InterpretationProfile)
@@ -270,4 +294,20 @@ func (c *CopyTradingConfig) ReduceRatio() float64 {
 		return *c.DefaultReduceRatio
 	}
 	return 50
+}
+
+func (c *CopyTradingConfig) ListenChannels() []string {
+	if len(c.SourceChannelIDs) > 0 {
+		return append([]string(nil), c.SourceChannelIDs...)
+	}
+	return []string{c.PrimaryChannelID}
+}
+
+// A wording-only change does not revoke an in-flight interpretation. Execution
+// and source settings do, while the old message keeps its interpretation rules.
+func (c *CopyTradingConfig) ExecutionKey() string {
+	v := *c
+	v.ChannelNotes = ""
+	b, _ := json.Marshal(v)
+	return fmt.Sprintf("%x", sha256.Sum256(b))
 }

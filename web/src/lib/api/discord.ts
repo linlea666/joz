@@ -13,8 +13,11 @@ import { API_BASE, httpClient } from './helpers'
 
 export const discordApi = {
   async getCopyTradeProfiles(): Promise<CopyTradePreset[]> {
-    const result = await httpClient.get<{ profiles: CopyTradePreset[] }>(`${API_BASE}/copytrade/profiles`)
-    if (!result.success || !result.data?.profiles) throw new Error('Failed to load author presets')
+    const result = await httpClient.get<{ profiles: CopyTradePreset[] }>(
+      `${API_BASE}/copytrade/profiles`
+    )
+    if (!result.success || !result.data?.profiles)
+      throw new Error('Failed to load author presets')
     return result.data.profiles
   },
 
@@ -26,16 +29,20 @@ export const discordApi = {
 
   async updateDiscordConfig(params: {
     token?: string
-    poll_interval_seconds?: number
+    run_mode?: 'observe' | 'live'
     enabled?: boolean
     alert_email?: string
     monitor_enabled?: boolean
-    monitor_interval_seconds?: number
-  }): Promise<void> {
-    const result = await httpClient.post(`${API_BASE}/discord`, params)
+  }): Promise<{ saved: boolean; applied: boolean; apply_error?: string }> {
+    const result = await httpClient.post<{
+      saved: boolean
+      applied: boolean
+      apply_error?: string
+    }>(`${API_BASE}/discord`, params)
     if (!result.success) {
       throw new Error(result.message || 'Failed to save Discord config')
     }
+    return result.data!
   },
 
   async testDiscordAlertEmail(email?: string): Promise<{
@@ -52,9 +59,16 @@ export const discordApi = {
     return result.data!
   },
 
-  async deleteDiscordToken(): Promise<void> {
-    const result = await httpClient.delete(`${API_BASE}/discord/token`)
+  async deleteDiscordToken(): Promise<{
+    applied: boolean
+    apply_error?: string
+  }> {
+    const result = await httpClient.delete<{
+      applied: boolean
+      apply_error?: string
+    }>(`${API_BASE}/discord/token`)
     if (!result.success) throw new Error('Failed to clear Discord token')
+    return result.data!
   },
 
   async testDiscordConnection(token?: string): Promise<{
@@ -190,9 +204,12 @@ export const discordApi = {
       message?: string
     }
     if (!resp.ok) {
-      throw new Error(json.error || json.message || `Generate failed (${resp.status})`)
+      throw new Error(
+        json.error || json.message || `Generate failed (${resp.status})`
+      )
     }
-    if (!json.draft) throw new Error(json.error || json.message || 'Empty draft')
+    if (!json.draft)
+      throw new Error(json.error || json.message || 'Empty draft')
     return json.draft
   },
 

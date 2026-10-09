@@ -2,6 +2,7 @@ package discord
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,13 +26,13 @@ const reminderInterval = 60 * time.Minute
 // monitoring is idle (unconfigured/disabled) and we just re-check the config.
 const monitorDefaultInterval = 60 * time.Second
 
-// TokenMonitor periodically probes the global Discord token
-// (`GET /quests/@me`) and emails the configured recipient when the token
+// TokenMonitor observes the local collector state
+// (local Gateway state) and emails the configured recipient when the token
 // becomes invalid (and again when it recovers). It re-reads the config from
 // the store every cycle, so settings changes apply without any reload wiring.
 type TokenMonitor struct {
 	store  *store.Store
-	poller *PollerManager // reused for its rate-limited client (may be nil)
+	source *SourceManager // observes local Gateway state (may be nil)
 
 	// Seams for unit tests; production defaults are set in NewTokenMonitor.
 	probe func(token string) error             // token validity check
@@ -42,29 +43,32 @@ type TokenMonitor struct {
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 
-	status        string
-	lastCheckedAt time.Time
-	lastError     string
-	invalidSince  time.Time
-	lastAlertAt   time.Time
-	alertsSent    int
+	status             string
+	lastCheckedAt      time.Time
+	lastError          string
+	invalidSince       time.Time
+	lastAlertAt        time.Time
+	alertsSent         int
+	sourceFailureSince time.Time
+	sourceLastAlert    time.Time
+	sourceFailure      string
 }
 
 // NewTokenMonitor creates the monitor (call Start to begin checking).
-func NewTokenMonitor(st *store.Store, poller *PollerManager) *TokenMonitor {
-	tm := &TokenMonitor{store: st, poller: poller, status: TokenStatusUnknown}
+func NewTokenMonitor(st *store.Store, source *SourceManager) *TokenMonitor {
+	tm := &TokenMonitor{store: st, source: source, status: TokenStatusUnknown}
 	tm.probe = func(token string) error {
-		// Prefer the poller's client (shares the process-wide serial
-		// rate-limit queue). Fall back to a one-off client when the poller
-		// is unconfigured.
-		var client *Client
-		if tm.poller != nil {
-			client = tm.poller.Client()
+		if tm.source == nil {
+			return fmt.Errorf("collector unavailable")
 		}
-		if client == nil {
-			client = NewClient(token)
+		s := tm.source.CollectorStatus()
+		if s.State == "auth_invalid" {
+			return &StatusError{StatusCode: 401, Body: "Gateway authentication failed"}
 		}
-		return client.CheckQuests()
+		if s.State != "connected" {
+			return fmt.Errorf("collector state: %s", s.State)
+		}
+		return nil
 	}
 	tm.send = notify.SendEmail
 	return tm
@@ -125,7 +129,7 @@ func (tm *TokenMonitor) checkOnce() time.Duration {
 	// Idle: nothing to monitor. Deliberate operator states (no token /
 	// monitoring off) never alert; state resets so a future failure after
 	// re-enabling gets a fresh alert.
-	if cfg == nil || string(cfg.Token) == "" || !cfg.MonitorEnabled {
+	if cfg == nil || string(cfg.Token) == "" || !cfg.MonitorEnabled || !cfg.Enabled {
 		tm.mu.Lock()
 		tm.status = TokenStatusUnknown
 		tm.invalidSince = time.Time{}
@@ -135,15 +139,10 @@ func (tm *TokenMonitor) checkOnce() time.Duration {
 		return monitorDefaultInterval
 	}
 
-	interval := time.Duration(cfg.MonitorIntervalSeconds) * time.Second
-	if interval < 30*time.Second {
-		interval = 30 * time.Second
-	}
-	if interval > 10*time.Minute {
-		interval = 10 * time.Minute
-	}
+	interval := 15 * time.Second
 
 	checkErr := tm.probe(string(cfg.Token))
+	tm.checkSourceHealth(cfg)
 	now := time.Now()
 
 	tm.mu.Lock()
@@ -171,7 +170,7 @@ func (tm *TokenMonitor) checkOnce() time.Duration {
 
 	switch {
 	case status == TokenStatusInvalid && prevStatus != TokenStatusInvalid:
-		logger.Errorf("[DiscordMonitor] token invalid (quests/@me): %v", checkErr)
+		logger.Errorf("[DiscordMonitor] Gateway authentication invalid: %v", checkErr)
 		tm.sendAlert(cfg, checkErr, invalidSince, false)
 	case status == TokenStatusInvalid && now.Sub(lastAlertAt) >= reminderInterval:
 		tm.sendAlert(cfg, checkErr, invalidSince, true)
@@ -208,7 +207,7 @@ func (tm *TokenMonitor) sendAlert(cfg *store.DiscordConfig, checkErr error, inva
 	}
 	body := fmt.Sprintf(
 		"NOFX 检测到全局 Discord Token 已失效（账号可能在其他设备退出登录或 Token 被重置）。\n\n"+
-			"状态检查接口：GET /quests/@me\n"+
+			"状态来源：Gateway 连接状态\n"+
 			"失效开始时间：%s\n"+
 			"最近一次检查：%s\n"+
 			"错误详情：%s\n\n"+
@@ -232,7 +231,7 @@ func (tm *TokenMonitor) sendRecovery(cfg *store.DiscordConfig, invalidSince time
 		downFor = time.Since(invalidSince).Round(time.Second).String()
 	}
 	body := fmt.Sprintf(
-		"NOFX 检测到 Discord Token 已恢复有效，跟单消息轮询恢复正常。\n\n"+
+		"NOFX 检测到 Discord Token 已恢复有效，跟单消息连接恢复正常。\n\n"+
 			"恢复时间：%s\n"+
 			"本次失效时长：%s\n",
 		formatAlertTime(time.Now()), downFor,
@@ -292,16 +291,16 @@ func formatAlertTimeRFC(t time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
-// --- global singleton (same pattern as the poller) ---
+// --- global singleton (same pattern as the source) ---
 
 var globalMonitor *TokenMonitor
 
 // InitGlobalMonitor creates (once) and returns the monitor singleton.
-func InitGlobalMonitor(st *store.Store, poller *PollerManager) *TokenMonitor {
+func InitGlobalMonitor(st *store.Store, source *SourceManager) *TokenMonitor {
 	globalMu.Lock()
 	defer globalMu.Unlock()
 	if globalMonitor == nil {
-		globalMonitor = NewTokenMonitor(st, poller)
+		globalMonitor = NewTokenMonitor(st, source)
 	}
 	return globalMonitor
 }
@@ -311,4 +310,55 @@ func GlobalMonitor() *TokenMonitor {
 	globalMu.Lock()
 	defer globalMu.Unlock()
 	return globalMonitor
+}
+
+// Collection health is independent from credential validity. It observes local
+// state only, with a grace period for normal reconnects and throttled alerts.
+func (tm *TokenMonitor) checkSourceHealth(cfg *store.DiscordConfig) {
+	if tm.source == nil {
+		return
+	}
+	s := tm.source.CollectorStatus()
+	failure := ""
+	if s.State != "connected" && s.State != "auth_invalid" && s.State != "disabled" {
+		failure = "Discord collection: " + s.State
+	}
+	for _, ch := range tm.source.Status() {
+		if ch.State == "gap" || ch.State == "forbidden" {
+			failure += "; channel " + ch.ChannelID + ": " + ch.State
+		}
+	}
+	failure = strings.TrimPrefix(failure, "; ")
+	now := time.Now()
+	tm.mu.Lock()
+	if failure == "" && s.State != "connected" {
+		tm.mu.Unlock()
+		return
+	}
+	if failure == "" {
+		alerted := !tm.sourceLastAlert.IsZero()
+		tm.sourceFailure = ""
+		tm.sourceFailureSince = time.Time{}
+		tm.sourceLastAlert = time.Time{}
+		tm.mu.Unlock()
+		if alerted && cfg.AlertEmail != "" {
+			tm.deliver(cfg.AlertEmail, "【NOFX】Discord 采集恢复", "采集连接与频道状态已恢复；历史缺口核对后才放行新增风险。")
+		}
+		return
+	}
+	if tm.sourceFailure == "" {
+		tm.sourceFailureSince = now
+	}
+	tm.sourceFailure = failure
+	alert := now.Sub(tm.sourceFailureSince) >= time.Minute && (tm.sourceLastAlert.IsZero() || now.Sub(tm.sourceLastAlert) >= reminderInterval)
+	if alert {
+		tm.sourceLastAlert = now
+	}
+	tm.mu.Unlock()
+	if alert {
+		logger.Warnf("[Discord] %s", failure)
+		if cfg.AlertEmail != "" {
+			tm.deliver(cfg.AlertEmail, "【NOFX 告警】Discord 采集异常", failure+"\n新增风险可能已被阻止，已有交易的订单恢复和保护继续运行。请检查 Discord 采集状态、频道权限、缓冲和磁盘。")
+		}
+	}
 }

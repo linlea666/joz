@@ -98,6 +98,16 @@ func (x *Executor) submitManaged(row *store.CopyTradeOrder, rules *types.Managed
 	if row.Status != "PLANNED" {
 		return x.queryManaged(row)
 	}
+	if !reduce && x.beforeEntrySubmit != nil {
+		if err := x.beforeEntrySubmit(row); err != nil {
+			if errors.Is(err, errEntryRevoked) {
+				if cancelErr := x.cancelManaged(row); cancelErr != nil {
+					return cancelErr
+				}
+			}
+			return err
+		}
+	}
 	if err := x.st.CopyTrade().UpdateOrder(row.ID, map[string]interface{}{"status": "SUBMITTING"}); err != nil {
 		return err
 	}

@@ -30,6 +30,15 @@ func (e *Engine) messageSources(msg *store.DiscordMessage, profiles ...string) [
 		profile = profiles[0]
 	}
 	segments := BuildSourceSegments(msg, profile)
+	if e.messageRules(msg).SourceMode == "chroma" {
+		for i := range segments {
+			if strings.HasPrefix(segments[i].ID, "embed:") {
+				segments[i].Role = "reference"
+				segments[i].Reason = "notification card supplies parameters only"
+			}
+		}
+		return segments
+	}
 	history, _ := e.st.DiscordMessage().GetRecentByChannel(msg.ChannelID, msg.MessageTimestamp.AddDate(0, 0, -7), 200)
 	if active, err := e.st.CopyTrade().GetActiveContexts(e.traderID); err == nil {
 		for _, c := range active {
@@ -224,7 +233,10 @@ func (e *Engine) retryLoop() {
 					return
 				default:
 				}
-				msg, err := e.st.DiscordMessage().GetByMessageID(s.ChannelID, s.MessageID)
+				msg, err := e.st.DiscordMessage().DeliveryMessage(e.traderID, s.MessageID, s.MessageRevision)
+				if msg == nil && err == nil && s.DeliveryID == 0 {
+					msg, err = e.st.DiscordMessage().GetByMessageID(s.ChannelID, s.MessageID)
+				}
 				if err != nil {
 					continue
 				}

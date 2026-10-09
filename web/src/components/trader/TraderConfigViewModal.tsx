@@ -22,12 +22,18 @@ export function TraderConfigViewModal({
   traderData,
 }: TraderConfigViewModalProps) {
   const { language } = useLanguage()
-  const { profiles } = useCopyTradeProfiles(isOpen && traderData?.trader_type === 'copy_trading')
+  const { profiles } = useCopyTradeProfiles(
+    isOpen && traderData?.trader_type === 'copy_trading'
+  )
   if (!isOpen || !traderData) return null
 
   let copyConfig: Partial<CopyTradingConfig> | null = null
   if (traderData.trader_type === 'copy_trading') {
-    try { copyConfig = JSON.parse(traderData.copy_trading_config || '{}') } catch { /* show no guessed settings */ }
+    try {
+      copyConfig = JSON.parse(traderData.copy_trading_config || '{}')
+    } catch {
+      /* show no guessed settings */
+    }
   }
 
   const InfoRow = ({
@@ -142,13 +148,64 @@ export function TraderConfigViewModal({
             </div>
           </div>
 
-          {copyConfig && <div className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5">
-            <InfoRow label={t('copytrade.interpretationProfile', language)} value={profiles.find(p => p.id === (copyConfig.interpretation_profile || 'default'))?.name || copyConfig.interpretation_profile || t('copytrade.profileDefault', language)} />
-            <InfoRow label={t('copytrade.entryPolicy', language)} value={t(copyConfig.entry_policy === 'market_reference_split' ? 'copytrade.entrySplit' : 'copytrade.entryLegacy', language)} />
-            <InfoRow label={t('copytrade.dualPriceLabel', language)} value={t(`copytrade.${({legacy:'dualPriceLegacy',range:'dualPriceRange',market_then_limit:'dualPriceSplit',reject:'dualPriceReject'} as const)[copyConfig.market_dual_price_mode || 'legacy']}`, language)} />
-            <InfoRow label={t('copytrade.reduceDefault', language)} value={`${copyConfig.default_reduce_ratio ?? 50}%`} />
-            <p className="text-xs text-nofx-text-muted mt-2">{t('copytrade.rulesHint', language)}</p>
-          </div>}
+          {copyConfig && (
+            <div className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5">
+              <InfoRow
+                label={language === 'zh' ? '来源模式' : 'Source mode'}
+                value={copyConfig.source_mode || 'channel'}
+              />
+              <InfoRow
+                label={language === 'zh' ? '实际监听频道' : 'Source channels'}
+                value={(copyConfig.source_channel_ids?.length
+                  ? copyConfig.source_channel_ids
+                  : [copyConfig.primary_channel_id]
+                ).join(', ')}
+              />
+              <InfoRow
+                label={language === 'zh' ? '精确作者过滤' : 'Exact authors'}
+                value={
+                  [
+                    ...(copyConfig.source_author_ids || []),
+                    ...(copyConfig.source_author_names || []),
+                  ].join(', ') || '—'
+                }
+              />
+              <InfoRow
+                label={t('copytrade.interpretationProfile', language)}
+                value={
+                  profiles.find(
+                    (p) =>
+                      p.id === (copyConfig.interpretation_profile || 'default')
+                  )?.name ||
+                  copyConfig.interpretation_profile ||
+                  t('copytrade.profileDefault', language)
+                }
+              />
+              <InfoRow
+                label={t('copytrade.entryPolicy', language)}
+                value={t(
+                  copyConfig.entry_policy === 'market_reference_split'
+                    ? 'copytrade.entrySplit'
+                    : 'copytrade.entryLegacy',
+                  language
+                )}
+              />
+              <InfoRow
+                label={t('copytrade.dualPriceLabel', language)}
+                value={t(
+                  `copytrade.${({ legacy: 'dualPriceLegacy', range: 'dualPriceRange', market_then_limit: 'dualPriceSplit', reject: 'dualPriceReject' } as const)[copyConfig.market_dual_price_mode || 'legacy']}`,
+                  language
+                )}
+              />
+              <InfoRow
+                label={t('copytrade.reduceDefault', language)}
+                value={`${copyConfig.default_reduce_ratio ?? 50}%`}
+              />
+              <p className="text-xs text-nofx-text-muted mt-2">
+                {t('copytrade.rulesHint', language)}
+              </p>
+            </div>
+          )}
 
           {/* Strategy Info - only show if strategy is bound */}
           {traderData.strategy_id && (

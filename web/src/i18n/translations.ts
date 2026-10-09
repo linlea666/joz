@@ -676,61 +676,21 @@ export const translations = {
 
     // ===== GETTING STARTED =====
 
-
-
-
-
-
     // ===== INSTALLATION =====
-
-
-
-
-
 
     // ===== CONFIGURATION =====
 
-
-
-
-
-
     // ===== TRADING =====
-
-
-
-
-
-
-
 
     // ===== TECHNICAL ISSUES =====
 
-
-
-
-
-
-
-
     // ===== SECURITY =====
-
-
-
 
     // ===== FEATURES =====
 
-
-
     // ===== AI MODELS =====
 
-
-
-
     // ===== CONTRIBUTING =====
-
-
-
 
     // Web Crypto Environment Check
     environmentCheck: {
@@ -1016,8 +976,7 @@ export const translations = {
       positionClosed: 'Position closed successfully',
       closeFailed: 'Failed to close position',
       closeAll: 'Close All',
-      confirmCloseAllPositions:
-        'Market-close ALL {count} open positions?',
+      confirmCloseAllPositions: 'Market-close ALL {count} open positions?',
       allPositionsClosed: 'All positions closed',
       closeAllPartial: '{failed} of {count} positions failed to close',
       hideAddress: 'Hide address',
@@ -1229,11 +1188,11 @@ export const translations = {
       tokenHint:
         'A personal Discord token shared by all copy-trading traders. Stored encrypted; validated before saving.',
       pollInterval: 'Poll Interval (sec)',
-      enablePolling: 'Polling',
+      enablePolling: 'Event collection',
       on: 'On',
       off: 'Off',
       riskNote:
-        'Note: reading channels with a personal token is against Discord ToS and carries account risk. Use a dedicated account and keep the poll interval conservative.',
+        'Note: reading channels with a personal token is against Discord ToS and carries account risk. Gateway improves delivery efficiency, not immunity from account restrictions.',
       testConnection: 'Test Connection',
       save: 'Save',
       saving: 'Saving...',
@@ -1254,7 +1213,7 @@ export const translations = {
       subscribers: 'subscriber(s)',
       monitorTitle: 'Token Status Monitor',
       monitorHint:
-        'Periodically checks token validity and emails you when it becomes invalid (and again when it recovers).',
+        'Observes Gateway connection and heartbeat status. No periodic credential probe requests.',
       monitorEnable: 'Monitoring',
       monitorInterval: 'Check Interval (sec)',
       alertEmail: 'Alert Email',
@@ -1262,7 +1221,8 @@ export const translations = {
       sendTestEmail: 'Send Test Email',
       testEmailOk: 'Test email sent, please check the inbox',
       testEmailFailed: 'Test email failed',
-      smtpNotConfigured: 'SMTP is not configured on the server (.env: SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS)',
+      smtpNotConfigured:
+        'SMTP is not configured on the server (.env: SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS)',
       tokenStatus: 'Token Status',
       statusOk: 'Valid',
       statusInvalid: 'Invalid',
@@ -1290,7 +1250,7 @@ export const translations = {
         'Numeric channel ID. Use the test tool in Settings → Discord to verify it first.',
       channelNotes: 'Channel Profile',
       channelNotesPlaceholder:
-        "How this author posts entries, closes, SL moves; slang; noise to ignore. Does not change position sizing.",
+        'How this author posts entries, closes, SL moves; slang; noise to ignore. Does not change position sizing.',
       channelNotesHint:
         'Background knowledge for recognition only. The output contract stays fixed. Edit here, then re-run Recognition Replay to compare.',
       channelNotesTemplate: 'Insert template',
@@ -1325,34 +1285,55 @@ export const translations = {
       autoBreakeven: 'Move SL to breakeven after TP1',
       interpretationProfile: 'Author style preset',
       profileDefault: 'General',
-      actionStates: { done: 'Processing complete', executing: 'Processing', preflight_rejected: 'Rejected before submission', rejected: 'Exchange rejected', uncertain: 'Outcome requires reconciliation', skipped: 'Skipped' },
+      actionStates: {
+        done: 'Processing complete',
+        executing: 'Processing',
+        preflight_rejected: 'Rejected before submission',
+        rejected: 'Exchange rejected',
+        uncertain: 'Outcome requires reconciliation',
+        skipped: 'Skipped',
+      },
       dualPriceLabel: 'Two-price wording (market A—B)',
       dualPriceLegacy: 'Keep existing interpretation',
       dualPriceRange: 'Entry range',
       dualPriceSplit: 'Market + limit (shared risk)',
       dualPriceReject: 'Skip as ambiguous',
       reduceDefault: 'Default explicit reduction (% of remaining position)',
-      rulesHint: 'Explicit author meaning comes first. These settings resolve ambiguity; notes add language conventions. Changes apply to future messages only. Market + limit requires Binance and loss-based sizing.',
-      rulesInvalid: 'Use a reduction percentage above 0 and at most 100, and valid nonnegative integer TTL values.',
-      reservedUnsupported: 'Legacy reserved fields are present but unsupported. Remove their values before saving; they do not affect execution.',
+      rulesHint:
+        'Explicit author meaning comes first. These settings resolve ambiguity; notes add language conventions. Changes apply to future messages only. Market + limit requires Binance and loss-based sizing.',
+      rulesInvalid:
+        'Use a reduction percentage above 0 and at most 100, and valid nonnegative integer TTL values.',
+      reservedUnsupported:
+        'Legacy reserved fields are present but unsupported. Remove their values before saving; they do not affect execution.',
       rulesSnapshot: 'Rules used for this message',
-      replayScope: 'Recognition validation only. Uses current rules, context and market prices; historical execution state is incomplete. Account ownership, balance, contract capability, order limits and TTL are not execution-tested.',
-      tpCapHint: 'Up to three TP targets are executed. Dropped targets are recorded below.',
-      profileHint: 'An explicit reduction without a ratio uses {ratio}% of the remaining position. Selecting an author fills editable recommendations and notes; changes apply only after saving.',
-      profileLoadFailed: 'Preset catalog unavailable. Existing settings remain unchanged; retry loading before switching presets.',
+      replayScope:
+        'Recognition validation only. Uses current rules, context and market prices; historical execution state is incomplete. Account ownership, balance, contract capability, order limits and TTL are not execution-tested.',
+      tpCapHint:
+        'Up to three TP targets are executed. Dropped targets are recorded below.',
+      profileHint:
+        'An explicit reduction without a ratio uses {ratio}% of the remaining position. Selecting an author fills editable recommendations and notes; changes apply only after saving.',
+      profileLoadFailed:
+        'Preset catalog unavailable. Existing settings remain unchanged; retry loading before switching presets.',
       entryRules: 'Entry rules',
-      entryRulesHint: 'Both options may be enabled. Market A—B uses the two-price meaning; market A uses the single-reference policy. Explicit legs and ranges are not split again. One shared risk budget.',
-      configSavedInactive: 'Saved, but the runtime reload failed. Check configuration and start manually; changes are not active.',
-      configRestartRequested: 'Saved; restart requested. Check the trader status for the running result.',
+      entryRulesHint:
+        'Both options may be enabled. Market A—B uses the two-price meaning; market A uses the single-reference policy. Explicit legs and ranges are not split again. One shared risk budget.',
+      configSavedInactive:
+        'Saved, but the runtime reload failed. Check configuration and start manually; changes are not active.',
+      configRestartRequested:
+        'Saved; restart requested. Check the trader status for the running result.',
       entryPolicy: 'Single-reference market entry execution (market A)',
       entryLegacy: 'Existing entry rules',
       entrySplit: '50% market + 50% reference limit (risk budget)',
-      splitHint: 'Binance + By Risk only. For market signals with a reference: favorable/equal prices use full market; adverse prices within the configured threshold split risk equally; beyond it use full reference limit. Thresholds remain unchanged.',
-      splitUnsupported: 'Select Binance and By Risk, or switch back to existing entry rules.',
+      splitHint:
+        'Binance + By Risk only. For market signals with a reference: favorable/equal prices use full market; adverse prices within the configured threshold split risk equally; beyond it use full reference limit. Thresholds remain unchanged.',
+      splitUnsupported:
+        'Select Binance and By Risk, or switch back to existing entry rules.',
       entryTimeout: 'Unfilled Entry Order Lifetime (minutes)',
-      entryTimeoutHint: 'Cancel the unfilled remainder after the entry lifetime expires; filled positions remain protected. Default: 240 minutes (4 hours); 0 disables expiry. This is separate from message validity windows.',
+      entryTimeoutHint:
+        'Cancel the unfilled remainder after the entry lifetime expires; filled positions remain protected. Default: 240 minutes (4 hours); 0 disables expiry. This is separate from message validity windows.',
       entryTimeoutInvalid: 'Enter a whole number from 0 to 153722867 minutes.',
-      entryTimeoutUnlimited: 'Automatic expiry is disabled. Pending entries may fill much later unless explicitly cancelled.',
+      entryTimeoutUnlimited:
+        'Automatic expiry is disabled. Pending entries may fill much later unless explicitly cancelled.',
       actionResults: 'Action results',
       orderLegs: 'Orders and cumulative fills',
       filledQuantity: 'Filled / planned quantity',
@@ -1374,7 +1355,8 @@ export const translations = {
       replayCount: 'Messages',
       replayStart: 'Start Replay',
       replayRunning: 'Replaying',
-      replayEmpty: 'No replay results yet. Pick a message count and start a replay.',
+      replayEmpty:
+        'No replay results yet. Pick a message count and start a replay.',
       replayFailed: 'Failed to start replay',
       replayProfileHint:
         'After you change the channel profile on the trader card, re-run replay here to see whether recognition improved.',
@@ -1388,12 +1370,15 @@ export const translations = {
       showDetails: 'View AI & execution',
       hideDetails: 'Hide details',
       processed: 'Processed',
-      processedHint: 'The instruction was processed. A submitted limit order may still be unfilled; see the linked trade state.',
+      processedHint:
+        'The instruction was processed. A submitted limit order may still be unfilled; see the linked trade state.',
       linkedTradeState: 'Linked trade',
       executionDetails: 'Execution details',
       loadingExecution: 'Loading execution details…',
-      executionLoadFailed: 'Could not load execution details. Close and reopen to retry.',
-      noEntryDecision: 'No entry decision snapshot was recorded. The historical price difference cannot be reconstructed.',
+      executionLoadFailed:
+        'Could not load execution details. Close and reopen to retry.',
+      noEntryDecision:
+        'No entry decision snapshot was recorded. The historical price difference cannot be reconstructed.',
       entryDecision: 'Entry decision',
       authorOrderType: 'Author order type',
       referencePrice: 'Reference price (midpoint for a range)',
@@ -1404,21 +1389,36 @@ export const translations = {
       plannedEntryPrice: 'Planned entry price',
       orderMarket: 'Market',
       orderLimit: 'Limit',
-      decisionHint: 'This is the entry plan. Subsequent checks, submission and fills are recorded separately below.',
+      decisionHint:
+        'This is the entry plan. Subsequent checks, submission and fills are recorded separately below.',
       tradeStates: {
-        NEW: 'Preparing entry', ENTRY_PENDING: 'Awaiting entry fill', OPEN: 'Position open',
-        BREAKEVEN: 'Position open · breakeven', CLOSE_PENDING: 'Closing', CLOSED: 'Closed',
-        CANCELLED: 'Entry cancelled', EXPIRED: 'Entry timed out', INVALID: 'Invalid trade',
+        NEW: 'Preparing entry',
+        ENTRY_PENDING: 'Awaiting entry fill',
+        OPEN: 'Position open',
+        BREAKEVEN: 'Position open · breakeven',
+        CLOSE_PENDING: 'Closing',
+        CLOSED: 'Closed',
+        CANCELLED: 'Entry cancelled',
+        EXPIRED: 'Entry timed out',
+        INVALID: 'Invalid trade',
       },
       entryReasons: {
-        market_without_reference: 'Author requested market entry without a reference price.',
-        favorable_price: 'Market price is at or better than the reference: enter at market.',
-        adverse_within_threshold: 'Adverse difference is within the threshold: enter at market.',
-        adverse_tolerance_disabled: 'Threshold is 0: no adverse difference is allowed. Rest a limit at the reference.',
-        adverse_beyond_threshold: 'Adverse difference exceeds the threshold. Rest a limit at the reference.',
-        limit_conversion_disabled: 'Price is within the threshold, but limit-to-market conversion is off.',
-        inside_entry_range: 'Market price is inside the author’s entry range: enter at market.',
-        adverse_range_midpoint: 'Market is beyond the adverse side of the range: rest at its midpoint. Point-price tolerance does not apply.',
+        market_without_reference:
+          'Author requested market entry without a reference price.',
+        favorable_price:
+          'Market price is at or better than the reference: enter at market.',
+        adverse_within_threshold:
+          'Adverse difference is within the threshold: enter at market.',
+        adverse_tolerance_disabled:
+          'Threshold is 0: no adverse difference is allowed. Rest a limit at the reference.',
+        adverse_beyond_threshold:
+          'Adverse difference exceeds the threshold. Rest a limit at the reference.',
+        limit_conversion_disabled:
+          'Price is within the threshold, but limit-to-market conversion is off.',
+        inside_entry_range:
+          'Market price is inside the author’s entry range: enter at market.',
+        adverse_range_midpoint:
+          'Market is beyond the adverse side of the range: rest at its midpoint. Point-price tolerance does not apply.',
       },
       ioSent: 'Sent to AI',
       ioRaw: 'AI raw response',
@@ -2098,61 +2098,21 @@ export const translations = {
 
     // ===== 入门指南 =====
 
-
-
-
-
-
     // ===== 安装部署 =====
-
-
-
-
-
 
     // ===== 配置设置 =====
 
-
-
-
-
-
     // ===== 交易相关 =====
-
-
-
-
-
-
-
 
     // ===== 技术问题 =====
 
-
-
-
-
-
-
-
     // ===== 安全相关 =====
-
-
-
 
     // ===== 功能介绍 =====
 
-
-
     // ===== AI 模型 =====
 
-
-
-
     // ===== 参与贡献 =====
-
-
-
 
     // Web Crypto Environment Check
     environmentCheck: {
@@ -2615,7 +2575,8 @@ export const translations = {
     // Discord 跟单全局设置
     discord: {
       title: 'Discord 跟单配置',
-      settingsHint: '配置全局 Discord Token，所有跟单交易员共用它读取信号频道。',
+      settingsHint:
+        '配置全局 Discord Token，所有跟单交易员共用它读取信号频道。',
       openConfig: '配置 Discord Token',
       currentToken: '当前 Token',
       notConfigured: '未配置',
@@ -2625,17 +2586,17 @@ export const translations = {
       tokenHint:
         '所有跟单交易员共用此个人 Token。加密存储，保存前会先验证有效性。',
       pollInterval: '轮询间隔（秒）',
-      enablePolling: '轮询开关',
+      enablePolling: '消息采集开关',
       on: '开启',
       off: '关闭',
       riskNote:
-        '注意：使用个人 Token 读取频道违反 Discord 服务条款，存在封号风险。建议使用专用小号，并保持保守的轮询间隔。',
+        '注意：使用个人 Token 读取频道违反 Discord 服务条款，存在封号风险。Gateway 改善采集效率，不保证免除账号限制。',
       testConnection: '测试连接',
       save: '保存',
       saving: '保存中...',
       saved: 'Discord 配置已保存',
       saveFailed: 'Discord 配置保存失败',
-      testOk: '已连接',
+      testOk: '凭证验证通过',
       testFailed: '连接测试失败',
       clearToken: '清除 Token',
       clearConfirm: '确定清除 Discord Token？所有跟单交易员将停止接收信号。',
@@ -2648,7 +2609,7 @@ export const translations = {
       channelError: '异常',
       subscribers: '个订阅者',
       monitorTitle: 'Token 状态监控',
-      monitorHint: '定时检查 Token 有效性，失效时发送邮件告警，恢复后发送恢复通知。',
+      monitorHint: '根据 Gateway 连接与心跳状态告警，不发送周期凭证探测请求。',
       monitorEnable: '监控开关',
       monitorInterval: '检查间隔（秒）',
       alertEmail: '告警收件邮箱',
@@ -2656,7 +2617,8 @@ export const translations = {
       sendTestEmail: '发送测试邮件',
       testEmailOk: '测试邮件已发送，请查收',
       testEmailFailed: '测试邮件发送失败',
-      smtpNotConfigured: '服务器未配置 SMTP（.env：SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS）',
+      smtpNotConfigured:
+        '服务器未配置 SMTP（.env：SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASS）',
       tokenStatus: 'Token 状态',
       statusOk: '正常',
       statusInvalid: '已失效',
@@ -2680,7 +2642,8 @@ export const translations = {
         '跟随 Discord 频道中的交易信号。需要先在设置中配置全局 Discord Token。创建后类型不可修改。',
       configTitle: '跟单配置',
       channelId: 'Discord 频道 ID *',
-      channelIdHint: '纯数字频道 ID。建议先在 设置 → Discord 中用测试工具验证。',
+      channelIdHint:
+        '纯数字频道 ID。建议先在 设置 → Discord 中用测试工具验证。',
       channelNotes: '频道画像',
       channelNotesPlaceholder:
         '这位作者怎么发开仓/平仓/改止损、常用黑话、哪些消息该忽略。不改变仓位大小计算。',
@@ -2697,7 +2660,8 @@ export const translations = {
       riskFixed: '固定保证金',
       riskByLossHint:
         '数量 = 风险金额 ÷ |开仓价 − 止损价|。每次止损亏损约等于风险金额。',
-      riskPercentHint: '保证金 = 账户权益 × 百分比。直接填写百分比数值（如 5 = 5%）。',
+      riskPercentHint:
+        '保证金 = 账户权益 × 百分比。直接填写百分比数值（如 5 = 5%）。',
       riskFixedHint: '每笔固定保证金（USD）。',
       riskAmountUsd: '风险金额（USD）',
       riskAmountPct: '资金百分比（%）',
@@ -2717,34 +2681,53 @@ export const translations = {
       autoBreakeven: 'TP1 后止损移至保本',
       interpretationProfile: '作者风格预设',
       profileDefault: '通用',
-      actionStates: { done: '处理完成', executing: '处理中', preflight_rejected: '提交前拒绝', rejected: '交易所明确拒单', uncertain: '结果待核对', skipped: '已跳过' },
+      actionStates: {
+        done: '处理完成',
+        executing: '处理中',
+        preflight_rejected: '提交前拒绝',
+        rejected: '交易所明确拒单',
+        uncertain: '结果待核对',
+        skipped: '已跳过',
+      },
       dualPriceLabel: '双价格文案含义（市价 A—B）',
       dualPriceLegacy: '沿用原逻辑',
       dualPriceRange: '进场区间',
       dualPriceSplit: '市价＋限价（共享风险预算）',
       dualPriceReject: '歧义跳过',
       reduceDefault: '明确减仓但未注明比例（剩余仓位 %）',
-      rulesHint: '原文明确含义优先，结构化选项消除歧义，文字画像补充语言习惯。变更只影响后续消息。市价＋限价需要 Binance 和以损定量模式。',
-      rulesInvalid: '减仓比例必须大于 0 且不超过 100；TTL 必须为非负整数且不超出时间范围。',
-      reservedUnsupported: '存在旧版预留字段，当前不支持且不影响执行；保存前请清除其值。',
+      rulesHint:
+        '原文明确含义优先，结构化选项消除歧义，文字画像补充语言习惯。变更只影响后续消息。市价＋限价需要 Binance 和以损定量模式。',
+      rulesInvalid:
+        '减仓比例必须大于 0 且不超过 100；TTL 必须为非负整数且不超出时间范围。',
+      reservedUnsupported:
+        '存在旧版预留字段，当前不支持且不影响执行；保存前请清除其值。',
       rulesSnapshot: '本条消息使用的规则',
-      replayScope: '仅验证识别结果。使用当前规则、上下文和价格，历史执行状态不完整；未验证账户归属、余额、合约能力、订单限制和 TTL 等执行门槛。',
+      replayScope:
+        '仅验证识别结果。使用当前规则、上下文和价格，历史执行状态不完整；未验证账户归属、余额、合约能力、订单限制和 TTL 等执行门槛。',
       tpCapHint: '最多执行三档止盈，被截取的目标会在下方记录。',
-      profileHint: '明确减仓但未注明比例时，使用剩余仓位的 {ratio}%。切换作者会填入可编辑的推荐参数和画像；保存后才生效。',
-      profileLoadFailed: '预设目录加载失败，现有配置保留。请重新加载后再切换预设。',
+      profileHint:
+        '明确减仓但未注明比例时，使用剩余仓位的 {ratio}%。切换作者会填入可编辑的推荐参数和画像；保存后才生效。',
+      profileLoadFailed:
+        '预设目录加载失败，现有配置保留。请重新加载后再切换预设。',
       entryRules: '入场规则',
-      entryRulesHint: '两项可同时启用，按信号类型生效，不重复拆分：市价 A—B 使用双价格含义，市价 A 使用单参考价策略。明确两笔和区间不再分批，共享一份风险预算。',
-      configSavedInactive: '已保存但未生效：引擎重载失败。请检查配置后手动启动，并确认运行状态。',
-      configRestartRequested: '已保存，已请求重新启动。实际运行结果请查看交易员状态。',
+      entryRulesHint:
+        '两项可同时启用，按信号类型生效，不重复拆分：市价 A—B 使用双价格含义，市价 A 使用单参考价策略。明确两笔和区间不再分批，共享一份风险预算。',
+      configSavedInactive:
+        '已保存但未生效：引擎重载失败。请检查配置后手动启动，并确认运行状态。',
+      configRestartRequested:
+        '已保存，已请求重新启动。实际运行结果请查看交易员状态。',
       entryPolicy: '单参考价市价信号的执行方式（市价 A）',
       entryLegacy: '沿用原进场规则',
       entrySplit: '50% 风险市价 + 50% 风险参考价限价',
-      splitHint: '仅支持 Binance＋以损定量。只用于带参考价的市价信号：优价或同价全额市价；不利偏移在阈值内平分风险；超阈值全额参考价限价。不会自动修改偏移阈值。',
+      splitHint:
+        '仅支持 Binance＋以损定量。只用于带参考价的市价信号：优价或同价全额市价；不利偏移在阈值内平分风险；超阈值全额参考价限价。不会自动修改偏移阈值。',
       splitUnsupported: '请选择 Binance 和以损定量，或恢复原进场策略。',
       entryTimeout: '未成交挂单有效期（分钟）',
-      entryTimeoutHint: '进场有效期到达后撤销未成交部分，已成交仓位继续保留保护。默认 240 分钟（4 小时）；0 表示不自动过期。它与消息有效期独立。',
+      entryTimeoutHint:
+        '进场有效期到达后撤销未成交部分，已成交仓位继续保留保护。默认 240 分钟（4 小时）；0 表示不自动过期。它与消息有效期独立。',
       entryTimeoutInvalid: '请输入 0 至 153722867 之间的整数分钟数。',
-      entryTimeoutUnlimited: '已关闭自动过期：未成交进场单可能在很久以后成交，请按需明确撤单。',
+      entryTimeoutUnlimited:
+        '已关闭自动过期：未成交进场单可能在很久以后成交，请按需明确撤单。',
       actionResults: '逐动作结果',
       orderLegs: '订单与累计成交',
       filledQuantity: '成交 / 计划数量',
@@ -2780,7 +2763,8 @@ export const translations = {
       showDetails: '查看 AI 与执行详情',
       hideDetails: '收起详情',
       processed: '已处理',
-      processedHint: '指令已处理完成，不代表订单已成交；限价单可能仍在等待，请查看关联交易状态。',
+      processedHint:
+        '指令已处理完成，不代表订单已成交；限价单可能仍在等待，请查看关联交易状态。',
       linkedTradeState: '关联交易',
       executionDetails: '执行详情',
       loadingExecution: '正在加载执行详情…',
@@ -2796,21 +2780,31 @@ export const translations = {
       plannedEntryPrice: '计划进场价格',
       orderMarket: '市价',
       orderLimit: '限价',
-      decisionHint: '此处为进场方案，后续校验、订单提交和成交结果分别记录在下方。',
+      decisionHint:
+        '此处为进场方案，后续校验、订单提交和成交结果分别记录在下方。',
       tradeStates: {
-        NEW: '准备开仓', ENTRY_PENDING: '等待进场成交', OPEN: '已开仓',
-        BREAKEVEN: '持仓中 · 已保本', CLOSE_PENDING: '平仓中', CLOSED: '已平仓',
-        CANCELLED: '进场已取消', EXPIRED: '进场超时撤单', INVALID: '交易无效',
+        NEW: '准备开仓',
+        ENTRY_PENDING: '等待进场成交',
+        OPEN: '已开仓',
+        BREAKEVEN: '持仓中 · 已保本',
+        CLOSE_PENDING: '平仓中',
+        CLOSED: '已平仓',
+        CANCELLED: '进场已取消',
+        EXPIRED: '进场超时撤单',
+        INVALID: '交易无效',
       },
       entryReasons: {
         market_without_reference: '博主要求市价进场，未提供参考价。',
         favorable_price: '市价优于或等于参考价，使用市价进场。',
         adverse_within_threshold: '不利价差在阈值内，使用市价进场。',
-        adverse_tolerance_disabled: '阈值为 0，不容许不利价差，按参考价挂限价单等待。',
+        adverse_tolerance_disabled:
+          '阈值为 0，不容许不利价差，按参考价挂限价单等待。',
         adverse_beyond_threshold: '不利价差超过阈值，按参考价挂限价单等待。',
-        limit_conversion_disabled: '价差在阈值内，但未开启限价改市价，保留限价单。',
+        limit_conversion_disabled:
+          '价差在阈值内，但未开启限价改市价，保留限价单。',
         inside_entry_range: '市价在博主进场区间内，使用市价进场。',
-        adverse_range_midpoint: '市价位于进场区间的不利侧，按区间中点挂限价单；点价偏移阈值不适用于区间单。',
+        adverse_range_midpoint:
+          '市价位于进场区间的不利侧，按区间中点挂限价单；点价偏移阈值不适用于区间单。',
       },
       ioSent: '发给 AI 的内容',
       ioRaw: 'AI 原始返回',
@@ -3850,7 +3844,8 @@ export const translations = {
       otherApiEntry: 'Penyedia API Lain',
       otherApiEntryDesc:
         'Gunakan API key Anda sendiri untuk OpenAI, Claude, Gemini, DeepSeek, dan lainnya.',
-      payPerCall: 'Bayar sesuai pemakaian USDC · Semua Model AI · Tanpa API Key',
+      payPerCall:
+        'Bayar sesuai pemakaian USDC · Semua Model AI · Tanpa API Key',
       recommended: 'Terbaik',
       allModelsClaw:
         'Bayar per panggilan dengan USDC — mendukung semua model AI utama',

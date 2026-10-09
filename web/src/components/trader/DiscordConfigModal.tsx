@@ -11,11 +11,14 @@ interface DiscordConfigModalProps {
 }
 
 // Global Discord token settings shared by all copy-trading traders.
-export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProps) {
+export function DiscordConfigModal({
+  onClose,
+  language,
+}: DiscordConfigModalProps) {
   const [config, setConfig] = useState<DiscordConfig | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [token, setToken] = useState('')
-  const [pollInterval, setPollInterval] = useState(6)
+  const [runMode, setRunMode] = useState<'observe' | 'live'>('observe')
   const [enabled, setEnabled] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
   const [isTesting, setIsTesting] = useState(false)
@@ -25,7 +28,6 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
   const [channelPreview, setChannelPreview] = useState<string[]>([])
   // Token status monitoring (email alerts)
   const [monitorEnabled, setMonitorEnabled] = useState(true)
-  const [monitorInterval, setMonitorInterval] = useState(60)
   const [alertEmail, setAlertEmail] = useState('')
   const [isSendingTestEmail, setIsSendingTestEmail] = useState(false)
 
@@ -33,10 +35,9 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
     try {
       const cfg = await api.getDiscordConfig()
       setConfig(cfg)
-      setPollInterval(cfg.poll_interval_seconds || 6)
+      setRunMode(cfg.run_mode || 'observe')
       setEnabled(cfg.enabled)
       setMonitorEnabled(cfg.monitor_enabled ?? true)
-      setMonitorInterval(cfg.monitor_interval_seconds || 60)
       setAlertEmail(cfg.alert_email || '')
     } catch {
       // First load may 404 before any config exists — keep defaults
@@ -53,15 +54,18 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
     if (isSaving) return
     setIsSaving(true)
     try {
-      await api.updateDiscordConfig({
+      const result = await api.updateDiscordConfig({
         token: token.trim(),
-        poll_interval_seconds: pollInterval,
+        run_mode: runMode,
         enabled,
         alert_email: alertEmail.trim(),
         monitor_enabled: monitorEnabled,
-        monitor_interval_seconds: monitorInterval,
       })
-      toast.success(t('discord.saved', language))
+      if (result.applied) toast.success(t('discord.saved', language))
+      else
+        toast.warning(
+          `${language === 'zh' ? '已保存但未生效' : 'Saved but not applied'}: ${result.apply_error || ''}`
+        )
       setToken('')
       await loadConfig()
     } catch (err) {
@@ -97,8 +101,12 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
     if (!window.confirm(t('discord.clearConfirm', language))) return
     setIsClearing(true)
     try {
-      await api.deleteDiscordToken()
-      toast.success(t('discord.cleared', language))
+      const result = await api.deleteDiscordToken()
+      if (result.applied) toast.success(t('discord.cleared', language))
+      else
+        toast.warning(
+          `${language === 'zh' ? '凭证已清除，采集器停用等待确认' : 'Credential cleared; collector shutdown pending'}: ${result.apply_error || ''}`
+        )
       await loadConfig()
     } catch {
       toast.error(t('discord.clearFailed', language))
@@ -117,7 +125,9 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
       if (res.ok) {
         toast.success(`${t('discord.testEmailOk', language)} (${res.email})`)
       } else {
-        toast.error(`${t('discord.testEmailFailed', language)}: ${res.error || ''}`)
+        toast.error(
+          `${t('discord.testEmailFailed', language)}: ${res.error || ''}`
+        )
       }
     } catch {
       toast.error(t('discord.testEmailFailed', language))
@@ -141,7 +151,9 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
         )
         toast.success(t('discord.channelOk', language))
       } else {
-        toast.error(`${t('discord.channelFailed', language)}: ${res.error || ''}`)
+        toast.error(
+          `${t('discord.channelFailed', language)}: ${res.error || ''}`
+        )
       }
     } catch {
       toast.error(t('discord.channelFailed', language))
@@ -176,7 +188,10 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
 
         <div className="px-6 pb-6 space-y-5 pt-4">
           {isLoading ? (
-            <div className="text-center py-8 text-sm" style={{ color: '#8A8478' }}>
+            <div
+              className="text-center py-8 text-sm"
+              style={{ color: '#8A8478' }}
+            >
               ...
             </div>
           ) : (
@@ -184,16 +199,25 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
               {/* Current status */}
               <div
                 className="p-3 rounded-xl flex items-center gap-3"
-                style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)' }}
+                style={{
+                  background: '#F1ECE2',
+                  border: '1px solid rgba(26,24,19,0.14)',
+                }}
               >
                 <div
                   className={`w-2 h-2 rounded-full flex-shrink-0 ${config?.configured ? 'bg-nofx-success' : 'bg-nofx-text-muted'}`}
                 />
                 <div className="min-w-0 flex-1">
-                  <div className="text-xs font-mono" style={{ color: '#8A8478' }}>
+                  <div
+                    className="text-xs font-mono"
+                    style={{ color: '#8A8478' }}
+                  >
                     {t('discord.currentToken', language)}
                   </div>
-                  <div className="text-sm font-mono truncate" style={{ color: '#1A1813' }}>
+                  <div
+                    className="text-sm font-mono truncate"
+                    style={{ color: '#1A1813' }}
+                  >
                     {config?.configured
                       ? config.token_masked
                       : t('discord.notConfigured', language)}
@@ -212,9 +236,56 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                 )}
               </div>
 
+              <div className="text-xs space-y-2" aria-live="polite">
+                <p>
+                  {language === 'zh'
+                    ? '首次安装仅采集验证。正常执行只接收启用时间之后的新信号，验证积压不会补执行。已有订单保护继续运行。'
+                    : 'Observe-only by default. Live mode admits new signals after activation; observation backlog is never traded. Existing order protection continues.'}
+                </p>
+                <p>
+                  Gateway: {config?.collector?.state || 'disconnected'} ·{' '}
+                  {language === 'zh' ? '积压' : 'Backlog'}:{' '}
+                  {config?.collector?.backlog ?? 0}
+                </p>
+                <p>
+                  {language === 'zh' ? '配置应用' : 'Config application'}:{' '}
+                  {config?.collector?.desired_version &&
+                  config.collector.applied_version ===
+                    config.collector.desired_version
+                    ? language === 'zh'
+                      ? '已确认'
+                      : 'Confirmed'
+                    : language === 'zh'
+                      ? '等待确认'
+                      : 'Pending'}
+                </p>
+                {config?.collector?.last_heartbeat && (
+                  <p>
+                    {language === 'zh' ? '最后心跳' : 'Heartbeat'}:{' '}
+                    {new Date(config.collector.last_heartbeat).toLocaleString()}
+                  </p>
+                )}
+                {config?.collector?.last_message && (
+                  <p>
+                    {language === 'zh' ? '最后消息' : 'Last message'}:{' '}
+                    {new Date(config.collector.last_message).toLocaleString()}
+                  </p>
+                )}
+                {config?.collector?.last_error && (
+                  <p role="alert">{config.collector.last_error}</p>
+                )}
+                <button type="button" onClick={loadConfig}>
+                  {language === 'zh'
+                    ? '刷新连接与频道状态'
+                    : 'Refresh connection and channel status'}
+                </button>
+              </div>
               {/* Token input */}
               <div className="space-y-2">
-                <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                <label
+                  className="text-sm font-semibold"
+                  style={{ color: '#1A1813' }}
+                >
                   {t('discord.tokenLabel', language)}
                 </label>
                 <input
@@ -227,7 +298,11 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                       : t('discord.tokenPlaceholder', language)
                   }
                   className="w-full px-4 py-3 rounded-xl font-mono text-sm"
-                  style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)', color: '#1A1813' }}
+                  style={{
+                    background: '#F1ECE2',
+                    border: '1px solid rgba(26,24,19,0.14)',
+                    color: '#1A1813',
+                  }}
                 />
                 <div className="text-xs" style={{ color: '#8A8478' }}>
                   {t('discord.tokenHint', language)}
@@ -237,24 +312,35 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
               {/* Poll interval + enable */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
-                    {t('discord.pollInterval', language)}
+                  <label
+                    className="text-sm font-semibold"
+                    style={{ color: '#1A1813' }}
+                  >
+                    {language === 'zh' ? '执行模式' : 'Execution mode'}
                   </label>
-                  <input
-                    type="number"
-                    min={3}
-                    max={300}
-                    value={pollInterval}
-                    onChange={(e) => {
-                      const v = Number(e.target.value)
-                      setPollInterval(Number.isFinite(v) ? v : 6)
-                    }}
-                    className="w-full px-4 py-3 rounded-xl text-sm"
-                    style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)', color: '#1A1813' }}
-                  />
+                  <select
+                    aria-label={
+                      language === 'zh' ? '执行模式' : 'Execution mode'
+                    }
+                    value={runMode}
+                    onChange={(e) =>
+                      setRunMode(e.target.value as 'observe' | 'live')
+                    }
+                    className="w-full px-3 py-3 rounded-xl text-sm"
+                  >
+                    <option value="observe">
+                      {language === 'zh' ? '仅采集验证' : 'Observe only'}
+                    </option>
+                    <option value="live">
+                      {language === 'zh' ? '正常执行' : 'Live execution'}
+                    </option>
+                  </select>
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                  <label
+                    className="text-sm font-semibold"
+                    style={{ color: '#1A1813' }}
+                  >
                     {t('discord.enablePolling', language)}
                   </label>
                   <div className="flex gap-2">
@@ -285,9 +371,15 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
               </div>
 
               {/* Token status monitor (email alerts) */}
-              <div className="space-y-3 pt-3" style={{ borderTop: '1px solid rgba(26,24,19,0.1)' }}>
+              <div
+                className="space-y-3 pt-3"
+                style={{ borderTop: '1px solid rgba(26,24,19,0.1)' }}
+              >
                 <div>
-                  <div className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                  <div
+                    className="text-sm font-semibold"
+                    style={{ color: '#1A1813' }}
+                  >
                     {t('discord.monitorTitle', language)}
                   </div>
                   <div className="text-xs mt-1" style={{ color: '#8A8478' }}>
@@ -299,7 +391,10 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                 {config?.monitor_status && (
                   <div
                     className="p-3 rounded-xl flex items-center gap-3"
-                    style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)' }}
+                    style={{
+                      background: '#F1ECE2',
+                      border: '1px solid rgba(26,24,19,0.14)',
+                    }}
                   >
                     <div
                       className="w-2 h-2 rounded-full flex-shrink-0"
@@ -313,7 +408,10 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                       }}
                     />
                     <div className="min-w-0 flex-1">
-                      <div className="text-xs font-mono" style={{ color: '#8A8478' }}>
+                      <div
+                        className="text-xs font-mono"
+                        style={{ color: '#8A8478' }}
+                      >
                         {t('discord.tokenStatus', language)}
                       </div>
                       <div className="text-sm" style={{ color: '#1A1813' }}>
@@ -323,17 +421,26 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                             ? t('discord.statusInvalid', language)
                             : t('discord.statusUnknown', language)}
                         {config.monitor_status.last_checked_at && (
-                          <span className="text-xs ml-2" style={{ color: '#8A8478' }}>
+                          <span
+                            className="text-xs ml-2"
+                            style={{ color: '#8A8478' }}
+                          >
                             {t('discord.lastChecked', language)}:{' '}
-                            {new Date(config.monitor_status.last_checked_at).toLocaleString()}
+                            {new Date(
+                              config.monitor_status.last_checked_at
+                            ).toLocaleString()}
                           </span>
                         )}
                       </div>
-                      {config.monitor_status.status === 'invalid' && config.monitor_status.last_error && (
-                        <div className="text-xs font-mono truncate mt-0.5" style={{ color: '#D6433A' }}>
-                          {config.monitor_status.last_error}
-                        </div>
-                      )}
+                      {config.monitor_status.status === 'invalid' &&
+                        config.monitor_status.last_error && (
+                          <div
+                            className="text-xs font-mono truncate mt-0.5"
+                            style={{ color: '#D6433A' }}
+                          >
+                            {config.monitor_status.last_error}
+                          </div>
+                        )}
                     </div>
                   </div>
                 )}
@@ -341,7 +448,10 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                 {/* Monitor toggle + interval */}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
-                    <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                    <label
+                      className="text-sm font-semibold"
+                      style={{ color: '#1A1813' }}
+                    >
                       {t('discord.monitorEnable', language)}
                     </label>
                     <div className="flex gap-2">
@@ -369,28 +479,14 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                       </button>
                     </div>
                   </div>
-                  <div className="space-y-2">
-                    <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
-                      {t('discord.monitorInterval', language)}
-                    </label>
-                    <input
-                      type="number"
-                      min={30}
-                      max={600}
-                      value={monitorInterval}
-                      onChange={(e) => {
-                        const v = Number(e.target.value)
-                        setMonitorInterval(Number.isFinite(v) ? v : 60)
-                      }}
-                      className="w-full px-4 py-3 rounded-xl text-sm"
-                      style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)', color: '#1A1813' }}
-                    />
-                  </div>
                 </div>
 
                 {/* Alert email + test send */}
                 <div className="space-y-2">
-                  <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                  <label
+                    className="text-sm font-semibold"
+                    style={{ color: '#1A1813' }}
+                  >
                     {t('discord.alertEmail', language)}
                   </label>
                   <div className="flex gap-2">
@@ -400,7 +496,11 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                       onChange={(e) => setAlertEmail(e.target.value)}
                       placeholder={t('discord.alertEmailPlaceholder', language)}
                       className="flex-1 px-4 py-2.5 rounded-xl text-sm"
-                      style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)', color: '#1A1813' }}
+                      style={{
+                        background: '#F1ECE2',
+                        border: '1px solid rgba(26,24,19,0.14)',
+                        color: '#1A1813',
+                      }}
                     />
                     <button
                       onClick={handleTestEmail}
@@ -409,8 +509,13 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                       style={{ background: '#2E8B57', color: '#fff' }}
                       title={t('discord.sendTestEmail', language)}
                     >
-                      {isSendingTestEmail ? '...' : <Mail className="w-4 h-4" />}
-                      {!isSendingTestEmail && t('discord.sendTestEmail', language)}
+                      {isSendingTestEmail ? (
+                        '...'
+                      ) : (
+                        <Mail className="w-4 h-4" />
+                      )}
+                      {!isSendingTestEmail &&
+                        t('discord.sendTestEmail', language)}
                     </button>
                   </div>
                   {config && !config.smtp_configured && (
@@ -424,7 +529,11 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
               {/* Safety note */}
               <div
                 className="p-3 rounded-xl text-xs"
-                style={{ background: 'rgba(224, 72, 59, 0.08)', border: '1px solid rgba(224, 72, 59, 0.2)', color: '#8A8478' }}
+                style={{
+                  background: 'rgba(224, 72, 59, 0.08)',
+                  border: '1px solid rgba(224, 72, 59, 0.2)',
+                  color: '#8A8478',
+                }}
               >
                 {t('discord.riskNote', language)}
               </div>
@@ -446,14 +555,22 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                   className="flex-1 px-4 py-3 rounded-xl text-sm font-bold transition-all hover:scale-[1.02] disabled:opacity-50"
                   style={{ background: '#5865F2', color: '#fff' }}
                 >
-                  {isSaving ? t('discord.saving', language) : t('discord.save', language)}
+                  {isSaving
+                    ? t('discord.saving', language)
+                    : t('discord.save', language)}
                 </button>
               </div>
 
               {/* Channel test */}
               {config?.configured && (
-                <div className="space-y-2 pt-2" style={{ borderTop: '1px solid rgba(26,24,19,0.1)' }}>
-                  <label className="text-sm font-semibold" style={{ color: '#1A1813' }}>
+                <div
+                  className="space-y-2 pt-2"
+                  style={{ borderTop: '1px solid rgba(26,24,19,0.1)' }}
+                >
+                  <label
+                    className="text-sm font-semibold"
+                    style={{ color: '#1A1813' }}
+                  >
                     {t('discord.testChannelLabel', language)}
                   </label>
                   <div className="flex gap-2">
@@ -463,7 +580,11 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                       onChange={(e) => setTestChannelId(e.target.value)}
                       placeholder="1385639865194315949"
                       className="flex-1 px-4 py-2.5 rounded-xl font-mono text-sm"
-                      style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)', color: '#1A1813' }}
+                      style={{
+                        background: '#F1ECE2',
+                        border: '1px solid rgba(26,24,19,0.14)',
+                        color: '#1A1813',
+                      }}
                     />
                     <button
                       onClick={handleTestChannel}
@@ -471,16 +592,27 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
                       className="px-4 py-2.5 rounded-xl text-sm font-bold disabled:opacity-50"
                       style={{ background: '#2E8B57', color: '#fff' }}
                     >
-                      {isTestingChannel ? '...' : <RefreshCw className="w-4 h-4" />}
+                      {isTestingChannel ? (
+                        '...'
+                      ) : (
+                        <RefreshCw className="w-4 h-4" />
+                      )}
                     </button>
                   </div>
                   {channelPreview.length > 0 && (
                     <div
                       className="p-3 rounded-xl space-y-1 max-h-40 overflow-y-auto"
-                      style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)' }}
+                      style={{
+                        background: '#F1ECE2',
+                        border: '1px solid rgba(26,24,19,0.14)',
+                      }}
                     >
                       {channelPreview.map((line, i) => (
-                        <div key={i} className="text-xs font-mono truncate" style={{ color: '#1A1813' }}>
+                        <div
+                          key={i}
+                          className="text-xs font-mono truncate"
+                          style={{ color: '#1A1813' }}
+                        >
                           {line}
                         </div>
                       ))}
@@ -492,20 +624,28 @@ export function DiscordConfigModal({ onClose, language }: DiscordConfigModalProp
               {/* Poller channel status */}
               {config?.channels && config.channels.length > 0 && (
                 <div className="space-y-2">
-                  <div className="text-xs font-semibold uppercase tracking-wide" style={{ color: '#8A8478' }}>
+                  <div
+                    className="text-xs font-semibold uppercase tracking-wide"
+                    style={{ color: '#8A8478' }}
+                  >
                     {t('discord.channelStatus', language)}
                   </div>
                   {config.channels.map((ch) => (
                     <div
                       key={ch.channel_id}
                       className="p-2.5 rounded-xl flex items-center justify-between text-xs font-mono"
-                      style={{ background: '#F1ECE2', border: '1px solid rgba(26,24,19,0.14)' }}
+                      style={{
+                        background: '#F1ECE2',
+                        border: '1px solid rgba(26,24,19,0.14)',
+                      }}
                     >
                       <span style={{ color: '#1A1813' }}>{ch.channel_id}</span>
-                      <span style={{ color: ch.last_error ? '#D6433A' : '#2E8B57' }}>
+                      <span
+                        style={{ color: ch.last_error ? '#D6433A' : '#2E8B57' }}
+                      >
                         {ch.last_error
-                          ? t('discord.channelError', language)
-                          : `${ch.subscribers} ${t('discord.subscribers', language)}`}
+                          ? `${ch.state}: ${ch.last_error}`
+                          : ch.state}
                       </span>
                     </div>
                   ))}

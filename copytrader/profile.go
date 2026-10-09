@@ -34,18 +34,21 @@ func (e *Engine) GenerateProfile(limit int) (string, error) {
 	if limit > 80 {
 		limit = 80
 	}
-	msgs, err := e.st.DiscordMessage().GetRecentByChannel(e.cfg.PrimaryChannelID, time.Time{}, limit)
+	msgs, err := e.st.DiscordMessage().GetRecentByChannels(e.cfg.ListenChannels(), time.Time{}, limit)
 	if err != nil {
 		return "", fmt.Errorf("failed to load channel history: %w", err)
 	}
 	if len(msgs) == 0 {
-		return "", fmt.Errorf("no stored messages for channel %s — wait for the poller to baseline, then retry", e.cfg.PrimaryChannelID)
+		return "", fmt.Errorf("no stored messages for channel %s — wait for the event collector to establish a baseline, then retry", e.cfg.PrimaryChannelID)
 	}
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "Draft a channel profile from these %d recent messages (newest first). Existing operator notes (may be empty):\n%s\n\n--- samples ---\n",
 		len(msgs), strings.TrimSpace(e.cfg.ChannelNotes))
 	for _, m := range msgs {
+		if !e.cfg.MessageRules().AllowsAuthor(m) {
+			continue
+		}
 		content := strings.TrimSpace(m.Content)
 		embeds := discord.FlattenEmbeds(discord.ParseStoredEmbeds(m.EmbedsJSON))
 		if content == "" && embeds == "" && m.AttachmentsJSON == "" {

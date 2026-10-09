@@ -10,9 +10,18 @@ import (
 	"strings"
 )
 
-const MessageRulesVersion = 2
+const MessageRulesVersion = 3
 
 type MessageRules struct {
+	ParseImages          bool     `json:"parse_images"`
+	SignalContextEnabled bool     `json:"signal_context_enabled"`
+	SendPositionSnapshot bool     `json:"send_position_snapshot"`
+	SourceMode           string   `json:"source_mode,omitempty"`
+	SourceChannels       []string `json:"source_channel_ids,omitempty"`
+	AuthorIDs            []string `json:"source_author_ids,omitempty"`
+	AuthorNames          []string `json:"source_author_names,omitempty"`
+	ContextDays          int      `json:"context_lookback_days"`
+
 	EntryPolicy   string  `json:"entry_policy,omitempty"`
 	Version       int     `json:"version"`
 	Profile       string  `json:"interpretation_profile"`
@@ -30,7 +39,7 @@ func (c *CopyTradingConfig) MessageRules() MessageRules {
 	if profile == "" {
 		profile = "default"
 	}
-	return MessageRules{Version: MessageRulesVersion, Profile: profile, Notes: c.ChannelNotes, DualPriceMode: c.MarketDualPriceMode, ReduceRatio: c.ReduceRatio(), EntryPolicy: policy}
+	return MessageRules{ParseImages: c.ParseImages, SignalContextEnabled: c.SignalContextEnabled, SendPositionSnapshot: c.SendPositionSnapshot, SourceMode: c.SourceMode, SourceChannels: c.ListenChannels(), AuthorIDs: c.SourceAuthorIDs, AuthorNames: c.SourceAuthorNames, ContextDays: c.ContextLookbackDays, Version: MessageRulesVersion, Profile: profile, Notes: c.ChannelNotes, DualPriceMode: c.MarketDualPriceMode, ReduceRatio: c.ReduceRatio(), EntryPolicy: policy}
 }
 func (r MessageRules) Snapshot() string { b, _ := json.Marshal(r); return string(b) }
 func (e *Engine) rulesForSignal(signalID string) (MessageRules, error) {
@@ -48,7 +57,7 @@ func (e *Engine) rulesForSignal(signalID string) (MessageRules, error) {
 			if err = json.Unmarshal([]byte(sig.RulesSnapshotJSON), &r); err != nil {
 				return r, err
 			}
-			if (r.Version != 1 && r.Version != MessageRulesVersion) || !finite(r.ReduceRatio) || r.ReduceRatio <= 0 || r.ReduceRatio > 100 {
+			if (r.Version < 1 || r.Version > MessageRulesVersion) || !finite(r.ReduceRatio) || r.ReduceRatio <= 0 || r.ReduceRatio > 100 {
 				return r, fmt.Errorf("unsupported or invalid message rule snapshot")
 			}
 		}
@@ -227,4 +236,27 @@ func requiredTPFill(scope string) (int, bool) {
 		}
 	}
 	return 0, true
+}
+
+func (r MessageRules) AllowsAuthor(msg *store.DiscordMessage) bool {
+	if len(r.AuthorIDs) > 0 && !containsString(r.AuthorIDs, msg.AuthorID) {
+		return false
+	}
+	if len(r.AuthorNames) > 0 {
+		for _, name := range r.AuthorNames {
+			if strings.EqualFold(strings.TrimSpace(name), strings.TrimSpace(msg.AuthorName)) {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+func (e *Engine) messageRules(msg *store.DiscordMessage) MessageRules {
+	r := e.cfg.MessageRules()
+	if msg.RulesSnapshot != "" {
+		r = MessageRules{}
+		_ = json.Unmarshal([]byte(msg.RulesSnapshot), &r)
+	}
+	return r
 }

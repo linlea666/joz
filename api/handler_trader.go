@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"nofx/copytrader"
+	"nofx/discord"
 	"nofx/logger"
 	"nofx/store"
 
@@ -795,6 +796,13 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		}
 	}
 
+	if existingTrader.TraderType == string(copytrader.TraderTypeCopy) {
+		if source := discord.Global(); source != nil {
+			if cfg, err := copytrader.ParseCopyTradingConfig(copyTradingConfig); err == nil {
+				source.PrepareReload(traderID, cfg.ExecutionKey())
+			}
+		}
+	}
 	// Remove old trader from memory first (this also stops if running)
 	s.traderManager.RemoveTrader(traderID)
 
@@ -828,6 +836,11 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 	}
 	if isCopy {
 		response := gin.H{"trader_id": traderID, "trader_name": req.Name, "ai_model": req.AIModelID, "config_reload_status": reloadStatus, "config_reload_error": reloadError, "restart_requested": restartRequested}
+		sourceApplied := false
+		if source := discord.Global(); source != nil {
+			sourceApplied = source.RouteApplied(traderID)
+		}
+		response["source_applied"] = sourceApplied
 		// An asynchronous Run request is not evidence that the engine is running.
 		// Existing status endpoints report its eventual state.
 		if !restartRequested {

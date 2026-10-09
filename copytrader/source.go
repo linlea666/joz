@@ -431,6 +431,18 @@ func segmentCarriesAction(ins *SourceInterpretation, text string) bool {
 	if ins == nil || strings.TrimSpace(text) == "" {
 		return false
 	}
+	if ins.NotificationKind != "" {
+		sym, dir, kind := notificationIdentity(text)
+		canonical, _ := ResolveInstrument(ins.Symbol)
+		if sym == canonical && dir == ins.Direction {
+			if kind == "added" && ins.NotificationKind == kind && ins.Action == ActionOpen {
+				return true
+			}
+			if kind == "closed" && ins.NotificationKind == kind && ins.Action == ActionClose {
+				return true
+			}
+		}
+	}
 	switch ins.Action {
 	case ActionOpen, ActionAdd:
 		if terminalStatusBlocksOpen(text) {

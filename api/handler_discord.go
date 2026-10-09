@@ -35,30 +35,29 @@ func (s *Server) handleGetDiscordConfig(c *gin.Context) {
 		return
 	}
 	resp := gin.H{
-		"configured":               false,
-		"token_masked":             "",
-		"poll_interval_seconds":    6,
-		"enabled":                  true,
-		"alert_email":              "",
-		"monitor_enabled":          true,
-		"monitor_interval_seconds": 60,
-		"smtp_configured":          notify.EmailConfigured(),
+		"configured":      false,
+		"token_masked":    "",
+		"transport":       "gateway",
+		"run_mode":        "observe",
+		"enabled":         true,
+		"alert_email":     "",
+		"monitor_enabled": true,
+
+		"smtp_configured": notify.EmailConfigured(),
 	}
 	if cfg != nil {
 		resp["configured"] = cfg.Token != ""
 		resp["token_masked"] = maskToken(string(cfg.Token))
-		resp["poll_interval_seconds"] = cfg.PollIntervalSeconds
+		resp["run_mode"] = cfg.RunMode
+		resp["execution_since"] = cfg.ExecutionSince
 		resp["enabled"] = cfg.Enabled
 		resp["alert_email"] = cfg.AlertEmail
 		resp["monitor_enabled"] = cfg.MonitorEnabled
-		monitorInterval := cfg.MonitorIntervalSeconds
-		if monitorInterval <= 0 {
-			monitorInterval = 60
-		}
-		resp["monitor_interval_seconds"] = monitorInterval
+
 	}
-	if poller := discord.Global(); poller != nil {
-		resp["channels"] = poller.Status()
+	if source := discord.Global(); source != nil {
+		resp["channels"] = source.Status()
+		resp["collector"] = source.CollectorStatus()
 	}
 	if monitor := discord.GlobalMonitor(); monitor != nil {
 		resp["monitor_status"] = monitor.Status()
@@ -66,28 +65,29 @@ func (s *Server) handleGetDiscordConfig(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// handleUpdateDiscordConfig saves the global Discord token / poll settings.
+// handleUpdateDiscordConfig saves the global Discord token / collection settings.
 // An empty token keeps the stored one (so settings can be updated without
 // re-entering the secret).
 func (s *Server) handleUpdateDiscordConfig(c *gin.Context) {
 	var req struct {
 		Token                  string  `json:"token"`
-		PollIntervalSeconds    int     `json:"poll_interval_seconds"`
+		RunMode                string  `json:"run_mode"`
+		PollIntervalSeconds    *int    `json:"poll_interval_seconds"`
 		Enabled                *bool   `json:"enabled"`
 		AlertEmail             *string `json:"alert_email"`
 		MonitorEnabled         *bool   `json:"monitor_enabled"`
-		MonitorIntervalSeconds int     `json:"monitor_interval_seconds"`
+		MonitorIntervalSeconds *int    `json:"monitor_interval_seconds"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		SafeBadRequest(c, "Invalid request parameters")
 		return
 	}
-	if req.PollIntervalSeconds != 0 && (req.PollIntervalSeconds < 3 || req.PollIntervalSeconds > 300) {
-		SafeBadRequest(c, "poll_interval_seconds must be between 3 and 300")
+	if req.RunMode != "" && req.RunMode != "observe" && req.RunMode != "live" {
+		SafeBadRequest(c, "run_mode must be observe or live")
 		return
 	}
-	if req.MonitorIntervalSeconds != 0 && (req.MonitorIntervalSeconds < 30 || req.MonitorIntervalSeconds > 600) {
-		SafeBadRequest(c, "monitor_interval_seconds must be between 30 and 600")
+	if req.PollIntervalSeconds != nil || req.MonitorIntervalSeconds != nil {
+		SafeBadRequest(c, "polling options are not supported by Gateway collection")
 		return
 	}
 	if req.AlertEmail != nil {
@@ -101,33 +101,40 @@ func (s *Server) handleUpdateDiscordConfig(c *gin.Context) {
 
 	// Validate a newly provided token before persisting it.
 	if req.Token != "" {
-		client := discord.NewClient(req.Token)
-		if _, err := client.GetCurrentUser(); err != nil {
+		source := discord.Global()
+		if source == nil {
+			SafeBadRequest(c, "collector unavailable")
+			return
+		}
+		client := source.Client()
+		if _, err := client.TestToken(req.Token); err != nil {
 			SafeBadRequest(c, "Discord Token validation failed: "+SanitizeError(err, "invalid token"))
 			return
 		}
 	}
 
 	// Omitted fields (nil / zero) preserve stored values — never silently
-	// re-enable a deliberately disabled poller or monitor.
+	// re-enable a deliberately disabled collector or monitor.
 	if err := s.store.DiscordConfig().Save(store.DiscordConfigUpdate{
-		Token:                  req.Token,
-		PollIntervalSeconds:    req.PollIntervalSeconds,
-		Enabled:                req.Enabled,
-		AlertEmail:             req.AlertEmail,
-		MonitorEnabled:         req.MonitorEnabled,
-		MonitorIntervalSeconds: req.MonitorIntervalSeconds,
+		Token:          req.Token,
+		RunMode:        req.RunMode,
+		Enabled:        req.Enabled,
+		AlertEmail:     req.AlertEmail,
+		MonitorEnabled: req.MonitorEnabled,
 	}); err != nil {
 		SafeInternalError(c, "Failed to save Discord configuration", err)
 		return
 	}
-	if poller := discord.Global(); poller != nil {
-		if err := poller.ReloadConfig(); err != nil {
-			logger.Warnf("Discord poller reload failed: %v", err)
+	applied, detail := false, "collector unavailable"
+	if source := discord.Global(); source != nil {
+		if err := source.ReloadConfig(); err != nil {
+			detail = err.Error()
+		} else {
+			applied = true
+			detail = ""
 		}
 	}
-	logger.Infof("✓ Discord configuration updated")
-	c.JSON(http.StatusOK, gin.H{"message": "Discord configuration saved"})
+	c.JSON(http.StatusOK, gin.H{"saved": true, "applied": applied, "apply_error": detail, "message": "Discord configuration saved"})
 }
 
 // handleTestDiscordAlertEmail sends a test email so the user can verify the
@@ -163,16 +170,22 @@ func (s *Server) handleTestDiscordAlertEmail(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "email": email})
 }
 
-// handleDeleteDiscordToken clears the stored token and stops polling.
+// handleDeleteDiscordToken clears the stored token and stops collection.
 func (s *Server) handleDeleteDiscordToken(c *gin.Context) {
 	if err := s.store.DiscordConfig().ClearToken(); err != nil {
 		SafeInternalError(c, "Failed to clear Discord token", err)
 		return
 	}
-	if poller := discord.Global(); poller != nil {
-		_ = poller.ReloadConfig()
+	applied, detail := false, "collector unavailable"
+	if source := discord.Global(); source != nil {
+		if err := source.ReloadConfig(); err != nil {
+			detail = err.Error()
+		} else {
+			applied = true
+			detail = ""
+		}
 	}
-	c.JSON(http.StatusOK, gin.H{"message": "Discord token cleared"})
+	c.JSON(http.StatusOK, gin.H{"message": "Discord token cleared", "saved": true, "applied": applied, "apply_error": detail})
 }
 
 // handleTestDiscordConnection validates the stored (or provided) token.
@@ -192,8 +205,12 @@ func (s *Server) handleTestDiscordConnection(c *gin.Context) {
 		token = string(cfg.Token)
 	}
 
-	client := discord.NewClient(token)
-	user, err := client.GetCurrentUser()
+	source := discord.Global()
+	if source == nil {
+		SafeBadRequest(c, "collector unavailable")
+		return
+	}
+	user, err := source.Client().TestToken(token)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"ok": false, "error": SanitizeError(err, "token validation failed")})
 		return
@@ -220,7 +237,12 @@ func (s *Server) handleTestDiscordChannel(c *gin.Context) {
 		SafeBadRequest(c, "No Discord token configured")
 		return
 	}
-	client := discord.NewClient(string(cfg.Token))
+	source := discord.Global()
+	if source == nil {
+		SafeBadRequest(c, "collector unavailable")
+		return
+	}
+	client := source.Client()
 	msgs, err := client.GetMessages(req.ChannelID, 5)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"ok": false, "error": SanitizeError(err, "channel fetch failed")})

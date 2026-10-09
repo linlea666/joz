@@ -2,7 +2,9 @@
 
 export interface DiscordChannelStatus {
   channel_id: string
-  subscribers: number
+  state: string
+  last_message_id?: string
+  updated_at?: string
   last_message_at?: string
   last_error?: string
   paused_until?: string
@@ -20,11 +22,20 @@ export interface DiscordMonitorStatus {
 export interface DiscordConfig {
   configured: boolean
   token_masked: string
-  poll_interval_seconds: number
+  run_mode: 'observe' | 'live'
+  execution_since?: string
+  collector?: {
+    state: string
+    last_error?: string
+    last_heartbeat?: string
+    last_message?: string
+    backlog: number
+    applied_version?: string
+    desired_version?: string
+  }
   enabled: boolean
   alert_email: string
   monitor_enabled: boolean
-  monitor_interval_seconds: number
   smtp_configured: boolean
   monitor_status?: DiscordMonitorStatus
   channels?: DiscordChannelStatus[]
@@ -50,7 +61,9 @@ export interface CopyTradingConfig {
   entry_policy?: 'legacy' | 'market_reference_split'
   market_dual_price_mode?: 'legacy' | 'range' | 'market_then_limit' | 'reject'
   default_reduce_ratio?: number
-  source_channel_ids?: string[] // Reserved; not supported
+  source_channel_ids?: string[]
+  source_mode?: 'channel' | 'chroma'
+  source_author_names?: string[]
   reasoning_effort?: string // Reserved; not supported
 
   parse_images: boolean
@@ -163,6 +176,10 @@ export interface CopyTradeInstructionResult {
   detail?: string
 }
 export interface CopyTradeSignal {
+  source_event_id?: string
+  delivery_id?: number
+  logical_channel_id?: string
+  queue_ms?: number
   rules_snapshot_json?: string
   action_results?: CopyTradeActionResult[]
   order_legs?: CopyTradeOrderLeg[]
@@ -305,5 +322,8 @@ export interface CopyTradePreset {
   id: NonNullable<CopyTradingConfig['interpretation_profile']>
   name: string
   description: string
-  recommended_config: Pick<CopyTradingConfig, 'market_dual_price_mode' | 'default_reduce_ratio' | 'channel_notes'>
+  recommended_config: Pick<
+    CopyTradingConfig,
+    'market_dual_price_mode' | 'default_reduce_ratio' | 'channel_notes'
+  >
 }

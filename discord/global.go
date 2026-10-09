@@ -8,23 +8,23 @@ import (
 
 var (
 	globalMu     sync.Mutex
-	globalPoller *PollerManager
+	globalSource *SourceManager
 )
 
-// InitGlobal creates (once) and returns the process-wide poller singleton.
+// InitGlobal creates (once) and returns the process-wide source manager singleton.
 // Call from main before traders load; subsequent calls return the same instance.
-func InitGlobal(st *store.Store) *PollerManager {
+func InitGlobal(st *store.Store) *SourceManager {
 	globalMu.Lock()
 	defer globalMu.Unlock()
-	if globalPoller == nil {
-		globalPoller = NewPollerManager(st)
+	if globalSource == nil {
+		globalSource = NewSourceManager(st)
 	}
-	return globalPoller
+	return globalSource
 }
 
-// Global returns the poller singleton (nil before InitGlobal).
-func Global() *PollerManager {
+// Global returns the source manager singleton (nil before InitGlobal).
+func Global() *SourceManager {
 	globalMu.Lock()
 	defer globalMu.Unlock()
-	return globalPoller
+	return globalSource
 }

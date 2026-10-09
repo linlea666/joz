@@ -11,19 +11,21 @@ import (
 )
 
 // DiscordConfig stores the global Discord token used for copy-trading
-// message polling (single row, always ID=1). All copy-trading traders share
+// event collection (single row, always ID=1). All copy-trading traders share
 // this credential. The token is encrypted at rest (crypto.EncryptedString).
 type DiscordConfig struct {
-	ID                  uint                   `gorm:"primaryKey"`
-	Token               crypto.EncryptedString `gorm:"column:token;default:''"`
-	PollIntervalSeconds int                    `gorm:"column:poll_interval_seconds;default:6"`
-	Enabled             bool                   `gorm:"column:enabled;default:true"`
+	ID             uint                   `gorm:"primaryKey"`
+	Token          crypto.EncryptedString `gorm:"column:token;default:''"`
+	RunMode        string                 `gorm:"default:observe" json:"run_mode"`
+	ExecutionSince *time.Time             `json:"execution_since,omitempty"`
+	Revision       uint64                 `gorm:"default:0" json:"revision"`
+	Enabled        bool                   `gorm:"column:enabled;default:true"`
 	// Token status monitoring (email alert when the token goes 401/403).
-	AlertEmail             string `gorm:"column:alert_email;default:''"`
-	MonitorEnabled         bool   `gorm:"column:monitor_enabled;default:true"`
-	MonitorIntervalSeconds int    `gorm:"column:monitor_interval_seconds;default:60"`
-	CreatedAt              time.Time
-	UpdatedAt              time.Time
+	AlertEmail     string `gorm:"column:alert_email;default:''"`
+	MonitorEnabled bool   `gorm:"column:monitor_enabled;default:true"`
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 func (DiscordConfig) TableName() string { return "discord_configs" }
@@ -34,8 +36,8 @@ func (dc DiscordConfig) String() string {
 	if dc.Token == "" {
 		token = "<not set>"
 	}
-	return fmt.Sprintf("DiscordConfig{ID:%d, Token:%s, PollInterval:%ds, Enabled:%v}",
-		dc.ID, token, dc.PollIntervalSeconds, dc.Enabled)
+	return fmt.Sprintf("DiscordConfig{ID:%d, Token:%s, Mode:%s, Enabled:%v}",
+		dc.ID, token, dc.RunMode, dc.Enabled)
 }
 
 // DiscordConfigStore manages the global Discord credential.
@@ -72,12 +74,11 @@ func (s *DiscordConfigStore) Get() (*DiscordConfig, error) {
 // numeric fields <= 0 keep the stored value (or fall back to the default);
 // nil pointer fields keep the stored value.
 type DiscordConfigUpdate struct {
-	Token                  string
-	PollIntervalSeconds    int
-	Enabled                *bool
-	AlertEmail             *string
-	MonitorEnabled         *bool
-	MonitorIntervalSeconds int
+	Token          string
+	RunMode        string
+	Enabled        *bool
+	AlertEmail     *string
+	MonitorEnabled *bool
 }
 
 // Save upserts the config, applying only the fields present in the update.
@@ -95,14 +96,26 @@ func (s *DiscordConfigStore) Save(u DiscordConfigUpdate) error {
 		cfg.Enabled = true
 		cfg.MonitorEnabled = true
 	}
+	wasEnabled := cfg.Enabled
+	previousToken := cfg.Token
 	cfg.ID = 1
 	if u.Token != "" {
 		cfg.Token = crypto.EncryptedString(u.Token)
 	}
-	if u.PollIntervalSeconds > 0 {
-		cfg.PollIntervalSeconds = u.PollIntervalSeconds
-	} else if cfg.PollIntervalSeconds <= 0 {
-		cfg.PollIntervalSeconds = 6
+	if u.RunMode != "" && u.RunMode != "observe" && u.RunMode != "live" {
+		return fmt.Errorf("run_mode must be observe or live")
+	}
+	if cfg.RunMode == "" {
+		cfg.RunMode = "observe"
+	}
+	if u.RunMode != "" && u.RunMode != cfg.RunMode {
+		cfg.RunMode = u.RunMode
+		if u.RunMode == "live" {
+			now := time.Now().UTC()
+			cfg.ExecutionSince = &now
+		} else {
+			cfg.ExecutionSince = nil
+		}
 	}
 	if u.Enabled != nil {
 		cfg.Enabled = *u.Enabled
@@ -113,11 +126,11 @@ func (s *DiscordConfigStore) Save(u DiscordConfigUpdate) error {
 	if u.MonitorEnabled != nil {
 		cfg.MonitorEnabled = *u.MonitorEnabled
 	}
-	if u.MonitorIntervalSeconds > 0 {
-		cfg.MonitorIntervalSeconds = u.MonitorIntervalSeconds
-	} else if cfg.MonitorIntervalSeconds <= 0 {
-		cfg.MonitorIntervalSeconds = 60
+	if cfg.RunMode == "live" && cfg.Enabled && (!wasEnabled || (previousToken != "" && previousToken != cfg.Token)) {
+		now := time.Now().UTC()
+		cfg.ExecutionSince = &now
 	}
+	cfg.Revision++
 	return s.db.Save(&cfg).Error
 }
 
@@ -125,7 +138,7 @@ func (s *DiscordConfigStore) Save(u DiscordConfigUpdate) error {
 func (s *DiscordConfigStore) ClearToken() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.db.Model(&DiscordConfig{}).Where("id = 1").Update("token", "").Error
+	return s.db.Model(&DiscordConfig{}).Where("id = 1").Updates(map[string]interface{}{"token": "", "run_mode": "observe", "execution_since": nil, "revision": gorm.Expr("revision + 1")}).Error
 }
 
 // HasToken reports whether a token is configured.

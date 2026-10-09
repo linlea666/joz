@@ -282,8 +282,21 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
       const result = await api.updateTrader(editingTrader.trader_id, request)
       if (result?.config_reload_status === 'failed') {
         toast.warning(t('copytrade.configSavedInactive', language))
+      } else if (result?.source_applied === false) {
+        toast.warning(
+          language === 'zh'
+            ? '配置已保存，采集路由等待应用；请在 Discord 设置中核对状态。'
+            : 'Saved; source application pending. Check Discord status.'
+        )
       } else {
-        toast.success(t(result?.restart_requested ? 'copytrade.configRestartRequested' : 'aiTradersToast.saved', language))
+        toast.success(
+          t(
+            result?.restart_requested
+              ? 'copytrade.configRestartRequested'
+              : 'aiTradersToast.saved',
+            language
+          )
+        )
       }
       setShowEditModal(false)
       setEditingTrader(null)
@@ -709,7 +722,15 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     const nextParams = new URLSearchParams(searchParams)
     nextParams.delete('setup')
     setSearchParams(nextParams, { replace: true })
-  }, [allExchanges, allModels, searchParams, setSearchParams, supportedModels, token, user])
+  }, [
+    allExchanges,
+    allModels,
+    searchParams,
+    setSearchParams,
+    supportedModels,
+    token,
+    user,
+  ])
 
   const refreshLaunchState = async () => {
     await Promise.all([loadConfigs(), mutateTraders()])

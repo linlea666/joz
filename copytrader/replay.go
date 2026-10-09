@@ -95,7 +95,7 @@ func (e *Engine) StartReplay(limit int) error {
 		return fmt.Errorf("a replay is already running (%d/%d)", e.replay.Done, e.replay.Total)
 	}
 
-	msgs, err := e.st.DiscordMessage().GetRecentByChannel(e.cfg.PrimaryChannelID, time.Time{}, limit)
+	msgs, err := e.st.DiscordMessage().GetRecentByChannels(e.cfg.ListenChannels(), time.Time{}, limit)
 	if err != nil {
 		return fmt.Errorf("failed to load channel history: %w", err)
 	}
@@ -104,6 +104,9 @@ func (e *Engine) StartReplay(limit int) error {
 	var queue []*store.DiscordMessage
 	for i := len(msgs) - 1; i >= 0; i-- {
 		m := msgs[i]
+		if !e.cfg.MessageRules().AllowsAuthor(m) {
+			continue
+		}
 		if strings.TrimSpace(m.Content) == "" && m.EmbedsJSON == "" && m.AttachmentsJSON == "" {
 			continue
 		}
@@ -279,7 +282,7 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 	item := ReplayItem{
 		RulesSnapshotJSON: e.cfg.MessageRules().Snapshot(),
 		EvaluationScope:   "current_rules_context_and_prices; historical execution state unavailable",
-		UncheckedGates:    []string{"account_ownership", "balance", "contract_capability", "order_limits", "ttl", "live_execution"},
+		UncheckedGates:    []string{"account_ownership", "balance", "contract_capability", "order_limits", "ttl", "source_connection", "message_gap", "activation_boundary", "historical_target_state", "live_execution"},
 		MessageID:         msg.MessageID,
 		Timestamp:         msg.MessageTimestamp,
 		Author:            msg.AuthorName,
@@ -293,8 +296,8 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 
 	// Discord CDN attachment URLs are signed and expire; refresh the message
 	// via the API so image replay still works on older history.
-	if item.ImageCount > 0 && e.poller != nil {
-		if client := e.poller.Client(); client != nil {
+	if item.ImageCount > 0 && e.source != nil {
+		if client := e.source.Client(); client != nil {
 			if apiMsg, err := client.GetMessage(msg.ChannelID, msg.MessageID); err == nil {
 				if fresh, cerr := discord.ToStoreMessage(apiMsg, msg.ChannelID); cerr == nil {
 					refreshed := *msg

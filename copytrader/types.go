@@ -157,6 +157,8 @@ type ActionEvidence struct {
 // SourceInterpretation is the standard output of AI signal parsing.
 // It answers exactly one question: "what did the author say?".
 type SourceInterpretation struct {
+	NotificationKind string `json:"-"` // verified in the source layer, never trusted from AI
+
 	Classification Classification `json:"classification"`
 	Action         Action         `json:"action"`
 	Symbol         string         `json:"symbol,omitempty"`    // raw symbol as stated ("BTC", "NQ", "BTC/USDT")
@@ -232,6 +234,7 @@ const (
 	SkipNone                  SkipReason = ""
 	SkipNotSignal             SkipReason = "NOT_SIGNAL"
 	SkipNeedsContext          SkipReason = "NEEDS_CONTEXT"
+	SkipWaitingReconciliation SkipReason = "WAITING_RECONCILIATION"
 	SkipAmbiguous             SkipReason = "AMBIGUOUS"
 	SkipUnsupportedInstrument SkipReason = "UNSUPPORTED_INSTRUMENT"
 	SkipUnsupportedPriceSpec  SkipReason = "UNSUPPORTED_PRICE_SPEC"

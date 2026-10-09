@@ -75,8 +75,39 @@ export function CopyTradeExecutionDetails({
       <h3 className="font-semibold text-nofx-text">
         {t('copytrade.executionDetails', language)}
       </h3>
-      {signal?.rules_snapshot_json && <CopyTradeRulesSnapshot snapshot={signal.rules_snapshot_json} language={language} />}
-      <p className="text-xs text-nofx-text-muted">{t('copytrade.tpCapHint', language)}</p>
+      {signal?.source_event_id && (
+        <div className="text-xs break-all space-y-1">
+          <p>
+            {language === 'zh'
+              ? '来源事件 → 投递 → 消息修订'
+              : 'Event → Delivery → Revision'}
+            : {signal.source_event_id} → {signal.delivery_id} →{' '}
+            {signal.message_id}/{signal.message_revision}
+          </p>
+          <p>
+            {language === 'zh'
+              ? '实际频道 / 逻辑频道'
+              : 'Source / logical channel'}
+            : {signal.channel_id} / {signal.logical_channel_id}
+          </p>
+          <p>
+            {language === 'zh'
+              ? '采集 / 排队 / AI / 提交耗时（毫秒）'
+              : 'Receive / queue / AI / submit (ms)'}
+            : {signal.receive_latency_ms} / {signal.queue_ms ?? '—'} /{' '}
+            {signal.llm_request_ms} / {signal.exchange_submit_ms}
+          </p>
+        </div>
+      )}
+      {signal?.rules_snapshot_json && (
+        <CopyTradeRulesSnapshot
+          snapshot={signal.rules_snapshot_json}
+          language={language}
+        />
+      )}
+      <p className="text-xs text-nofx-text-muted">
+        {t('copytrade.tpCapHint', language)}
+      </p>
       {!!signal?.instruction_results?.length && (
         <div className="space-y-1">
           <h4 className="font-semibold">
@@ -87,8 +118,12 @@ export function CopyTradeExecutionDetails({
               {result.symbol} {result.direction} · {result.action} ·{' '}
               {result.status}
               {result.skip_reason ? ` (${result.skip_reason})` : ''}
-              {result.context_ids?.length ? ` · ${result.context_ids.join(', ')}` : ''}
-              {result.action_ids?.length ? ` · ${result.action_ids.join(', ')}` : ''}
+              {result.context_ids?.length
+                ? ` · ${result.context_ids.join(', ')}`
+                : ''}
+              {result.action_ids?.length
+                ? ` · ${result.action_ids.join(', ')}`
+                : ''}
               {result.status !== 'executed' && result.detail
                 ? `: ${result.detail}`
                 : ''}
@@ -184,14 +219,41 @@ export function CopyTradeExecutionDetails({
               {t('copytrade.entryDecision', language)} ·{' '}
               {String(d.symbol || '')} {String(d.direction || '')}
             </div>
-            {d.plan && typeof d.plan === 'object' && 'origin' in d.plan ? <div className="space-y-1">
-              <p>{language === 'zh' ? '采用规则：' : 'Applied rule: '}{String((d.plan as Record<string, unknown>).origin)}</p>
-              <p>{String((d.plan as Record<string, unknown>).policy_note || '')}</p>
-              <p>{language === 'zh' ? '共享风险预算：' : 'Shared risk budget: '}{numeric(d.risk_budget)} USD</p>
-              {Array.isArray(d.legs) && d.legs.map((leg, index) => <p key={index}>
-                {language === 'zh' ? '订单' : 'Leg'} {index + 1}: {orderType(leg.type)} · {numeric(leg.price)} · {language === 'zh' ? '数量' : 'Qty'} {numeric(leg.quantity)} · {language === 'zh' ? '风险份额' : 'Risk share'} {numeric(typeof leg.risk_fraction === 'number' ? leg.risk_fraction * 100 : undefined, true)}
-              </p>)}
-            </div> : null}
+            {d.plan && typeof d.plan === 'object' && 'origin' in d.plan ? (
+              <div className="space-y-1">
+                <p>
+                  {language === 'zh' ? '采用规则：' : 'Applied rule: '}
+                  {String((d.plan as Record<string, unknown>).origin)}
+                </p>
+                <p>
+                  {String(
+                    (d.plan as Record<string, unknown>).policy_note || ''
+                  )}
+                </p>
+                <p>
+                  {language === 'zh'
+                    ? '共享风险预算：'
+                    : 'Shared risk budget: '}
+                  {numeric(d.risk_budget)} USD
+                </p>
+                {Array.isArray(d.legs) &&
+                  d.legs.map((leg, index) => (
+                    <p key={index}>
+                      {language === 'zh' ? '订单' : 'Leg'} {index + 1}:{' '}
+                      {orderType(leg.type)} · {numeric(leg.price)} ·{' '}
+                      {language === 'zh' ? '数量' : 'Qty'}{' '}
+                      {numeric(leg.quantity)} ·{' '}
+                      {language === 'zh' ? '风险份额' : 'Risk share'}{' '}
+                      {numeric(
+                        typeof leg.risk_fraction === 'number'
+                          ? leg.risk_fraction * 100
+                          : undefined,
+                        true
+                      )}
+                    </p>
+                  ))}
+              </div>
+            ) : null}
             <dl className="grid grid-cols-2 gap-x-4 gap-y-2">
               {fields.map(([label, value]) => (
                 <div key={label}>

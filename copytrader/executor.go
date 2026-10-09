@@ -37,11 +37,12 @@ type TPPlanEntry struct {
 //   - entry ok, SL failed   => retry, then EMERGENCY CLOSE (never hold naked)
 //   - SL ok, TP failed      => keep position (protected), warn
 type Executor struct {
-	traderID string
-	ex       types.Trader
-	gridEx   types.GridTrader // nil when the exchange has no native limit orders
-	st       *store.Store
-	events   *EventLogger
+	beforeEntrySubmit func(*store.CopyTradeOrder) error
+	traderID          string
+	ex                types.Trader
+	gridEx            types.GridTrader // nil when the exchange has no native limit orders
+	st                *store.Store
+	events            *EventLogger
 }
 
 // NewExecutor wraps the exchange trader.

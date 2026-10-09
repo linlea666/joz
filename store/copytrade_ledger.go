@@ -127,7 +127,7 @@ func (s *CopyTradeStore) LatestSignal(traderID, messageID string, revision int) 
 
 func (s *CopyTradeStore) DueRetries(traderID string, now time.Time) ([]*CopyTradeSignal, error) {
 	var rows []*CopyTradeSignal
-	err := s.db.Where("trader_id = ? AND status = ? AND next_retry_at <= ? AND execution_version > 0", traderID, "retry_wait", now).Order("next_retry_at ASC").Find(&rows).Error
+	err := s.db.Where("trader_id = ? AND status IN ? AND next_retry_at <= ? AND execution_version > 0", traderID, []string{"retry_wait", "execution_wait"}, now).Order("next_retry_at ASC").Find(&rows).Error
 	return rows, err
 }
 

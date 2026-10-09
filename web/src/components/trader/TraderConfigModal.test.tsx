@@ -7,7 +7,12 @@ import {
 } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { TraderConfigModal } from './TraderConfigModal'
-import type { AIModel, Exchange, TraderConfigData, CopyTradingConfig } from '../../types'
+import type {
+  AIModel,
+  Exchange,
+  TraderConfigData,
+  CopyTradingConfig,
+} from '../../types'
 
 vi.mock('../../contexts/LanguageContext', () => ({
   useLanguage: () => ({ language: 'zh' }),
@@ -17,14 +22,48 @@ vi.mock('../../lib/httpClient', () => ({
     get: vi.fn().mockResolvedValue({ success: true, data: { strategies: [] } }),
   },
 }))
-vi.mock('../../lib/api', () => ({ api: {
-  getCopyTradeProfiles: vi.fn().mockResolvedValue([
-    { id: 'default', name: '默认', description: '通用解释', recommended_config: {} },
-    { id: 'tyler_v1', name: 'TYLER', description: '特殊管理话术', recommended_config: { market_dual_price_mode: 'legacy', default_reduce_ratio: 50, channel_notes: 'TYLER 画像' } },
-    { id: 'cmm_v1', name: 'CMM', description: '新信号卡与操作通知', recommended_config: { market_dual_price_mode: 'market_then_limit', default_reduce_ratio: 50, channel_notes: 'CMM 画像' } },
-    { id: 'jonzi_v1', name: 'jonzi', description: '原卡编辑与中英重复', recommended_config: { market_dual_price_mode: 'legacy', default_reduce_ratio: 50, channel_notes: 'jonzi 画像' } },
-  ]),
-} }))
+vi.mock('../../lib/api', () => ({
+  api: {
+    getCopyTradeProfiles: vi.fn().mockResolvedValue([
+      {
+        id: 'default',
+        name: '默认',
+        description: '通用解释',
+        recommended_config: {},
+      },
+      {
+        id: 'tyler_v1',
+        name: 'TYLER',
+        description: '特殊管理话术',
+        recommended_config: {
+          market_dual_price_mode: 'legacy',
+          default_reduce_ratio: 50,
+          channel_notes: 'TYLER 画像',
+        },
+      },
+      {
+        id: 'cmm_v1',
+        name: 'CMM',
+        description: '新信号卡与操作通知',
+        recommended_config: {
+          market_dual_price_mode: 'market_then_limit',
+          default_reduce_ratio: 50,
+          channel_notes: 'CMM 画像',
+        },
+      },
+      {
+        id: 'jonzi_v1',
+        name: 'jonzi',
+        description: '原卡编辑与中英重复',
+        recommended_config: {
+          market_dual_price_mode: 'legacy',
+          default_reduce_ratio: 50,
+          channel_notes: 'jonzi 画像',
+        },
+      },
+    ]),
+  },
+}))
 
 afterEach(cleanup)
 
@@ -81,14 +120,19 @@ describe('copy-trading opt-in settings', () => {
   it('keeps existing risk settings and requires explicit profile and split selection', async () => {
     const save = setup()
     expect(screen.getByLabelText('作者风格预设')).toHaveValue('default')
-    expect(screen.getByLabelText('单参考价市价信号的执行方式（市价 A）')).toHaveValue('legacy')
+    expect(
+      screen.getByLabelText('单参考价市价信号的执行方式（市价 A）')
+    ).toHaveValue('legacy')
     await screen.findByRole('option', { name: 'TYLER' })
     fireEvent.change(screen.getByLabelText('作者风格预设'), {
       target: { value: 'tyler_v1' },
     })
-    fireEvent.change(screen.getByLabelText('单参考价市价信号的执行方式（市价 A）'), {
-      target: { value: 'market_reference_split' },
-    })
+    fireEvent.change(
+      screen.getByLabelText('单参考价市价信号的执行方式（市价 A）'),
+      {
+        target: { value: 'market_reference_split' },
+      }
+    )
     fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
     await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
     const cfg = JSON.parse(save.mock.calls[0][0].copy_trading_config)
@@ -133,44 +177,62 @@ describe('copy-trading opt-in settings', () => {
     }
   )
 
-  it.each([30, 0])('saves an explicit entry lifetime of %i minutes', async (minutes) => {
-    const save = setup()
-    const timeout = screen.getByLabelText('未成交挂单有效期（分钟）')
-    expect(timeout).toHaveValue(240)
-    fireEvent.change(timeout, { target: { value: String(minutes) } })
-    if (minutes === 0) {
-      expect(screen.getByRole('status')).toHaveTextContent('已关闭自动过期')
+  it.each([30, 0])(
+    'saves an explicit entry lifetime of %i minutes',
+    async (minutes) => {
+      const save = setup()
+      const timeout = screen.getByLabelText('未成交挂单有效期（分钟）')
+      expect(timeout).toHaveValue(240)
+      fireEvent.change(timeout, { target: { value: String(minutes) } })
+      if (minutes === 0) {
+        expect(screen.getByRole('status')).toHaveTextContent('已关闭自动过期')
+      }
+      fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+      await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+      expect(
+        JSON.parse(save.mock.calls[0][0].copy_trading_config)
+      ).toMatchObject({
+        entry_timeout_minutes: minutes,
+        risk_amount_usd: 15,
+        altcoin_price_offset_pct: 0.2,
+        open_signal_ttl_seconds: 300,
+        management_signal_ttl_seconds: 1800,
+      })
     }
-    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
-    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
-    expect(JSON.parse(save.mock.calls[0][0].copy_trading_config)).toMatchObject({
-      entry_timeout_minutes: minutes,
-      risk_amount_usd: 15,
-      altcoin_price_offset_pct: 0.2,
-      open_signal_ttl_seconds: 300,
-      management_signal_ttl_seconds: 1800,
-    })
-  })
+  )
 
-  it.each([0, 60])('preserves a saved entry lifetime of %i minutes', async (minutes) => {
-    const save = setup('binance', 'legacy', 'by_loss', minutes)
-    expect(screen.getByLabelText('未成交挂单有效期（分钟）')).toHaveValue(minutes)
-    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
-    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
-    expect(JSON.parse(save.mock.calls[0][0].copy_trading_config).entry_timeout_minutes).toBe(minutes)
-  })
+  it.each([0, 60])(
+    'preserves a saved entry lifetime of %i minutes',
+    async (minutes) => {
+      const save = setup('binance', 'legacy', 'by_loss', minutes)
+      expect(screen.getByLabelText('未成交挂单有效期（分钟）')).toHaveValue(
+        minutes
+      )
+      fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+      await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+      expect(
+        JSON.parse(save.mock.calls[0][0].copy_trading_config)
+          .entry_timeout_minutes
+      ).toBe(minutes)
+    }
+  )
 
   it.each(['', '-1', '1.5', '1e309', '153722868'])(
-    'blocks invalid lifetime %j rather than silently disabling expiry', (value) => {
+    'blocks invalid lifetime %j rather than silently disabling expiry',
+    (value) => {
       const save = setup()
-      fireEvent.change(screen.getByLabelText('未成交挂单有效期（分钟）'), { target: { value } })
+      fireEvent.change(screen.getByLabelText('未成交挂单有效期（分钟）'), {
+        target: { value },
+      })
       expect(screen.getByRole('alert')).toBeInTheDocument()
       expect(screen.queryByRole('status')).not.toBeInTheDocument()
       const button = screen.getByRole('button', { name: '保存修改' })
       expect(button).toBeDisabled()
       fireEvent.click(button)
       expect(save).not.toHaveBeenCalled()
-      fireEvent.change(screen.getByLabelText('未成交挂单有效期（分钟）'), { target: { value: '240' } })
+      fireEvent.change(screen.getByLabelText('未成交挂单有效期（分钟）'), {
+        target: { value: '240' },
+      })
       expect(button).toBeEnabled()
     }
   )
@@ -182,14 +244,17 @@ describe('copy-trading opt-in settings', () => {
     'rejects saved split policy with %s / %s without silently changing it',
     async (exchange, riskMode) => {
       const save = setup(exchange, 'market_reference_split', riskMode)
-      expect(screen.getByLabelText('单参考价市价信号的执行方式（市价 A）')).toHaveValue(
-        'market_reference_split'
-      )
+      expect(
+        screen.getByLabelText('单参考价市价信号的执行方式（市价 A）')
+      ).toHaveValue('market_reference_split')
       expect(screen.getByRole('alert')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '保存修改' })).toBeDisabled()
-      fireEvent.change(screen.getByLabelText('单参考价市价信号的执行方式（市价 A）'), {
-        target: { value: 'legacy' },
-      })
+      fireEvent.change(
+        screen.getByLabelText('单参考价市价信号的执行方式（市价 A）'),
+        {
+          target: { value: 'legacy' },
+        }
+      )
       fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
       await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
       expect(
@@ -199,45 +264,107 @@ describe('copy-trading opt-in settings', () => {
   )
 })
 
-
 describe('author preset recommendations', () => {
-  it.each(['cmm_v1', 'tyler_v1', 'jonzi_v1'])('applies %s only to editable recommended fields', async (profile) => {
-    const save = setup('binance', 'market_reference_split')
-    await screen.findByRole('option', { name: 'CMM' })
-    fireEvent.change(screen.getByLabelText('作者风格预设'), { target: { value: profile } })
-    expect(save).not.toHaveBeenCalled()
-    expect(screen.getByLabelText('单参考价市价信号的执行方式（市价 A）')).toHaveValue('market_reference_split')
-    expect(screen.getByLabelText('双价格文案含义（市价 A—B）')).toHaveValue(profile === 'cmm_v1' ? 'market_then_limit' : 'legacy')
-    // The recommendation remains editable before save.
-    fireEvent.change(screen.getByLabelText('明确减仓但未注明比例（剩余仓位 %）'), { target: { value: '25' } })
-    expect(screen.getByText(/使用剩余仓位的 25%/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
-    await waitFor(() => expect(save).toHaveBeenCalledOnce())
-    const cfg = JSON.parse(save.mock.calls[0][0].copy_trading_config)
-    expect(cfg).toMatchObject({ interpretation_profile: profile, default_reduce_ratio: 25, entry_policy: 'market_reference_split', risk_amount_usd: 15, altcoin_price_offset_pct: 0.2 })
-    expect(cfg.channel_notes).toContain(profile === 'cmm_v1' ? 'CMM' : profile === 'tyler_v1' ? 'TYLER' : 'jonzi')
-    expect(save.mock.calls[0][0].exchange_id).toBe('exchange')
-  })
+  it.each(['cmm_v1', 'tyler_v1', 'jonzi_v1'])(
+    'applies %s only to editable recommended fields',
+    async (profile) => {
+      const save = setup('binance', 'market_reference_split')
+      await screen.findByRole('option', { name: 'CMM' })
+      fireEvent.change(screen.getByLabelText('作者风格预设'), {
+        target: { value: profile },
+      })
+      expect(save).not.toHaveBeenCalled()
+      expect(
+        screen.getByLabelText('单参考价市价信号的执行方式（市价 A）')
+      ).toHaveValue('market_reference_split')
+      expect(screen.getByLabelText('双价格文案含义（市价 A—B）')).toHaveValue(
+        profile === 'cmm_v1' ? 'market_then_limit' : 'legacy'
+      )
+      // The recommendation remains editable before save.
+      fireEvent.change(
+        screen.getByLabelText('明确减仓但未注明比例（剩余仓位 %）'),
+        { target: { value: '25' } }
+      )
+      expect(screen.getByText(/使用剩余仓位的 25%/)).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+      await waitFor(() => expect(save).toHaveBeenCalledOnce())
+      const cfg = JSON.parse(save.mock.calls[0][0].copy_trading_config)
+      expect(cfg).toMatchObject({
+        interpretation_profile: profile,
+        default_reduce_ratio: 25,
+        entry_policy: 'market_reference_split',
+        risk_amount_usd: 15,
+        altcoin_price_offset_pct: 0.2,
+      })
+      expect(cfg.channel_notes).toContain(
+        profile === 'cmm_v1'
+          ? 'CMM'
+          : profile === 'tyler_v1'
+            ? 'TYLER'
+            : 'jonzi'
+      )
+      expect(save.mock.calls[0][0].exchange_id).toBe('exchange')
+    }
+  )
 
   it('does not apply recommendations when opening saved settings or switching to default', async () => {
     const save = setup('binance', 'market_reference_split', 'by_loss', 800, {
-      interpretation_profile: 'cmm_v1', market_dual_price_mode: 'range', default_reduce_ratio: 35, channel_notes: '我的画像',
+      interpretation_profile: 'cmm_v1',
+      market_dual_price_mode: 'range',
+      default_reduce_ratio: 35,
+      channel_notes: '我的画像',
     })
     await screen.findByRole('option', { name: 'CMM' })
     expect(screen.getByLabelText('作者风格预设')).toHaveValue('cmm_v1')
-    expect(screen.getByLabelText('双价格文案含义（市价 A—B）')).toHaveValue('range')
+    expect(screen.getByLabelText('双价格文案含义（市价 A—B）')).toHaveValue(
+      'range'
+    )
     expect(screen.getByDisplayValue('我的画像')).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('作者风格预设'), { target: { value: 'default' } })
+    fireEvent.change(screen.getByLabelText('作者风格预设'), {
+      target: { value: 'default' },
+    })
     fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
     await waitFor(() => expect(save).toHaveBeenCalledOnce())
-    expect(JSON.parse(save.mock.calls[0][0].copy_trading_config)).toMatchObject({ interpretation_profile: 'default', market_dual_price_mode: 'range', default_reduce_ratio: 35, channel_notes: '我的画像', entry_policy: 'market_reference_split', entry_timeout_minutes: 800 })
+    expect(JSON.parse(save.mock.calls[0][0].copy_trading_config)).toMatchObject(
+      {
+        interpretation_profile: 'default',
+        market_dual_price_mode: 'range',
+        default_reduce_ratio: 35,
+        channel_notes: '我的画像',
+        entry_policy: 'market_reference_split',
+        entry_timeout_minutes: 800,
+      }
+    )
   })
 
   it('cancelling a preset edit does not save it', async () => {
     const save = setup()
     await screen.findByRole('option', { name: 'CMM' })
-    fireEvent.change(screen.getByLabelText('作者风格预设'), { target: { value: 'cmm_v1' } })
+    fireEvent.change(screen.getByLabelText('作者风格预设'), {
+      target: { value: 'cmm_v1' },
+    })
     fireEvent.click(screen.getByRole('button', { name: '取消' }))
     expect(save).not.toHaveBeenCalled()
   })
+})
+
+it('keeps independent sources and exact author filters when changing the author preset', async () => {
+  const save = setup('binance', 'legacy', 'by_loss', 240, {
+    source_mode: 'chroma',
+    source_channel_ids: ['201', '202'],
+    source_author_names: ['JONZi'],
+    source_author_ids: ['77'],
+  })
+  await screen.findByRole('option', { name: 'CMM' })
+  fireEvent.change(screen.getByLabelText('作者风格预设'), {
+    target: { value: 'cmm_v1' },
+  })
+  expect(screen.getByLabelText('来源模式')).toHaveValue('chroma')
+  fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+  await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+  const cfg = JSON.parse(save.mock.calls[0][0].copy_trading_config)
+  expect(cfg.source_channel_ids).toEqual(['201', '202'])
+  expect(cfg.source_author_names).toEqual(['JONZi'])
+  expect(cfg.source_author_ids).toEqual(['77'])
+  expect(cfg.risk_amount_usd).toBe(15)
 })

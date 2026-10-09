@@ -140,8 +140,12 @@ export function TraderConfigModal({
 
   const isCopyTrading = formData.trader_type === 'copy_trading'
 
-  const { profiles, error: profilesError } = useCopyTradeProfiles(isOpen && isCopyTrading)
-  const selectedPreset = profiles.find(p => p.id === (copyConfig.interpretation_profile || 'default'))
+  const { profiles, error: profilesError } = useCopyTradeProfiles(
+    isOpen && isCopyTrading
+  )
+  const selectedPreset = profiles.find(
+    (p) => p.id === (copyConfig.interpretation_profile || 'default')
+  )
 
   // Fetch the user's strategy list
   useEffect(() => {
@@ -200,7 +204,9 @@ export function TraderConfigModal({
         trader_type: 'ai_scan',
       })
       setCopyConfig({ ...DEFAULT_COPY_TRADING_CONFIG })
-      setEntryTimeoutInput(String(DEFAULT_COPY_TRADING_CONFIG.entry_timeout_minutes))
+      setEntryTimeoutInput(
+        String(DEFAULT_COPY_TRADING_CONFIG.entry_timeout_minutes)
+      )
     }
   }, [isOpen, traderData, isEditMode, availableModels, availableExchanges])
 
@@ -211,7 +217,9 @@ export function TraderConfigModal({
       .find((ex) => ex.id === formData.exchange_id)
       ?.exchange_type?.toLowerCase() === 'binance'
   const invalidEntryPolicy =
-    (copyConfig.entry_policy === 'market_reference_split' || copyConfig.market_dual_price_mode === 'market_then_limit') && !splitAvailable
+    (copyConfig.entry_policy === 'market_reference_split' ||
+      copyConfig.market_dual_price_mode === 'market_then_limit') &&
+    !splitAvailable
   const entryTimeoutMinutes = Number(entryTimeoutInput)
   // Go converts minutes to int64 nanoseconds; reject values that overflow it.
   const invalidEntryTimeout =
@@ -224,10 +232,13 @@ export function TraderConfigModal({
     !Number.isFinite(copyConfig.default_reduce_ratio ?? 50) ||
     (copyConfig.default_reduce_ratio ?? 50) <= 0 ||
     (copyConfig.default_reduce_ratio ?? 50) > 100 ||
-    [copyConfig.open_signal_ttl_seconds, copyConfig.management_signal_ttl_seconds].some(
-      value => !Number.isSafeInteger(value) || value < 0 || value > 9223372036
+    [
+      copyConfig.open_signal_ttl_seconds,
+      copyConfig.management_signal_ttl_seconds,
+    ].some(
+      (value) => !Number.isSafeInteger(value) || value < 0 || value > 9223372036
     )
-  const unsupportedFields = !!copyConfig.source_channel_ids?.length || !!copyConfig.reasoning_effort
+  const unsupportedFields = !!copyConfig.reasoning_effort
 
   const handleInputChange = (field: keyof FormState, value: any) => {
     setFormData((prev) => ({ ...prev, [field]: value }))
@@ -245,7 +256,15 @@ export function TraderConfigModal({
   }
 
   const handleSave = async () => {
-    if (!onSave || (isCopyTrading && (invalidEntryTimeout || invalidEntryPolicy || invalidMessageRules || unsupportedFields))) return
+    if (
+      !onSave ||
+      (isCopyTrading &&
+        (invalidEntryTimeout ||
+          invalidEntryPolicy ||
+          invalidMessageRules ||
+          unsupportedFields))
+    )
+      return
 
     setIsSaving(true)
     try {
@@ -264,6 +283,9 @@ export function TraderConfigModal({
           ...copyConfig,
           entry_timeout_minutes: entryTimeoutMinutes,
           primary_channel_id: copyConfig.primary_channel_id.trim(),
+          source_channel_ids: copyConfig.source_channel_ids?.filter(Boolean),
+          source_author_ids: copyConfig.source_author_ids?.filter(Boolean),
+          source_author_names: copyConfig.source_author_names?.filter(Boolean),
         })
       }
 
@@ -478,6 +500,78 @@ export function TraderConfigModal({
                   </p>
                 </div>
 
+                <div className="space-y-3">
+                  <label className="block text-sm">
+                    {language === 'zh' ? '来源模式' : 'Source mode'}
+                    <select
+                      aria-label={
+                        language === 'zh' ? '来源模式' : 'Source mode'
+                      }
+                      value={copyConfig.source_mode || 'channel'}
+                      onChange={(e) =>
+                        handleCopyConfigChange(
+                          'source_mode',
+                          e.target.value as 'channel' | 'chroma'
+                        )
+                      }
+                      className="block w-full p-2 bg-nofx-bg-lighter border rounded"
+                    >
+                      <option value="channel">
+                        {language === 'zh'
+                          ? '普通频道（新消息与有效编辑）'
+                          : 'Channel messages and edits'}
+                      </option>
+                      <option value="chroma">
+                        Chroma{' '}
+                        {language === 'zh'
+                          ? '通知（通知动作＋卡片参数）'
+                          : 'notifications'}
+                      </option>
+                    </select>
+                  </label>
+                  {(
+                    [
+                      'source_channel_ids',
+                      'source_author_ids',
+                      'source_author_names',
+                    ] as const
+                  ).map((field, i) => (
+                    <label key={field} className="block text-sm">
+                      {language === 'zh'
+                        ? [
+                            '实际监听频道 ID（逗号分隔）',
+                            '当前消息作者 ID（逗号分隔）',
+                            '当前消息作者名称（精确匹配，逗号分隔）',
+                          ][i]
+                        : [
+                            'Actual source channel IDs (comma-separated)',
+                            'Message author IDs (comma-separated)',
+                            'Exact message author names (comma-separated)',
+                          ][i]}
+                      <input
+                        value={(copyConfig[field] || []).join(', ')}
+                        onChange={(e) =>
+                          handleCopyConfigChange(
+                            field,
+                            e.target.value.split(/[,，]/).map((v) => v.trim())
+                          )
+                        }
+                        onBlur={() =>
+                          handleCopyConfigChange(
+                            field,
+                            (copyConfig[field] || []).filter(Boolean)
+                          )
+                        }
+                        className="block w-full p-2 bg-nofx-bg-lighter border rounded"
+                      />
+                    </label>
+                  ))}
+                  <p className="text-xs text-nofx-text-muted">
+                    {language === 'zh'
+                      ? '实际来源留空时监听逻辑频道；Chroma 必须配置实际来源和至少一种作者过滤。两种作者过滤同时填写时须同时满足，引用卡片作者不能替代当前作者。'
+                      : 'Empty sources use the logical channel. Chroma requires actual sources and an author filter. Both filters apply when supplied; quoted authors never bypass them.'}
+                  </p>
+                </div>
                 <div>
                   <label
                     htmlFor="copy-interpretation-profile"
@@ -490,32 +584,87 @@ export function TraderConfigModal({
                     disabled={!profiles.length}
                     value={copyConfig.interpretation_profile || 'default'}
                     onChange={(e) =>
-                      setCopyConfig(prev => {
-                        const preset = profiles.find(p => p.id === e.target.value)
+                      setCopyConfig((prev) => {
+                        const preset = profiles.find(
+                          (p) => p.id === e.target.value
+                        )
                         if (!preset) return prev
-                        return { ...prev, ...(preset.id === 'default' ? {} : preset.recommended_config), interpretation_profile: preset.id }
+                        return {
+                          ...prev,
+                          ...(preset.id === 'default'
+                            ? {}
+                            : preset.recommended_config),
+                          interpretation_profile: preset.id,
+                        }
                       })
                     }
                     className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
                   >
-                    {!profiles.length && <option value={copyConfig.interpretation_profile || 'default'}>{copyConfig.interpretation_profile || t('copytrade.profileDefault', language)}</option>}
-                    {profiles.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    {!profiles.length && (
+                      <option
+                        value={copyConfig.interpretation_profile || 'default'}
+                      >
+                        {copyConfig.interpretation_profile ||
+                          t('copytrade.profileDefault', language)}
+                      </option>
+                    )}
+                    {profiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
                   </select>
                   <p className="text-xs text-nofx-text-muted mt-1">
-                    {selectedPreset?.description}
-                    {' '}{t('copytrade.profileHint', language, { ratio: copyConfig.default_reduce_ratio ?? 50 })}
+                    {selectedPreset?.description}{' '}
+                    {t('copytrade.profileHint', language, {
+                      ratio: copyConfig.default_reduce_ratio ?? 50,
+                    })}
                   </p>
-                  {profilesError && <p role="alert" className="text-xs text-nofx-danger">{t('copytrade.profileLoadFailed', language)}</p>}
+                  {profilesError && (
+                    <p role="alert" className="text-xs text-nofx-danger">
+                      {t('copytrade.profileLoadFailed', language)}
+                    </p>
+                  )}
                 </div>
                 <fieldset className="border border-nofx-gold/20 rounded p-3 space-y-3">
-                  <legend className="px-1 text-sm">{t('copytrade.entryRules', language)}</legend>
-                  <p className="text-xs text-nofx-text-muted">{t('copytrade.entryRulesHint', language)}</p>
-                  <label htmlFor="copy-dual-price" className="text-sm text-nofx-text block mb-2">{t('copytrade.dualPriceLabel', language)}</label>
-                  <select id="copy-dual-price" value={copyConfig.market_dual_price_mode || 'legacy'} onChange={e => handleCopyConfigChange('market_dual_price_mode', e.target.value)} className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text">
-                    <option value="legacy">{t('copytrade.dualPriceLegacy', language)}</option>
-                    <option value="range">{t('copytrade.dualPriceRange', language)}</option>
-                    <option value="market_then_limit" disabled={!splitAvailable}>{t('copytrade.dualPriceSplit', language)}</option>
-                    <option value="reject">{t('copytrade.dualPriceReject', language)}</option>
+                  <legend className="px-1 text-sm">
+                    {t('copytrade.entryRules', language)}
+                  </legend>
+                  <p className="text-xs text-nofx-text-muted">
+                    {t('copytrade.entryRulesHint', language)}
+                  </p>
+                  <label
+                    htmlFor="copy-dual-price"
+                    className="text-sm text-nofx-text block mb-2"
+                  >
+                    {t('copytrade.dualPriceLabel', language)}
+                  </label>
+                  <select
+                    id="copy-dual-price"
+                    value={copyConfig.market_dual_price_mode || 'legacy'}
+                    onChange={(e) =>
+                      handleCopyConfigChange(
+                        'market_dual_price_mode',
+                        e.target.value
+                      )
+                    }
+                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
+                  >
+                    <option value="legacy">
+                      {t('copytrade.dualPriceLegacy', language)}
+                    </option>
+                    <option value="range">
+                      {t('copytrade.dualPriceRange', language)}
+                    </option>
+                    <option
+                      value="market_then_limit"
+                      disabled={!splitAvailable}
+                    >
+                      {t('copytrade.dualPriceSplit', language)}
+                    </option>
+                    <option value="reject">
+                      {t('copytrade.dualPriceReject', language)}
+                    </option>
                   </select>
                   <div>
                     <label
@@ -527,11 +676,18 @@ export function TraderConfigModal({
                     <select
                       id="copy-entry-policy"
                       value={copyConfig.entry_policy || 'legacy'}
-                      onChange={(e) => handleCopyConfigChange('entry_policy', e.target.value)}
+                      onChange={(e) =>
+                        handleCopyConfigChange('entry_policy', e.target.value)
+                      }
                       className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
                     >
-                      <option value="legacy">{t('copytrade.entryLegacy', language)}</option>
-                      <option value="market_reference_split" disabled={!splitAvailable}>
+                      <option value="legacy">
+                        {t('copytrade.entryLegacy', language)}
+                      </option>
+                      <option
+                        value="market_reference_split"
+                        disabled={!splitAvailable}
+                      >
                         {t('copytrade.entrySplit', language)}
                       </option>
                     </select>
@@ -544,15 +700,58 @@ export function TraderConfigModal({
                       </p>
                     )}
                   </div>
-
                 </fieldset>
                 <div>
-                  <label htmlFor="copy-default-reduce" className="text-sm text-nofx-text block mt-3 mb-2">{t('copytrade.reduceDefault', language)}</label>
-                  <input id="copy-default-reduce" type="number" min="0.01" max="100" step="any" value={copyConfig.default_reduce_ratio ?? 50} onChange={e => handleCopyConfigChange('default_reduce_ratio', Number(e.target.value))} className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text" />
-                  <p className="text-xs text-nofx-text-muted mt-2">{t('copytrade.rulesHint', language)}</p>
-                  <p className="text-xs text-nofx-text-muted mt-2">{t('copytrade.tpCapHint', language)}</p>
-                  {invalidMessageRules && <p role="alert" className="text-xs text-nofx-danger">{t('copytrade.rulesInvalid', language)}</p>}
-                  {unsupportedFields && <div role="alert"><p>{t('copytrade.reservedUnsupported', language)}</p><button type="button" onClick={() => setCopyConfig(prev => ({...prev, source_channel_ids: [], reasoning_effort: ''}))}>{language === 'zh' ? '清除预留字段' : 'Clear reserved fields'}</button></div>}
+                  <label
+                    htmlFor="copy-default-reduce"
+                    className="text-sm text-nofx-text block mt-3 mb-2"
+                  >
+                    {t('copytrade.reduceDefault', language)}
+                  </label>
+                  <input
+                    id="copy-default-reduce"
+                    type="number"
+                    min="0.01"
+                    max="100"
+                    step="any"
+                    value={copyConfig.default_reduce_ratio ?? 50}
+                    onChange={(e) =>
+                      handleCopyConfigChange(
+                        'default_reduce_ratio',
+                        Number(e.target.value)
+                      )
+                    }
+                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
+                  />
+                  <p className="text-xs text-nofx-text-muted mt-2">
+                    {t('copytrade.rulesHint', language)}
+                  </p>
+                  <p className="text-xs text-nofx-text-muted mt-2">
+                    {t('copytrade.tpCapHint', language)}
+                  </p>
+                  {invalidMessageRules && (
+                    <p role="alert" className="text-xs text-nofx-danger">
+                      {t('copytrade.rulesInvalid', language)}
+                    </p>
+                  )}
+                  {unsupportedFields && (
+                    <div role="alert">
+                      <p>{t('copytrade.reservedUnsupported', language)}</p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setCopyConfig((prev) => ({
+                            ...prev,
+                            reasoning_effort: '',
+                          }))
+                        }
+                      >
+                        {language === 'zh'
+                          ? '清除预留字段'
+                          : 'Clear reserved fields'}
+                      </button>
+                    </div>
+                  )}
                 </div>
                 {/* Channel profile */}
                 <div>
@@ -569,7 +768,10 @@ export function TraderConfigModal({
                     }
                     rows={8}
                     className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text text-sm focus:border-nofx-gold focus:outline-none"
-                    placeholder={t('copytrade.channelNotesPlaceholder', language)}
+                    placeholder={t(
+                      'copytrade.channelNotesPlaceholder',
+                      language
+                    )}
                   />
                   <div className="flex flex-wrap gap-2 mt-2">
                     <button
@@ -606,7 +808,10 @@ export function TraderConfigModal({
                             toast.error(
                               err instanceof Error && err.message
                                 ? err.message
-                                : t('copytrade.channelNotesGenerateFailed', language)
+                                : t(
+                                    'copytrade.channelNotesGenerateFailed',
+                                    language
+                                  )
                             )
                           } finally {
                             setIsGeneratingProfile(false)
@@ -638,7 +843,9 @@ export function TraderConfigModal({
                       <button
                         key={mode}
                         type="button"
-                        onClick={() => handleCopyConfigChange('risk_mode', mode)}
+                        onClick={() =>
+                          handleCopyConfigChange('risk_mode', mode)
+                        }
                         className={`flex-1 px-3 py-2 rounded text-sm ${
                           copyConfig.risk_mode === mode
                             ? 'bg-nofx-gold text-white'
@@ -767,7 +974,10 @@ export function TraderConfigModal({
                     type="text"
                     value={copyConfig.default_tp_ratios}
                     onChange={(e) =>
-                      handleCopyConfigChange('default_tp_ratios', e.target.value)
+                      handleCopyConfigChange(
+                        'default_tp_ratios',
+                        e.target.value
+                      )
                     }
                     className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text font-mono focus:border-nofx-gold focus:outline-none"
                     placeholder="50,30,20"
@@ -797,7 +1007,10 @@ export function TraderConfigModal({
                     aria-describedby="copy-entry-timeout-hint"
                     className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
                   />
-                  <p id="copy-entry-timeout-hint" className="text-xs text-nofx-text-muted mt-1">
+                  <p
+                    id="copy-entry-timeout-hint"
+                    className="text-xs text-nofx-text-muted mt-1"
+                  >
                     {t('copytrade.entryTimeoutHint', language)}
                   </p>
                   {invalidEntryTimeout && (
@@ -906,131 +1119,133 @@ export function TraderConfigModal({
 
           {/* Strategy Selection */}
           {!isCopyTrading && (
-          <div className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5">
-            <h3 className="text-lg font-semibold text-nofx-text mb-5 flex items-center gap-2">
-              <span className="text-nofx-gold">2</span>{' '}
-              {t('selectTradingStrategy', language)}
-              <Sparkles className="w-4 h-4 text-nofx-gold" />
-            </h3>
-            <div className="space-y-4">
-              <div>
-                <label className="text-sm text-nofx-text block mb-2">
-                  {t('useStrategy', language)}
-                </label>
-                <NofxSelect
-                  value={formData.strategy_id}
-                  onChange={(val) => handleInputChange('strategy_id', val)}
-                  className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
-                  options={[
-                    { value: '', label: t('noStrategyManual', language) },
-                    ...strategies.map((strategy) => ({
-                      value: strategy.id,
-                      label:
-                        strategy.name +
-                        (strategy.is_active
-                          ? t('strategyActive', language)
-                          : '') +
-                        (strategy.is_default
-                          ? t('strategyDefault', language)
-                          : ''),
-                    })),
-                  ]}
-                />
-                {strategies.length === 0 && (
-                  <p className="text-xs text-nofx-text-muted mt-2">
-                    {t('noStrategyHint', language)}
-                  </p>
-                )}
-              </div>
-
-              {/* Strategy Preview */}
-              {selectedStrategy && (
-                <div className="mt-3 p-4 bg-nofx-bg-lighter border border-nofx-gold/20 rounded-lg">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-nofx-gold text-sm font-medium">
-                      {t('strategyDetails', language)}
-                    </span>
-                    {selectedStrategy.is_active && (
-                      <span className="px-2 py-0.5 bg-nofx-success/20 text-nofx-success text-xs rounded">
-                        {t('activating', language)}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-sm text-nofx-text-muted mb-2">
-                    {selectedStrategy.description ||
-                      (language === 'zh' ? 'No description' : 'No description')}
-                  </p>
-                  {selectedStrategy.config.strategy_type === 'grid_trading' &&
-                  selectedStrategy.config.grid_config ? (
-                    <div className="grid grid-cols-2 gap-2 text-xs text-nofx-text-muted">
-                      <div>
-                        {language === 'zh' ? 'Symbol' : 'Symbol'}:{' '}
-                        {selectedStrategy.config.grid_config.symbol || '-'}
-                      </div>
-                      <div>
-                        {language === 'zh' ? 'Grids' : 'Grids'}:{' '}
-                        {selectedStrategy.config.grid_config.grid_count}
-                      </div>
-                    </div>
-                  ) : (
-                    (() => {
-                      const aiConfig = getStrategyAIConfig(selectedStrategy)
-                      if (!aiConfig) return null
-                      return (
-                        <div className="grid grid-cols-2 gap-2 text-xs text-nofx-text-muted">
-                          <div>
-                            {t('coinSource', language)}:{' '}
-                            {aiConfig.coin_source.source_type === 'static'
-                              ? language === 'zh'
-                                ? 'Fixed US stocks'
-                                : 'Fixed US stocks'
-                              : aiConfig.coin_source.source_type ===
-                                  'vergex_signal'
-                                ? language === 'zh'
-                                  ? 'Vergex signal board'
-                                  : 'Vergex signal board'
-                                : aiConfig.coin_source.source_type ===
-                                    'hyper_rank'
-                                  ? language === 'zh'
-                                    ? 'Claw402 board'
-                                    : 'Claw402 board'
-                                  : aiConfig.coin_source.source_type ===
-                                      'hyper_all'
-                                    ? language === 'zh'
-                                      ? 'Hyperliquid all markets'
-                                      : 'Hyperliquid all markets'
-                                    : aiConfig.coin_source.source_type ===
-                                        'hyper_main'
-                                      ? language === 'zh'
-                                        ? 'Hyperliquid main markets'
-                                        : 'Hyperliquid main markets'
-                                      : aiConfig.coin_source.source_type ===
-                                          'ai500'
-                                        ? 'AI500'
-                                        : aiConfig.coin_source.source_type ===
-                                            'oi_top'
-                                          ? 'OI Top'
-                                          : aiConfig.coin_source.source_type ===
-                                              'oi_low'
-                                            ? 'OI Low'
-                                            : '-'}
-                          </div>
-                          <div>
-                            {t('marginLimit', language)}:{' '}
-                            {(
-                              (aiConfig.risk_control?.max_margin_usage || 0.9) *
-                              100
-                            ).toFixed(0)}
-                            %
-                          </div>
-                        </div>
-                      )
-                    })()
+            <div className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5">
+              <h3 className="text-lg font-semibold text-nofx-text mb-5 flex items-center gap-2">
+                <span className="text-nofx-gold">2</span>{' '}
+                {t('selectTradingStrategy', language)}
+                <Sparkles className="w-4 h-4 text-nofx-gold" />
+              </h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-sm text-nofx-text block mb-2">
+                    {t('useStrategy', language)}
+                  </label>
+                  <NofxSelect
+                    value={formData.strategy_id}
+                    onChange={(val) => handleInputChange('strategy_id', val)}
+                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text"
+                    options={[
+                      { value: '', label: t('noStrategyManual', language) },
+                      ...strategies.map((strategy) => ({
+                        value: strategy.id,
+                        label:
+                          strategy.name +
+                          (strategy.is_active
+                            ? t('strategyActive', language)
+                            : '') +
+                          (strategy.is_default
+                            ? t('strategyDefault', language)
+                            : ''),
+                      })),
+                    ]}
+                  />
+                  {strategies.length === 0 && (
+                    <p className="text-xs text-nofx-text-muted mt-2">
+                      {t('noStrategyHint', language)}
+                    </p>
                   )}
                 </div>
-              )}
+
+                {/* Strategy Preview */}
+                {selectedStrategy && (
+                  <div className="mt-3 p-4 bg-nofx-bg-lighter border border-nofx-gold/20 rounded-lg">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-nofx-gold text-sm font-medium">
+                        {t('strategyDetails', language)}
+                      </span>
+                      {selectedStrategy.is_active && (
+                        <span className="px-2 py-0.5 bg-nofx-success/20 text-nofx-success text-xs rounded">
+                          {t('activating', language)}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-nofx-text-muted mb-2">
+                      {selectedStrategy.description ||
+                        (language === 'zh'
+                          ? 'No description'
+                          : 'No description')}
+                    </p>
+                    {selectedStrategy.config.strategy_type === 'grid_trading' &&
+                    selectedStrategy.config.grid_config ? (
+                      <div className="grid grid-cols-2 gap-2 text-xs text-nofx-text-muted">
+                        <div>
+                          {language === 'zh' ? 'Symbol' : 'Symbol'}:{' '}
+                          {selectedStrategy.config.grid_config.symbol || '-'}
+                        </div>
+                        <div>
+                          {language === 'zh' ? 'Grids' : 'Grids'}:{' '}
+                          {selectedStrategy.config.grid_config.grid_count}
+                        </div>
+                      </div>
+                    ) : (
+                      (() => {
+                        const aiConfig = getStrategyAIConfig(selectedStrategy)
+                        if (!aiConfig) return null
+                        return (
+                          <div className="grid grid-cols-2 gap-2 text-xs text-nofx-text-muted">
+                            <div>
+                              {t('coinSource', language)}:{' '}
+                              {aiConfig.coin_source.source_type === 'static'
+                                ? language === 'zh'
+                                  ? 'Fixed US stocks'
+                                  : 'Fixed US stocks'
+                                : aiConfig.coin_source.source_type ===
+                                    'vergex_signal'
+                                  ? language === 'zh'
+                                    ? 'Vergex signal board'
+                                    : 'Vergex signal board'
+                                  : aiConfig.coin_source.source_type ===
+                                      'hyper_rank'
+                                    ? language === 'zh'
+                                      ? 'Claw402 board'
+                                      : 'Claw402 board'
+                                    : aiConfig.coin_source.source_type ===
+                                        'hyper_all'
+                                      ? language === 'zh'
+                                        ? 'Hyperliquid all markets'
+                                        : 'Hyperliquid all markets'
+                                      : aiConfig.coin_source.source_type ===
+                                          'hyper_main'
+                                        ? language === 'zh'
+                                          ? 'Hyperliquid main markets'
+                                          : 'Hyperliquid main markets'
+                                        : aiConfig.coin_source.source_type ===
+                                            'ai500'
+                                          ? 'AI500'
+                                          : aiConfig.coin_source.source_type ===
+                                              'oi_top'
+                                            ? 'OI Top'
+                                            : aiConfig.coin_source
+                                                  .source_type === 'oi_low'
+                                              ? 'OI Low'
+                                              : '-'}
+                            </div>
+                            <div>
+                              {t('marginLimit', language)}:{' '}
+                              {(
+                                (aiConfig.risk_control?.max_margin_usage ||
+                                  0.9) * 100
+                              ).toFixed(0)}
+                              %
+                            </div>
+                          </div>
+                        )
+                      })()
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
           )}
 
           {/* Trading Parameters */}
@@ -1073,29 +1288,29 @@ export function TraderConfigModal({
                   </div>
                 </div>
                 {!isCopyTrading && (
-                <div>
-                  <label className="text-sm text-nofx-text block mb-2">
-                    {t('aiScanInterval', language)}
-                  </label>
-                  <input
-                    type="number"
-                    value={formData.scan_interval_minutes}
-                    onChange={(e) => {
-                      const parsedValue = Number(e.target.value)
-                      const safeValue = Number.isFinite(parsedValue)
-                        ? Math.max(3, parsedValue)
-                        : 3
-                      handleInputChange('scan_interval_minutes', safeValue)
-                    }}
-                    className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
-                    min="3"
-                    max="60"
-                    step="1"
-                  />
-                  <p className="text-xs text-nofx-text-muted mt-1">
-                    {t('scanIntervalRecommend', language)}
-                  </p>
-                </div>
+                  <div>
+                    <label className="text-sm text-nofx-text block mb-2">
+                      {t('aiScanInterval', language)}
+                    </label>
+                    <input
+                      type="number"
+                      value={formData.scan_interval_minutes}
+                      onChange={(e) => {
+                        const parsedValue = Number(e.target.value)
+                        const safeValue = Number.isFinite(parsedValue)
+                          ? Math.max(3, parsedValue)
+                          : 3
+                        handleInputChange('scan_interval_minutes', safeValue)
+                      }}
+                      className="w-full px-3 py-2 bg-nofx-bg-lighter border border-nofx-gold/20 rounded text-nofx-text focus:border-nofx-gold focus:outline-none"
+                      min="3"
+                      max="60"
+                      step="1"
+                    />
+                    <p className="text-xs text-nofx-text-muted mt-1">
+                      {t('scanIntervalRecommend', language)}
+                    </p>
+                  </div>
                 )}
               </div>
 
@@ -1176,7 +1391,12 @@ export function TraderConfigModal({
                 !formData.trader_name ||
                 !formData.ai_model ||
                 !formData.exchange_id ||
-                (isCopyTrading && (!copyConfig.primary_channel_id.trim() || invalidEntryPolicy || invalidEntryTimeout || invalidMessageRules || unsupportedFields))
+                (isCopyTrading &&
+                  (!copyConfig.primary_channel_id.trim() ||
+                    invalidEntryPolicy ||
+                    invalidEntryTimeout ||
+                    invalidMessageRules ||
+                    unsupportedFields))
               }
               className="px-8 py-3 bg-nofx-gold text-white rounded-lg hover:bg-nofx-gold/90 transition-all duration-200 disabled:bg-nofx-bg-deeper disabled:text-nofx-text-muted disabled:cursor-not-allowed font-medium shadow-lg"
             >

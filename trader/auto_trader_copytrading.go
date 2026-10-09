@@ -32,19 +32,7 @@ func (at *AutoTrader) runCopyTradingMode() error {
 
 	poller := discord.Global()
 	if poller == nil {
-		return fmt.Errorf("discord poller not initialized")
-	}
-	// Make sure the poller runs and has the latest global token.
-	if err := poller.Start(); err != nil {
-		return fmt.Errorf("discord poller start failed: %w", err)
-	}
-	if poller.Client() == nil {
-		if err := poller.ReloadConfig(); err != nil {
-			return fmt.Errorf("discord config load failed: %w", err)
-		}
-		if poller.Client() == nil {
-			return fmt.Errorf("Discord Token 未配置，请先在设置中配置全局 Discord 密钥")
-		}
+		return fmt.Errorf("Discord source not initialized")
 	}
 
 	engine := copytrader.NewEngine(copytrader.EngineParams{
@@ -57,7 +45,7 @@ func (at *AutoTrader) runCopyTradingMode() error {
 		ModelID:    at.config.CustomModelName,
 		Provider:   at.aiModel,
 		Exchange:   at.trader,
-		Poller:     poller,
+		Source:     poller,
 	})
 	if err := engine.Start(); err != nil {
 		return fmt.Errorf("copy trading engine start failed: %w", err)

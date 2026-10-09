@@ -106,16 +106,16 @@ func main() {
 	// time.Sleep(500 * time.Millisecond)
 	logger.Info("📊 Using CoinAnk API for all market data (WebSocket cache disabled)")
 
-	// Initialize the global Discord poller (copy-trading signal source).
-	// Traders subscribe on start; polling begins only when a token is set.
-	discordPoller := discord.InitGlobal(st)
-	if err := discordPoller.Start(); err != nil {
-		logger.Warnf("⚠️ Discord poller start failed: %v", err)
+	// Initialize the global Discord event source (copy-trading signal source).
+	// Traders subscribe on start; collection begins only when a token is set.
+	discordSource := discord.InitGlobal(st)
+	if err := discordSource.Start(); err != nil {
+		logger.Warnf("⚠️ Discord collector start failed: %v", err)
 	}
 
-	// Token status monitor: probes quests/@me and emails the configured
+	// Token status monitor: observes Gateway state and emails the configured
 	// recipient when the token goes invalid (and again on recovery).
-	discordMonitor := discord.InitGlobalMonitor(st, discordPoller)
+	discordMonitor := discord.InitGlobalMonitor(st, discordSource)
 	discordMonitor.Start()
 
 	// Daily retention cleanup for copy-trading data (events/signals/AI runs/
@@ -180,12 +180,15 @@ func main() {
 
 	// nofxiAgent.Stop() is handled by defer above
 
+	// A process restart is not an operator disabling a trader. Preserve the
+	// activation generation while draining engines; recovery uses saved plans.
+	discordSource.PrepareShutdown()
 	// Stop all traders
 	traderManager.StopAll()
 
-	// Stop Discord poller and token monitor
+	// Stop Discord source and connection monitor
 	discordMonitor.Stop()
-	discordPoller.Stop()
+	discordSource.Stop()
 	logger.Info("✅ System shut down safely")
 }
 
@@ -229,6 +232,11 @@ func runCopyTradeRetentionLoop(st *store.Store) {
 			logger.Warnf("⚠️ CopyTrade retention: AI runs cleanup failed: %v", err)
 		} else if n > 0 {
 			logger.Infof("🧹 CopyTrade retention: removed %d AI runs older than %d days", n, aiRunDays)
+		}
+		if n, err := st.DiscordMessage().CleanOldIngest(signalDays); err != nil {
+			logger.Warnf("Discord receipt retention failed: %v", err)
+		} else if n > 0 {
+			logger.Infof("Discord receipt retention removed %d receipts", n)
 		}
 		if n, err := st.DiscordMessage().CleanOldMessages(messageDays); err != nil {
 			logger.Warnf("⚠️ CopyTrade retention: messages cleanup failed: %v", err)

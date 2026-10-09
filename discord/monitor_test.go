@@ -26,9 +26,8 @@ func newTestMonitor(t *testing.T) (*TokenMonitor, *[]sentMail, func(err error)) 
 	t.Cleanup(func() { st.Close() })
 
 	if err := st.DiscordConfig().Save(store.DiscordConfigUpdate{
-		Token:                  "test-token",
-		AlertEmail:             strPtr("ops@example.com"),
-		MonitorIntervalSeconds: 60,
+		Token:      "test-token",
+		AlertEmail: strPtr("ops@example.com"),
 	}); err != nil {
 		t.Fatalf("save config: %v", err)
 	}

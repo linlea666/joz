@@ -121,6 +121,7 @@ func newTestStore(t *testing.T) *store.Store {
 		&store.CopyTradeContext{}, &store.CopyTradeOwnership{}, &store.CopyTradeAccountFence{}, &store.CopyTradeEvent{},
 		&store.CopyTradeSignal{}, &store.CopyTradeAIRun{}, &store.CopyTradeAction{}, &store.CopyTradeOrder{},
 		&store.CopyTradeReplay{}, &store.CopyTradeReplayItem{}, &store.DiscordMessage{}, &store.Trader{},
+		&store.DiscordInbound{}, &store.DiscordDelivery{}, &store.DiscordRoute{}, &store.DiscordSourceState{}, &store.DiscordSourceConfig{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

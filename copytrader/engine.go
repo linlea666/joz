@@ -3,6 +3,7 @@ package copytrader
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -28,11 +29,11 @@ type EngineParams struct {
 	ModelID    string // for AI run records
 	Provider   string
 	Exchange   types.Trader
-	Poller     *discord.PollerManager
+	Source     discord.Source
 }
 
 // Engine runs copy trading for ONE trader: it consumes channel messages from
-// the poller, interprets them with the LLM, applies deterministic risk rules
+// the durable event source, interprets them with the LLM, applies deterministic risk rules
 // and executes through the exchange. All message handling for the trader is
 // strictly serial (messageMu); mu independently protects execution/reconciliation.
 type Engine struct {
@@ -44,7 +45,7 @@ type Engine struct {
 	llm        mcp.AIClient
 	modelID    string
 	provider   string
-	poller     *discord.PollerManager
+	source     discord.Source
 	exec       *Executor
 	events     *EventLogger
 
@@ -84,7 +85,7 @@ type Engine struct {
 // NewEngine creates the engine (Start must be called to begin processing).
 func NewEngine(p EngineParams) *Engine {
 	events := NewEventLogger(p.Store, p.TraderID, p.Config.PrimaryChannelID)
-	return &Engine{
+	e := &Engine{
 		traderID:   p.TraderID,
 		traderName: p.TraderName,
 		userID:     p.UserID,
@@ -93,13 +94,17 @@ func NewEngine(p EngineParams) *Engine {
 		llm:        p.LLM,
 		modelID:    p.ModelID,
 		provider:   p.Provider,
-		poller:     p.Poller,
+		source:     p.Source,
 		exec:       NewExecutor(p.TraderID, p.Exchange, p.Store, events),
 		events:     events,
 
 		posMissSeen:   make(map[string]bool),
 		closedRecheck: make(map[string]int),
 	}
+	if p.Source != nil {
+		e.exec.beforeEntrySubmit = e.admitEntrySubmit
+	}
+	return e
 }
 
 // Start subscribes to the channel and launches the reconcile loop.
@@ -113,7 +118,7 @@ func (e *Engine) Start() error {
 	e.stopCh = make(chan struct{})
 	e.stateMu.Unlock()
 
-	if err := e.poller.Subscribe(e.cfg.PrimaryChannelID, e.traderID, e.HandleMessage); err != nil {
+	if err := e.source.SubscribeRoute(discord.Route{TraderID: e.traderID, Channels: e.cfg.ListenChannels(), RulesJSON: e.cfg.MessageRules().Snapshot(), ExecutionKey: e.cfg.ExecutionKey()}, e.HandleMessage); err != nil {
 		// Roll back so a later Start() attempt is not silently ignored.
 		e.stateMu.Lock()
 		e.running = false
@@ -128,7 +133,7 @@ func (e *Engine) Start() error {
 	return nil
 }
 
-// Stop detaches from the poller and stops the reconcile loop.
+// Stop detaches from the source and stops the reconcile loop.
 func (e *Engine) Stop() {
 	e.stateMu.Lock()
 	if !e.running {
@@ -139,7 +144,7 @@ func (e *Engine) Stop() {
 	close(e.stopCh)
 	e.stateMu.Unlock()
 
-	e.poller.Unsubscribe(e.cfg.PrimaryChannelID, e.traderID)
+	e.source.UnsubscribeRoute(e.traderID)
 	e.wg.Wait()
 	// Drain an exchange operation already in progress. An interpretation still
 	// waiting for its model will observe stopCh before taking any new action.
@@ -148,7 +153,7 @@ func (e *Engine) Stop() {
 	logger.Infof("⏹ [CopyTrade %s] engine stopped", e.traderName)
 }
 
-// HandleMessage is the poller callback: one Discord message (or revision).
+// HandleMessage is the durable source callback: one Discord message (or revision).
 func (e *Engine) HandleMessage(msg *store.DiscordMessage, isEdit bool) error {
 	e.messageMu.Lock()
 	defer e.messageMu.Unlock()
@@ -163,7 +168,7 @@ func (e *Engine) HandleMessage(msg *store.DiscordMessage, isEdit bool) error {
 	}
 
 	// Author filter (rule layer, zero cost).
-	if len(e.cfg.SourceAuthorIDs) > 0 && !containsString(e.cfg.SourceAuthorIDs, msg.AuthorID) {
+	if !e.messageRules(msg).AllowsAuthor(msg) {
 		return nil
 	}
 	// Nothing to interpret at all.
@@ -171,20 +176,37 @@ func (e *Engine) HandleMessage(msg *store.DiscordMessage, isEdit bool) error {
 		return nil
 	}
 
-	e.processMessage(msg, isEdit)
+	if err := e.processMessage(msg, isEdit); err != nil {
+		return err
+	}
+	if msg.DeliveryID != 0 {
+		sig, err := e.st.CopyTrade().LatestSignal(e.traderID, msg.MessageID, msg.Revision)
+		if err != nil {
+			return err
+		}
+		if sig == nil {
+			return fmt.Errorf("signal persistence incomplete")
+		}
+		if sig.Status == store.SignalStatusReceived || sig.Status == store.SignalStatusParsed || sig.Status == store.SignalStatusExecuting {
+			return fmt.Errorf("signal outcome not committed")
+		}
+	}
 	// Errors inside processMessage are recorded on the signal; the message
 	// itself is considered consumed either way.
 	return nil
 }
 
 // processMessage runs the full pipeline for one message revision.
-func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
+func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelineErr error) {
 	pipelineStart := time.Now()
 	e.stateMu.Lock()
 	stopForThisRun := e.stopCh
 	e.stateMu.Unlock()
-	existing, _ := e.st.CopyTrade().LatestSignal(e.traderID, msg.MessageID, msg.Revision)
-	if existing != nil && existing.Status == "retry_wait" && existing.NextRetryAt != nil && existing.NextRetryAt.After(time.Now()) {
+	existing, lookupErr := e.st.CopyTrade().LatestSignal(e.traderID, msg.MessageID, msg.Revision)
+	if lookupErr != nil {
+		return lookupErr
+	}
+	if existing != nil && (existing.Status == "retry_wait" || existing.Status == "execution_wait") && existing.NextRetryAt != nil && existing.NextRetryAt.After(time.Now()) {
 		return
 	}
 	if existing != nil && existing.ExecutionVersion == 0 {
@@ -208,40 +230,46 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	sig := &store.CopyTradeSignal{
 		ID:                signalID,
 		ExecutionVersion:  1,
-		RulesSnapshotJSON: e.cfg.MessageRules().Snapshot(),
-		TraderID:          e.traderID,
-		ChannelID:         msg.ChannelID,
-		MessageID:         msg.MessageID,
-		MessageRevision:   msg.Revision,
-		Status:            store.SignalStatusReceived,
-		MessageTimestamp:  msg.MessageTimestamp,
-		ReceivedAt:        time.Now().UTC(),
-		ReceiveLatencyMs:  time.Since(latencyRef).Milliseconds(),
+		RulesSnapshotJSON: e.messageRules(msg).Snapshot(),
+		SourceEventID:     msg.SourceEventID, DeliveryID: msg.DeliveryID, LogicalChannelID: e.cfg.PrimaryChannelID, QueueMs: time.Since(msg.ReceivedAt).Milliseconds(),
+		TraderID:         e.traderID,
+		ChannelID:        msg.ChannelID,
+		MessageID:        msg.MessageID,
+		MessageRevision:  msg.Revision,
+		Status:           store.SignalStatusReceived,
+		MessageTimestamp: msg.MessageTimestamp,
+		ReceivedAt:       time.Now().UTC(),
+		ReceiveLatencyMs: msg.ReceivedAt.Sub(latencyRef).Milliseconds(),
 	}
 	if existing != nil {
 		sig = existing
 	}
 	if existing == nil {
 		if err := e.st.CopyTrade().CreateSignal(sig); err != nil {
-			logger.Errorf("[CopyTrade %s] signal persist failed: %v", e.traderID, err)
-			return
+			return err
 		}
 	}
 	e.events.Info(traceID, signalID, msg.MessageID, EvMessageReceived,
 		fmt.Sprintf("message from %s (revision %d, edit=%v), receive latency %.1fs",
 			msg.AuthorName, msg.Revision, isEdit, float64(sig.ReceiveLatencyMs)/1000), nil)
 
+	persist := func(updates map[string]interface{}) {
+		if pipelineErr != nil {
+			return
+		}
+		pipelineErr = e.st.CopyTrade().UpdateSignal(signalID, updates)
+	}
 	fail := func(stage string, err error) {
 		e.events.Error(traceID, signalID, msg.MessageID, EvExecutionError, stage+": "+err.Error(), nil)
-		e.updateSignal(signalID, map[string]interface{}{
+		persist(map[string]interface{}{
 			"status": store.SignalStatusFailed, "error_message": err.Error(),
 			"total_ms": time.Since(pipelineStart).Milliseconds(),
 		})
 	}
 	skip := func(reason SkipReason, detail string) {
 		e.events.Info(traceID, signalID, msg.MessageID, EvSignalSkipped, fmt.Sprintf("skipped (%s): %s", reason, detail), nil)
-		e.updateSignal(signalID, map[string]interface{}{
-			"status": store.SignalStatusSkipped, "skip_reason": string(reason),
+		persist(map[string]interface{}{
+			"status": store.SignalStatusSkipped, "skip_reason": string(reason), "next_retry_at": nil,
 			"total_ms": time.Since(pipelineStart).Milliseconds(),
 		})
 	}
@@ -265,7 +293,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		interp, run, timings, err = e.interpret(traceID, signalID, msg, isEdit, false)
 	}
 	if run != nil {
-		e.updateSignal(signalID, map[string]interface{}{"ai_run_id": run.ID, "media_download_ms": timings.mediaMs, "prompt_build_ms": timings.promptMs, "llm_request_ms": timings.llmMs})
+		persist(map[string]interface{}{"ai_run_id": run.ID, "media_download_ms": timings.mediaMs, "prompt_build_ms": timings.promptMs, "llm_request_ms": timings.llmMs})
 	}
 	if err != nil {
 		if e.deferInterpretationRetry(sig, msg, err) {
@@ -282,7 +310,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		timings.mediaMs, timings.promptMs, timings.llmMs = existing.MediaDownloadMs, existing.PromptBuildMs, existing.LLMRequestMs
 	}
 	interpJSON, _ := json.Marshal(interp)
-	e.updateSignal(signalID, map[string]interface{}{
+	persist(map[string]interface{}{
 		"status":               store.SignalStatusParsed,
 		"ai_run_id":            aiRunID,
 		"classification":       string(interp.Classification),
@@ -303,12 +331,18 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 			interp.Symbol, interp.Direction, float64(timings.llmMs)/1000),
 		timings.llmMs, map[string]interface{}{"reasoning": interp.Reasoning, "warnings": interp.Warnings})
 
+	if pipelineErr != nil {
+		return
+	}
 	// Model calls never hold the execution lock. Read target state again under
 	// this lock; a TP fill or timeout may have changed it during interpretation.
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	select {
 	case <-stopForThisRun:
+		if msg.DeliveryID != 0 {
+			return fmt.Errorf("engine replaced during interpretation; receipt retained")
+		}
 		skip(SkipPaused, "engine stopped while interpreting; no actions submitted")
 		return
 	default:
@@ -318,6 +352,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		fail("message rules", rulesErr)
 		return
 	}
+	interp = ApplyNotificationPolicy(interp, msg, rules)
 	sources := e.messageSources(msg, rules.Profile)
 	// --- 2..4. Gates & routing, per instruction ---
 	// Multi-instruction messages (one post managing several tracked trades,
@@ -328,21 +363,28 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	multi := len(instructions) > 1
 
 	if interp.IsActionable() {
-		e.updateSignal(signalID, map[string]interface{}{"status": store.SignalStatusExecuting})
+		persist(map[string]interface{}{"status": store.SignalStatusExecuting})
 	}
 
 	var (
 		firstErr   error
 		errCount   int
 		firstSkip  SkipReason
+		waiting    bool
 		skipDetail string
 		executed   int
 	)
 	results := make([]InstructionResult, 0, len(instructions))
 	for i, ins := range instructions {
+		if pipelineErr != nil {
+			return
+		}
 		insSkip, insDetail, insErr := ValidateActionEvidenceDetailed(ins, sources)
 		if insSkip == SkipNone && insErr == nil {
 			insSkip, insDetail, insErr = e.processInstruction(traceID, signalID, msg, ins)
+		}
+		if insSkip == SkipWaitingReconciliation || insSkip == "SOURCE_NOT_READY" || insSkip == "SOURCE_GAP_OR_PERMISSION" {
+			waiting = true
 		}
 		result := InstructionResult{Index: i, Action: ins.Action, Symbol: ins.Symbol, Direction: ins.Direction, Status: "executed", SkipReason: insSkip, Detail: insDetail}
 		if insErr != nil {
@@ -350,6 +392,9 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 			result.Detail = insErr.Error()
 		} else if insSkip != SkipNone {
 			result.Status = "skipped"
+			if insSkip == SkipWaitingReconciliation || insSkip == "SOURCE_NOT_READY" || insSkip == "SOURCE_GAP_OR_PERMISSION" {
+				result.Status = "waiting"
+			}
 		}
 		if actions, aerr := e.st.CopyTrade().GetActionsForMessage(e.traderID, msg.MessageID); aerr == nil {
 			for _, a := range actions {
@@ -401,9 +446,12 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 	}
 
 	resultJSON, _ := json.Marshal(results)
-	e.updateSignal(signalID, map[string]interface{}{"instruction_results_json": string(resultJSON), "next_retry_at": nil})
+	persist(map[string]interface{}{"instruction_results_json": string(resultJSON), "next_retry_at": nil})
 	totalMs := time.Since(pipelineStart).Milliseconds()
 	switch {
+	case waiting:
+		next := time.Now().UTC().Add(15 * time.Second)
+		persist(map[string]interface{}{"status": "execution_wait", "next_retry_at": next, "skip_reason": string(SkipWaitingReconciliation), "total_ms": totalMs})
 	case firstErr != nil:
 		if multi && errCount > 1 {
 			fail("execution", fmt.Errorf("%d/%d instructions failed, first: %w", errCount, len(instructions), firstErr))
@@ -417,7 +465,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		}
 		skip(firstSkip, skipDetail)
 	default:
-		e.updateSignal(signalID, map[string]interface{}{
+		persist(map[string]interface{}{
 			"status": store.SignalStatusExecuted, "total_ms": totalMs,
 		})
 		summary := fmt.Sprintf("signal fully executed in %.1fs", float64(totalMs)/1000)
@@ -427,6 +475,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 		}
 		e.events.Success(traceID, signalID, msg.MessageID, EvTradeUpdated, summary, totalMs, nil)
 	}
+	return
 }
 
 // processInstruction runs the instrument / validation / TTL gates and routes
@@ -434,6 +483,54 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) {
 // instruction path always had. Returns a terminal skip reason with detail,
 // or an error.
 func (e *Engine) processInstruction(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation) (SkipReason, string, error) {
+	if interp.IsActionable() {
+		// TTL gate (per action class). Edits carry lifecycle updates; measure
+		// freshness from the edit, not the original post.
+		ttl := time.Duration(e.cfg.MgmtSignalTTLSeconds) * time.Second
+		if interp.Action == ActionOpen || interp.Action == ActionAdd {
+			ttl = time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second
+		}
+		refTime := msg.MessageTimestamp
+		if msg.EditedAt != nil && msg.EditedAt.After(refTime) {
+			refTime = *msg.EditedAt
+		}
+		if IsExpired(refTime, time.Now().UTC(), ttl) {
+			return SkipExpired, fmt.Sprintf("signal age %v exceeds TTL %v", time.Since(refTime).Round(time.Second), ttl), nil
+		}
+
+	}
+
+	if interp.IsActionable() && e.source != nil {
+		if err := e.source.CheckExecution(e.traderID, msg, interp.Action == ActionOpen || interp.Action == ActionAdd); err != nil {
+			return SkipReason(err.Error()), err.Error(), nil
+		}
+	}
+	rules, ruleErr := e.rulesForSignal(signalID)
+	if ruleErr != nil {
+		return SkipNeedsContext, ruleErr.Error(), nil
+	}
+	if rules.SourceMode == "chroma" && interp.IsActionable() {
+		if interp.Action == ActionOpen || interp.Action == ActionAdd {
+			if err := e.notificationOpenGate(msg, interp, rules); err != nil {
+				if errors.Is(err, errNotificationEnded) {
+					return SkipReason("OPEN_SUPERSEDED"), err.Error(), nil
+				}
+				return SkipWaitingReconciliation, err.Error(), nil
+			}
+		} else {
+			target, reason, err := e.notificationTarget(msg, interp, rules)
+			if err != nil {
+				if errors.Is(err, errNotificationPending) {
+					return SkipWaitingReconciliation, err.Error(), nil
+				}
+				return SkipNeedsContext, err.Error(), nil
+			}
+			if target == nil {
+				return SkipAlreadyFlat, reason, nil
+			}
+			interp.TradeReference.RootMessageID = target.RootMessageID
+		}
+	}
 	// Resolve missing management symbols only from a unique tracked target.
 	if interp.IsActionable() && interp.Action != ActionOpen && interp.Action != ActionAdd && interp.Symbol == "" {
 		if ctx := e.correlateContext(interp, msg, "", signalID); ctx != nil {
@@ -475,20 +572,6 @@ func (e *Engine) processInstruction(traceID, signalID string, msg *store.Discord
 		return SkipNotSignal, string(interp.Classification), nil
 	}
 
-	// TTL gate (per action class). Edits carry lifecycle updates; measure
-	// freshness from the edit, not the original post.
-	ttl := time.Duration(e.cfg.MgmtSignalTTLSeconds) * time.Second
-	if interp.Action == ActionOpen || interp.Action == ActionAdd {
-		ttl = time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second
-	}
-	refTime := msg.MessageTimestamp
-	if msg.EditedAt != nil && msg.EditedAt.After(refTime) {
-		refTime = *msg.EditedAt
-	}
-	if IsExpired(refTime, time.Now().UTC(), ttl) {
-		return SkipExpired, fmt.Sprintf("signal age %v exceeds TTL %v", time.Since(refTime).Round(time.Second), ttl), nil
-	}
-
 	if interp.Action != ActionOpen && interp.Action != ActionAdd {
 		target := e.correlateContext(interp, msg, canonical, signalID)
 		if target == nil {
@@ -523,6 +606,15 @@ func (e *Engine) processInstruction(traceID, signalID string, msg *store.Discord
 		return SkipNone, "", claimErr
 	}
 	if !claimed {
+		if action.Status == "done" && action.SignalID == signalID {
+			if action.Phase == "admission_revoked" {
+				return SkipReason("ENTRY_ADMISSION_REVOKED"), action.Error, nil
+			}
+			return SkipNone, "existing action completed by recovery; no resubmission", nil
+		}
+		if action.Status == "uncertain" || action.Status == "executing" {
+			return SkipWaitingReconciliation, "recorded action awaits order reconciliation; no resubmission", nil
+		}
 		return SkipDuplicate, "action already recorded; unresolved side effects are reconciled, never blindly repeated", nil
 	}
 	if action.ContextID != "" {
@@ -582,8 +674,25 @@ func (e *Engine) processInstruction(traceID, signalID string, msg *store.Discord
 		updates["phase"] = "preflight"
 		updates["error"] = string(finalSkip)
 	}
+	if errors.Is(execErr, errEntryDeferred) {
+		updates["status"] = "executing"
+		updates["phase"] = "waiting_admission"
+	}
+	if errors.Is(execErr, errEntryRevoked) {
+		updates["status"] = "done"
+		updates["phase"] = "admission_revoked"
+	}
 	if err := e.st.CopyTrade().UpdateAction(action.ID, updates); err != nil {
 		return SkipNone, "", err
+	}
+	if errors.Is(execErr, errEntryDeferred) {
+		return SkipWaitingReconciliation, execErr.Error(), nil
+	}
+	if errors.Is(execErr, errEntryRevoked) {
+		return SkipReason("ENTRY_ADMISSION_REVOKED"), execErr.Error(), nil
+	}
+	if execErr != nil && rules.SourceMode == "chroma" && interp.Action != ActionOpen && interp.Action != ActionAdd {
+		return SkipWaitingReconciliation, "recorded management action awaits reconciliation: " + execErr.Error(), nil
 	}
 	return finalSkip, "execution gate", execErr
 }
@@ -609,15 +718,15 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	activeCtxs, _ := e.st.CopyTrade().GetActiveContexts(e.traderID)
 	filtered := activeCtxs[:0]
 	for _, c := range activeCtxs {
-		if c.ChannelID == msg.ChannelID {
+		if containsString(rules.SourceChannels, c.ChannelID) || c.ChannelID == msg.ChannelID {
 			filtered = append(filtered, c)
 		}
 	}
 	activeCtxs = filtered
 	var recent []*store.CopyTradeSignal
-	if e.cfg.SignalContextEnabled {
-		since := time.Now().AddDate(0, 0, -e.cfg.ContextLookbackDays)
-		recent, _ = e.st.CopyTrade().GetContextSignals(e.traderID, msg.ChannelID, since, 20)
+	if rules.SignalContextEnabled || (rules.Version < 3 && e.cfg.SignalContextEnabled) {
+		since := time.Now().UTC().AddDate(0, 0, -rules.ContextDays)
+		recent, _ = e.st.CopyTrade().GetContextSignalsForSources(e.traderID, rules.SourceChannels, since, 20)
 	}
 
 	var replyMsg *store.DiscordMessage
@@ -643,7 +752,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	var imageParts []mcp.ContentPart
 	imageCount := 0
 	var imageErr string
-	if e.cfg.ParseImages {
+	if rules.ParseImages || (rules.Version < 3 && e.cfg.ParseImages) {
 		imageParts, imageCount, imageErr = e.collectImages(traceID, signalID, msg, dryRun, rules.Profile)
 	}
 	t.mediaMs = time.Since(mediaStart).Milliseconds()
@@ -651,7 +760,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 
 	// Positions snapshot (optional, non-fatal).
 	var positions []store.PositionSnapshot
-	if e.cfg.SendPositionSnapshot {
+	if rules.SendPositionSnapshot || (rules.Version < 3 && e.cfg.SendPositionSnapshot) {
 		if raw, err := e.exec.ex.GetPositions(); err == nil {
 			for _, p := range raw {
 				qty, _ := p["positionAmt"].(float64)
@@ -720,10 +829,17 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	llmStart := time.Now()
 	var raw string
 	var callErr error
-	if known := InterpretKnownSource(msg, sources, rules.Profile); known != nil {
+	known := InterpretChromaNotification(msg, rules)
+	if known == nil {
+		known = InterpretKnownSource(msg, sources, rules.Profile)
+	}
+	if known != nil {
 		b, _ := json.Marshal(known)
 		raw = string(b)
 		run.Model = "deterministic:" + rules.Profile
+		if rules.SourceMode == "chroma" {
+			run.Model = "deterministic:chroma"
+		}
 	} else {
 		raw, callErr = e.llm.CallWithRequest(&mcp.Request{Messages: messages})
 	}
@@ -758,6 +874,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 		}
 		return nil, run, t, fmt.Errorf("interpretation parse failed: %w", perr)
 	}
+	interp = ApplyNotificationPolicy(interp, msg, rules)
 	interp = ApplySourcePolicy(interp, msg, sources, rules.Profile)
 	interp = ApplyMessageRules(interp, msg, sources, rules)
 	for _, ins := range interp.Flatten() {
@@ -784,10 +901,10 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 // collectImages downloads message images and converts them to data-URL parts.
 // Failures degrade to text-only with a warning (never fail the signal).
 func (e *Engine) collectImages(traceID, signalID string, msg *store.DiscordMessage, dryRun bool, profiles ...string) ([]mcp.ContentPart, int, string) {
-	if e.poller == nil {
+	if e.source == nil {
 		return nil, 0, "discord client unavailable"
 	}
-	client := e.poller.Client()
+	client := e.source.Client()
 	if client == nil {
 		return nil, 0, "discord client unavailable"
 	}
@@ -841,10 +958,10 @@ func (e *Engine) lookupMessageForInterpret(channelID, messageID string, dryRun b
 	if m, err := e.st.DiscordMessage().GetByMessageID(channelID, messageID); err == nil && m != nil {
 		return m
 	}
-	if e.poller == nil {
+	if e.source == nil {
 		return nil
 	}
-	client := e.poller.Client()
+	client := e.source.Client()
 	if client == nil {
 		return nil
 	}
@@ -891,6 +1008,13 @@ func (e *Engine) correlateContext(interp *SourceInterpretation, msg *store.Disco
 		if err != nil {
 			return nil
 		}
+	}
+	if rules.SourceMode == "chroma" {
+		ctx, _, err := e.notificationTarget(msg, interp, rules)
+		if err != nil {
+			return nil
+		}
+		return ctx
 	}
 	if interp.RequiresOriginalCard {
 		var match *store.CopyTradeContext
@@ -1166,6 +1290,16 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 		}
 	}
 
+	if e.source != nil {
+		if err := e.source.CheckExecution(e.traderID, msg, true); err != nil {
+			return SkipReason(err.Error()), nil
+		}
+	}
+	if rules.SourceMode == "chroma" {
+		if err := e.notificationOpenGate(msg, interp, rules); err != nil {
+			return SkipNeedsContext, nil
+		}
+	}
 	submitStart := time.Now()
 	ctx, err := e.exec.ExecuteOpen(traceID, signalID, plan)
 	e.updateSignal(signalID, map[string]interface{}{

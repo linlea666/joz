@@ -19,12 +19,14 @@ services:
       # via container RCE, deploy via env vars only and remove this mount.
       - ./.env:/app/.env
       - ./data:/app/data
+      - discord-runtime:/run/nofx-discord
       - /etc/localtime:/etc/localtime:ro
     env_file:
       - .env
     environment:
       - TZ=${TZ:-Asia/Shanghai}
       - AI_MAX_TOKENS=8000
+      - DISCORD_SOCKET_PATH=/run/nofx-discord/collector.sock
     networks:
       - nofx-network
     healthcheck:
@@ -33,6 +35,29 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
+
+  discord-collector:
+    build:
+      context: ./collector
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 30s
+    volumes:
+      - discord-runtime:/run/nofx-discord
+      - discord-buffer:/var/lib/discord-collector
+    networks:
+      - nofx-network
+    depends_on:
+      - nofx
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 512m
+    pids_limit: 128
 
   # Frontend service (static serving and proxy)
   nofx-frontend:
@@ -57,3 +82,7 @@ services:
 networks:
   nofx-network:
     driver: bridge
+
+volumes:
+  discord-runtime:
+  discord-buffer:
