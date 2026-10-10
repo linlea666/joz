@@ -23,6 +23,7 @@ import { FAQPage } from '../pages/FAQPage'
 import { LandingPage } from '../pages/LandingPage'
 import { BeginnerOnboardingPage } from '../pages/BeginnerOnboardingPage'
 import { DataPage } from '../pages/DataPage'
+import { LogsPage } from '../pages/LogsPage'
 import { SettingsPage } from '../pages/SettingsPage'
 import { StrategyStudioPage } from '../pages/StrategyStudioPage'
 import { TerminalDashboard } from '../components/terminal/TerminalDashboard'
@@ -398,6 +399,18 @@ export function AppRoutes() {
     <>
       <LegacyHashRedirect />
       <Routes>
+        <Route
+          path={ROUTES.logs}
+          element={
+            isAuthenticated ? (
+              <AppChrome showFooter={false}>
+                <LogsPage />
+              </AppChrome>
+            ) : (
+              <Navigate to={ROUTES.login} replace />
+            )
+          }
+        />
         <Route path={ROUTES.home} element={<LandingPage />} />
         <Route path={ROUTES.login} element={<LoginPage />} />
         <Route path={ROUTES.register} element={<RegisterPage />} />

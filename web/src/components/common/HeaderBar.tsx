@@ -147,6 +147,12 @@ export default function HeaderBar({
                     requiresAuth: true,
                   },
                   {
+                    page: 'logs',
+                    path: ROUTES.logs,
+                    label: language === 'zh' ? '日志中心' : 'Logs',
+                    requiresAuth: true,
+                  },
+                  {
                     page: 'faq',
                     path: ROUTES.faq,
                     label: t('faqNav', language),
@@ -421,6 +427,12 @@ export default function HeaderBar({
                       page: 'competition',
                       path: ROUTES.competition,
                       label: t('realtimeNav', language),
+                      requiresAuth: true,
+                    },
+                    {
+                      page: 'logs',
+                      path: ROUTES.logs,
+                      label: language === 'zh' ? '日志中心' : 'Logs',
                       requiresAuth: true,
                     },
                     {

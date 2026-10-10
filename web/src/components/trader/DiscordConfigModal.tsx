@@ -214,7 +214,11 @@ export function DiscordConfigModal({
                     : 'Observe-only by default. Live mode admits new signals after activation; observation backlog is never traded. Existing order protection continues.'}
                 </p>
                 <p>
-                  Gateway: {config?.collector?.state || 'disconnected'} ·{' '}
+                  {language === 'zh' ? '本地通信' : 'Local IPC'}:{' '}
+                  {config?.collector?.ipc_connected
+                    ? 'connected'
+                    : 'disconnected'}{' '}
+                  · Gateway: {config?.collector?.state || 'disconnected'} ·{' '}
                   {language === 'zh' ? '积压' : 'Backlog'}:{' '}
                   {config?.collector?.backlog ?? 0}
                 </p>
@@ -245,6 +249,24 @@ export function DiscordConfigModal({
                 {config?.collector?.last_error && (
                   <p role="alert">{config.collector.last_error}</p>
                 )}
+                {config?.collector?.error_detail?.code && (
+                  <p role="alert">
+                    {config.collector.error_detail.code} ·{' '}
+                    {config.collector.error_detail.stage} ·{' '}
+                    {config.collector.error_detail.exception_type} ·{' '}
+                    {config.collector.error_detail.file}:
+                    {config.collector.error_detail.line}
+                  </p>
+                )}
+                {(config?.collector?.diagnostic_failures || 0) > 0 && (
+                  <p role="alert">
+                    日志记录不完整：{config?.collector?.diagnostic_failures}{' '}
+                    次诊断写入失败
+                  </p>
+                )}
+                <a href="/logs" className="underline">
+                  日志中心 / Logs
+                </a>
                 <button type="button" onClick={loadConfig}>
                   {language === 'zh'
                     ? '刷新连接与频道状态'

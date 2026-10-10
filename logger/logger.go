@@ -16,7 +16,7 @@ var (
 	// Log is the global logger instance
 	Log *logrus.Logger
 	// logFile holds the current log file handle
-	logFile *os.File
+	logFile io.Closer
 )
 
 // compactFormatter is a custom formatter for cleaner log output
@@ -86,9 +86,9 @@ func Init(cfg *Config) error {
 
 	// Setup log file output (write to both stdout and file)
 	logDir := "data"
-	if err := os.MkdirAll(logDir, 0755); err == nil {
-		logFileName := filepath.Join(logDir, fmt.Sprintf("nofx_%s.log", time.Now().Format("2006-01-02")))
-		f, err := os.OpenFile(logFileName, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err := os.MkdirAll(logDir, 0700); err == nil {
+		logFileName := filepath.Join(logDir, "nofx.log")
+		f, err := newRotatingWriter(logFileName, 50<<20, 5, 30*24*time.Hour)
 		if err == nil {
 			logFile = f
 			// Write to both stdout and file

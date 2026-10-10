@@ -71,6 +71,7 @@ func (l *EventLogger) Log(traceID, signalID, messageID, level, event, message st
 		OccurredAt:  time.Now().UTC(),
 	}
 	if err := l.st.CopyTrade().AppendEvent(ev); err != nil {
+		l.st.Logs().NoteFailure()
 		logger.Errorf("[CopyTrade %s] failed to persist event %s: %v", l.traderID, event, err)
 	}
 	switch level {

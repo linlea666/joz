@@ -244,12 +244,18 @@ func (tm *TokenMonitor) sendRecovery(cfg *store.DiscordConfig, invalidSince time
 func (tm *TokenMonitor) deliver(to, subject, body string) {
 	if err := tm.send(to, subject, body); err != nil {
 		logger.Errorf("[DiscordMonitor] alert email to %s failed: %v", to, err)
+		if tm.store != nil {
+			tm.store.Logs().Record("email", "email.alert.failed", "error", "告警邮件发送失败", map[string]any{"code": "SMTP_SEND_FAILED"})
+		}
 		return
 	}
 	tm.mu.Lock()
 	tm.alertsSent++
 	tm.mu.Unlock()
 	logger.Infof("[DiscordMonitor] alert email sent to %s: %s", to, subject)
+	if tm.store != nil {
+		tm.store.Logs().Record("email", "email.alert.accepted", "info", "SMTP 已接受告警邮件", nil)
+	}
 }
 
 // MonitorStatus is the API-facing snapshot. Time fields are RFC3339 strings
@@ -357,8 +363,15 @@ func (tm *TokenMonitor) checkSourceHealth(cfg *store.DiscordConfig) {
 	tm.mu.Unlock()
 	if alert {
 		logger.Warnf("[Discord] %s", failure)
+		heartbeat := s.LastHeartbeat.UTC().Format(time.RFC3339)
+		if s.LastHeartbeat.IsZero() {
+			heartbeat = "未知"
+			if h, ok := s.ErrorDetail["last_heartbeat"].(string); ok {
+				heartbeat = h
+			}
+		}
 		if cfg.AlertEmail != "" {
-			tm.deliver(cfg.AlertEmail, "【NOFX 告警】Discord 采集异常", failure+"\n新增风险可能已被阻止，已有交易的订单恢复和保护继续运行。请检查 Discord 采集状态、频道权限、缓冲和磁盘。")
+			tm.deliver(cfg.AlertEmail, "【NOFX 告警】Discord 采集异常", failure+fmt.Sprintf("\n错误类别：%v\n最后心跳：%s\n日志中心：/logs（从当前网站导航进入）", s.ErrorDetail["code"], heartbeat)+"\n新增风险可能已被阻止，已有交易的订单恢复和保护继续运行。请检查 Discord 采集状态、频道权限、缓冲和磁盘。")
 		}
 	}
 }

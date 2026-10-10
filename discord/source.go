@@ -40,13 +40,16 @@ type Source interface {
 }
 type ChannelStatus = store.DiscordSourceState
 type CollectorStatus struct {
-	State          string    `json:"state"`
-	LastError      string    `json:"last_error,omitempty"`
-	LastHeartbeat  time.Time `json:"last_heartbeat,omitempty"`
-	LastMessage    time.Time `json:"last_message,omitempty"`
-	AppliedVersion string    `json:"applied_version,omitempty"`
-	DesiredVersion string    `json:"desired_version,omitempty"`
-	Backlog        int64     `json:"backlog"`
+	IPCConnected       bool           `json:"ipc_connected"`
+	ErrorDetail        map[string]any `json:"error_detail,omitempty"`
+	DiagnosticFailures uint64         `json:"diagnostic_failures"`
+	State              string         `json:"state"`
+	LastError          string         `json:"last_error,omitempty"`
+	LastHeartbeat      time.Time      `json:"last_heartbeat,omitempty,omitzero"`
+	LastMessage        time.Time      `json:"last_message,omitempty,omitzero"`
+	AppliedVersion     string         `json:"applied_version,omitempty"`
+	DesiredVersion     string         `json:"desired_version,omitempty"`
+	Backlog            int64          `json:"backlog"`
 }
 type wireFrame struct {
 	StatusCode int             `json:"status_code,omitempty"`
@@ -218,6 +221,7 @@ func (m *SourceManager) serve(c net.Conn) {
 			go func() {
 				if err := m.ReloadConfig(); err != nil {
 					logger.Warnf("[Discord] apply failed: %v", err)
+					m.st.Logs().Record("discord", "config.apply.failed", "error", "采集配置应用失败", map[string]any{"code": "CONFIG_APPLY_FAILED", "stage": "configure"})
 				}
 			}()
 		case "response":
@@ -249,14 +253,39 @@ func (m *SourceManager) serve(c net.Conn) {
 			if m.write(reply) != nil {
 				return
 			}
+		case "diagnostic":
+			var d struct {
+				EventID    string         `json:"event_id"`
+				Event      string         `json:"event"`
+				Level      string         `json:"level"`
+				Context    map[string]any `json:"context"`
+				OccurredAt time.Time      `json:"occurred_at"`
+			}
+			if json.Unmarshal(f.Data, &d) != nil || d.EventID == "" || len(f.Data) > 16384 {
+				return
+			}
+			b, _ := json.Marshal(d.Context)
+			channel, _ := d.Context["channel_id"].(string)
+			err := m.st.Logs().Append(&store.SystemEvent{EventID: d.EventID, Component: "collector", Event: d.Event, Level: d.Level, Message: d.Event, ContextJSON: string(b), ChannelID: channel, OccurredAt: d.OccurredAt})
+			reply := wireFrame{Type: "diagnostic_ack", ID: d.EventID}
+			if err != nil {
+				reply.Error = "diagnostic commit failed"
+			}
+			if m.write(reply) != nil {
+				return
+			}
 		case "status":
 			var s CollectorStatus
 			if json.Unmarshal(f.Data, &s) == nil {
 				m.mu.Lock()
 				s.DesiredVersion = m.status.DesiredVersion
 				s.LastMessage = m.status.LastMessage
+				previous := m.status.State
 				m.status = s
 				m.mu.Unlock()
+				if previous != s.State {
+					m.st.Logs().Record("discord", "collector.state", "info", "采集连接状态变化", map[string]any{"state": s.State, "previous_state": previous})
+				}
 			}
 		case "channel":
 			var s ChannelStatus
@@ -378,7 +407,7 @@ func (m *SourceManager) ReloadConfig() error {
 	var result struct {
 		AppliedVersion string `json:"applied_version"`
 	}
-	err = m.call("configure", map[string]interface{}{"version": version, "token": string(cfg.Token), "enabled": cfg.Enabled, "channels": channels, "checkpoints": states, "active_cards": cards}, &result)
+	err = m.call("configure", map[string]interface{}{"version": version, "token": string(cfg.Token), "enabled": cfg.Enabled, "channels": channels, "checkpoints": states, "active_cards": cards, "diagnostics_v1": true}, &result)
 	if err != nil {
 		return err
 	}
@@ -388,6 +417,7 @@ func (m *SourceManager) ReloadConfig() error {
 	m.mu.Lock()
 	m.status.AppliedVersion = version
 	m.mu.Unlock()
+	m.st.Logs().Record("discord", "config.applied", "info", "采集路由配置已确认应用", map[string]any{"config_version": version})
 	return nil
 }
 func (m *SourceManager) SubscribeRoute(r Route, h MessageHandler) error {
@@ -531,6 +561,12 @@ func (m *SourceManager) dispatch(s *sourceSubscription) {
 		}
 		var msg store.DiscordMessage
 		err = json.Unmarshal([]byte(d.MessageJSON), &msg)
+		// Best-effort audit cannot alter the durable delivery result.
+		b, _ := json.Marshal(map[string]any{"delivery_id": d.ID, "source_event_id": d.EventID, "stage": "dispatch"})
+		if err := m.st.CopyTrade().AppendEvent(&store.CopyTradeEvent{TraderID: s.route.TraderID, TraceID: "source-" + d.EventID, SourceEventID: d.EventID, DeliveryID: d.ID, ChannelID: msg.ChannelID, MessageID: msg.MessageID, Level: "info", Event: "source.delivery.started", Message: "开始投递不可变消息修订", ContextJSON: string(b)}); err != nil {
+			m.st.Logs().NoteFailure()
+			m.st.Logs().Record("storage", "trade.audit.failed", "error", "交易事件记录失败", map[string]any{"code": "TRADE_AUDIT_FAILED"})
+		}
 		if err == nil {
 			msg.DeliveryID = d.ID
 			msg.SourceEventID = d.EventID
@@ -585,6 +621,8 @@ func (m *SourceManager) Status() []ChannelStatus {
 func (m *SourceManager) CollectorStatus() CollectorStatus {
 	m.mu.Lock()
 	s := m.status
+	s.IPCConnected = m.conn != nil
+	s.DiagnosticFailures += m.st.Logs().FailureCount()
 	if m.storageError != "" {
 		s.State = "storage_failed"
 		s.LastError = m.storageError
@@ -744,6 +782,21 @@ func (m *SourceManager) Ingest(ev GatewayEvent) error {
 	m.storageError = ""
 	m.status.LastMessage = ev.ReceivedAt
 	m.mu.Unlock()
+	if event.ID > 0 && !event.Baseline {
+		var ds []store.DiscordDelivery
+		if err := m.st.GormDB().Where("event_id = ?", ev.EventID).Find(&ds).Error; err == nil {
+			for _, d := range ds {
+				b, _ := json.Marshal(map[string]any{"source_event_id": ev.EventID, "revision": event.Revision, "stage": "receipt", "config_version": ev.ConfigVersion})
+				if err := m.st.CopyTrade().AppendEvent(&store.CopyTradeEvent{SourceEventID: ev.EventID, DeliveryID: d.ID, TraderID: d.TraderID, ChannelID: ev.ChannelID, MessageID: ev.MessageID, TraceID: "source-" + ev.EventID, Level: "info", Event: "source.received", Message: "采集事件已持久化，等待交易员投递", ContextJSON: string(b), OccurredAt: ev.ReceivedAt}); err != nil {
+					m.st.Logs().NoteFailure()
+					m.st.Logs().Record("storage", "trade.audit.failed", "error", "交易事件记录失败", map[string]any{"code": "TRADE_AUDIT_FAILED"})
+				}
+			}
+		} else {
+			m.st.Logs().NoteFailure()
+			m.st.Logs().Record("storage", "trade.audit.failed", "error", "投递审计读取失败", map[string]any{"code": "TRADE_AUDIT_READ_FAILED"})
+		}
+	}
 	return nil
 }
 

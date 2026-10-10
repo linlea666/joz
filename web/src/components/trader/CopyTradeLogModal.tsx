@@ -269,6 +269,12 @@ export function CopyTradeLogModal({
                 className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`}
               />
             </button>
+            <a
+              className="text-sm text-nofx-gold"
+              href={`/logs?scope=trade&trader_id=${encodeURIComponent(traderId)}`}
+            >
+              日志中心
+            </a>
             <button
               onClick={onClose}
               className="w-8 h-8 rounded-lg text-nofx-text-muted hover:text-nofx-text hover:bg-nofx-bg-deeper transition-colors flex items-center justify-center"

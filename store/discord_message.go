@@ -315,7 +315,7 @@ func (s *DiscordMessageStore) CleanOldMessages(days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days)
 	result := s.db.Where("message_timestamp < ? AND processing_status IN ?", cutoff,
 		[]string{DiscordMsgDone, DiscordMsgSkipped, DiscordMsgFailed}).
-		Where("message_id NOT IN (?)", s.db.Model(&CopyTradeContext{}).Select("root_message_id").Where("state IN ?", activeStates)).
+		Where("message_id NOT IN (?)", s.db.Model(&CopyTradeContext{}).Select("root_message_id").Where("id IN (?)", protectedContexts(s.db))).
 		Where("message_id NOT IN (?)", s.db.Model(&CopyTradeSignal{}).Select("message_id")).
 		Delete(&DiscordMessage{})
 	return result.RowsAffected, result.Error

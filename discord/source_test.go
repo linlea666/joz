@@ -406,3 +406,35 @@ func TestFailedRouteRevocationCannotBeBypassedByReenable(t *testing.T) {
 		t.Fatal("uncommitted revocation lost", err)
 	}
 }
+
+func TestDiagnosticProtocolACKAndDedup(t *testing.T) {
+	st := sourceStore(t)
+	m := NewSourceManager(st)
+	server, client := net.Pipe()
+	m.conn = server
+	m.wg.Add(1)
+	go m.serve(server)
+	defer func() { client.Close(); m.wg.Wait() }()
+	payload := json.RawMessage(`{"event_id":"diag1","event":"gateway.error","level":"error","context":{"code":"FAILED","token":"hidden"}}`)
+	encoder := json.NewEncoder(client)
+	decoder := json.NewDecoder(client)
+	for i := 0; i < 2; i++ {
+		if err := encoder.Encode(wireFrame{Type: "diagnostic", Data: payload}); err != nil {
+			t.Fatal(err)
+		}
+		var ack wireFrame
+		if err := decoder.Decode(&ack); err != nil {
+			t.Fatal(err)
+		}
+		if ack.Type != "diagnostic_ack" || ack.ID != "diag1" || ack.Error != "" {
+			t.Fatalf("bad ACK: %+v", ack)
+		}
+	}
+	rows, err := st.Logs().ListLogs(store.LogFilter{Scope: "system", UserID: "u", Upper: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ContextJSON != `{"code":"FAILED"}` {
+		t.Fatalf("diagnostic not deduped/redacted: %+v", rows)
+	}
+}

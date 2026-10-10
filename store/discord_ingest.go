@@ -254,7 +254,7 @@ func (s *DiscordMessageStore) CleanOldIngest(days int) (int64, error) {
 	cutoff := time.Now().UTC().AddDate(0, 0, -days)
 	var removed int64
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		protected := tx.Model(&CopyTradeContext{}).Select("root_message_id").Where("state IN ?", activeStates)
+		protected := tx.Model(&CopyTradeContext{}).Select("root_message_id").Where("id IN (?)", protectedContexts(tx))
 		signals := tx.Model(&CopyTradeSignal{}).Select("message_id")
 		events := tx.Model(&DiscordInbound{}).Select("event_id").Where("created_at < ?", cutoff).Where("message_id NOT IN (?) AND message_id NOT IN (?)", protected, signals)
 		if err := tx.Where("event_id IN (?) AND status = ?", events, DiscordMsgDone).Delete(&DiscordDelivery{}).Error; err != nil {

@@ -33,6 +33,7 @@ type Store struct {
 	discordConfig  *DiscordConfigStore
 	discordMessage *DiscordMessageStore
 	copyTrade      *CopyTradeStore
+	logs           *LogStore
 
 	mu sync.RWMutex
 }
@@ -128,6 +129,10 @@ func (s *Store) initTables() error {
 		)
 	`).Error; err != nil {
 		return fmt.Errorf("failed to create system_config table: %w", err)
+	}
+
+	if err := s.gdb.AutoMigrate(&SystemEvent{}, &LogCleanupTicket{}); err != nil {
+		return err
 	}
 
 	// Initialize sub-store tables

@@ -184,19 +184,22 @@ type CopyTradeSignalView struct {
 
 // CopyTradeEvent is one trace event in the copy-trading pipeline.
 type CopyTradeEvent struct {
-	ID          int64     `gorm:"primaryKey;autoIncrement" json:"id"`
-	TraceID     string    `gorm:"column:trace_id;not null;index" json:"trace_id"` // usually = signal id
-	SignalID    string    `gorm:"column:signal_id;default:''" json:"signal_id"`
-	TraderID    string    `gorm:"column:trader_id;not null;index:idx_cte_trader_time,priority:1" json:"trader_id"`
-	ChannelID   string    `gorm:"column:channel_id;default:''" json:"channel_id"`
-	MessageID   string    `gorm:"column:message_id;default:''" json:"message_id"`
-	Level       string    `gorm:"column:level;default:'info'" json:"level"` // info / success / warn / error
-	Event       string    `gorm:"column:event;not null" json:"event"`       // e.g. copytrade.signal.received
-	Message     string    `gorm:"column:message;default:''" json:"message"` // human-readable summary
-	ContextJSON string    `gorm:"column:context_json;default:''" json:"context_json"`
-	DurationMs  int64     `gorm:"column:duration_ms;default:0" json:"duration_ms"`
-	OccurredAt  time.Time `gorm:"column:occurred_at;index:idx_cte_trader_time,priority:2,sort:desc" json:"occurred_at"`
-	CreatedAt   time.Time `json:"created_at"`
+	SourceEventID    string    `gorm:"index;default:''" json:"source_event_id,omitempty"`
+	DeliveryID       int64     `gorm:"default:0" json:"delivery_id,omitempty"`
+	LogicalChannelID string    `gorm:"default:''" json:"logical_channel_id,omitempty"`
+	ID               int64     `gorm:"primaryKey;autoIncrement" json:"id"`
+	TraceID          string    `gorm:"column:trace_id;not null;index" json:"trace_id"` // usually = signal id
+	SignalID         string    `gorm:"column:signal_id;default:''" json:"signal_id"`
+	TraderID         string    `gorm:"column:trader_id;not null;index:idx_cte_trader_time,priority:1" json:"trader_id"`
+	ChannelID        string    `gorm:"column:channel_id;default:''" json:"channel_id"`
+	MessageID        string    `gorm:"column:message_id;default:''" json:"message_id"`
+	Level            string    `gorm:"column:level;default:'info'" json:"level"` // info / success / warn / error
+	Event            string    `gorm:"column:event;not null" json:"event"`       // e.g. copytrade.signal.received
+	Message          string    `gorm:"column:message;default:''" json:"message"` // human-readable summary
+	ContextJSON      string    `gorm:"column:context_json;default:''" json:"context_json"`
+	DurationMs       int64     `gorm:"column:duration_ms;default:0" json:"duration_ms"`
+	OccurredAt       time.Time `gorm:"column:occurred_at;index:idx_cte_trader_time,priority:2,sort:desc" json:"occurred_at"`
+	CreatedAt        time.Time `json:"created_at"`
 }
 
 func (CopyTradeEvent) TableName() string { return "copytrade_execution_events" }
@@ -627,7 +630,9 @@ func (s *CopyTradeStore) GetEventsByTrace(traderID, traceID string) ([]*CopyTrad
 // CleanOldEvents removes events older than the retention window.
 func (s *CopyTradeStore) CleanOldEvents(days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days)
-	result := s.db.Where("occurred_at < ?", cutoff).Delete(&CopyTradeEvent{})
+	result := s.db.Where("occurred_at < ?", cutoff).Where("signal_id NOT IN (?) AND trace_id NOT IN (?) AND message_id NOT IN (?)", protectedSignals(s.db), s.db.Model(&CopyTradeContext{}).Select("'reconcile-' || id").Where("id IN (?)", protectedContexts(s.db)), protectedMessageIDs(s.db)).
+		Where("COALESCE(source_event_id, '') NOT IN (?)", s.db.Model(&DiscordDelivery{}).Select("event_id").Where("status IN ?", []string{DiscordMsgPending, DiscordMsgProcessing})).
+		Where("COALESCE(source_event_id, '') NOT IN (?)", s.db.Model(&CopyTradeSignal{}).Select("source_event_id").Where("id IN (?) AND source_event_id <> ''", protectedSignals(s.db))).Delete(&CopyTradeEvent{})
 	return result.RowsAffected, result.Error
 }
 
@@ -638,6 +643,7 @@ func (s *CopyTradeStore) CleanOldSignals(days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days)
 	result := s.db.Where("created_at < ? AND status IN ?", cutoff,
 		[]string{SignalStatusExecuted, SignalStatusSkipped, SignalStatusFailed}).
+		Where("id NOT IN (?)", protectedSignals(s.db)).
 		Delete(&CopyTradeSignal{})
 	return result.RowsAffected, result.Error
 }
@@ -646,7 +652,7 @@ func (s *CopyTradeStore) CleanOldSignals(days int) (int64, error) {
 // These rows carry full prompts and raw responses and dominate table growth.
 func (s *CopyTradeStore) CleanOldAIRuns(days int) (int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -days)
-	result := s.db.Where("created_at < ?", cutoff).Delete(&CopyTradeAIRun{})
+	result := s.db.Where("created_at < ?", cutoff).Where("id NOT IN (?)", s.db.Model(&CopyTradeSignal{}).Select("ai_run_id").Where("id IN (?)", protectedSignals(s.db))).Where("message_id NOT IN (?)", protectedMessageIDs(s.db)).Delete(&CopyTradeAIRun{})
 	return result.RowsAffected, result.Error
 }
 

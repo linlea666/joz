@@ -90,6 +90,34 @@ func main() {
 		logger.Fatalf("❌ Failed to initialize database: %v", err)
 	}
 	defer st.Close()
+	logStop := make(chan struct{})
+	logDone := make(chan struct{})
+	st.Logs().Record("server", "service.started", "info", "后端服务启动", nil)
+	defer func() {
+		close(logStop)
+		<-logDone
+		st.Logs().Record("server", "service.stopped", "info", "后端服务停止", nil)
+	}()
+	go func() {
+		defer close(logDone)
+		ticker := time.NewTicker(time.Second * 10)
+		defer ticker.Stop()
+		lastCleanup := time.Time{}
+		for {
+			select {
+			case <-logStop:
+				return
+			case <-ticker.C:
+				st.Logs().Flush()
+				if time.Since(lastCleanup) >= time.Hour {
+					if err := st.Logs().Retain(512 << 20); err != nil {
+						st.Logs().Record("logs", "logs.retention.failed", "error", "系统日志清理失败", map[string]any{"code": "RETENTION_FAILED"})
+					}
+					lastCleanup = time.Now()
+				}
+			}
+		}
+	}()
 
 	// Initialize installation ID for experience improvement (anonymous statistics)
 	initInstallationID(st)
@@ -243,7 +271,11 @@ func runCopyTradeRetentionLoop(st *store.Store) {
 		} else if n > 0 {
 			logger.Infof("🧹 CopyTrade retention: removed %d terminal messages older than %d days", n, messageDays)
 		}
-		if n, err := discord.CleanOldMedia(mediaDays); err != nil {
+		if protected, err := st.CopyTrade().HasProtectedMedia(); err != nil || protected {
+			if err != nil {
+				logger.Warn("Media retention skipped: protected evidence query failed")
+			}
+		} else if n, err := discord.CleanOldMedia(mediaDays); err != nil {
 			logger.Warnf("⚠️ CopyTrade retention: media cleanup failed: %v", err)
 		} else if n > 0 {
 			logger.Infof("🧹 CopyTrade retention: removed %d cached media files older than %d days", n, mediaDays)

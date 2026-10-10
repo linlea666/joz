@@ -348,6 +348,13 @@ The token is validated against the Discord API before saving and stored encrypte
 				`Body: {"channel_id":"<numeric channel id>"}. Returns {"ok":<bool>,"messages":[{"author_name","content","timestamp",...}]}. Use to verify a channel ID before binding a copy-trading trader.`,
 				s.handleTestDiscordChannel)
 
+			s.route(protected, "GET", "/logs/events", "Structured system and trading logs", s.handleLogEvents)
+			s.route(protected, "GET", "/logs/trace", "Owned execution evidence", s.handleLogTrace)
+			s.route(protected, "GET", "/logs/export", "Export filtered logs", s.handleLogExport)
+			s.route(protected, "GET", "/logs/settings", "Log retention", s.handleLogSettings)
+			s.route(protected, "PUT", "/logs/settings", "Set system log retention", s.handleLogSettings)
+			s.route(protected, "POST", "/logs/cleanup/preview", "Preview historical system log cleanup", s.handleLogCleanupPreview)
+			s.route(protected, "POST", "/logs/cleanup", "Confirm system log cleanup", s.handleLogCleanup)
 			// Copy-trading observability
 			s.route(protected, "GET", "/copytrade/profiles", "Copy trading author presets", s.handleGetCopyTradeProfiles)
 			s.route(protected, "GET", "/copytrade/events", "Copy trading event stream (trader_id or trace_id)", s.handleGetCopyTradeEvents)

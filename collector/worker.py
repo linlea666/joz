@@ -5,9 +5,11 @@ import logging
 import os
 import signal
 import time
+import traceback
 from contextlib import suppress
 
 import discord
+from diagnostics import Diagnostics
 from healthcheck import write_status
 from core import Outbox, OutboxFull, baseline_snowflake, bounded_history, merge_message, snowflake_time, utcnow
 
@@ -23,16 +25,20 @@ class Gateway(discord.Client):
                          chunk_guilds_at_startup=False, max_messages=100,
                          sync_presence=False)
         self.owner = owner
+        self.generation = owner.generation
+
+    def current(self):
+        return self.owner.client is self and self.generation == self.owner.generation
 
     def dispatch(self, event, /, *args, **kwargs):
-        if event == 'socket_raw_receive':
+        if event == 'socket_raw_receive' and self.current():
             # Synchronous capture preserves wire order before asynchronous SDK
             # callbacks and before any model/network consumer can run.
             self.owner.capture(args[0])
         return super().dispatch(event, *args, **kwargs)
 
     async def on_ready(self):
-        if self.owner.halted:
+        if not self.current() or self.owner.halted:
             return
         self.owner.state = 'recovering'
         for channel in self.owner.channels:
@@ -43,11 +49,17 @@ class Gateway(discord.Client):
             await self.owner.send({'type':'refresh'})
 
     async def on_disconnect(self):
-        if not self.owner.halted:
+        if self.current() and not self.owner.halted:
+            self.owner.last_heartbeat = None
             self.owner.state = 'reconnecting'
 
     async def on_resumed(self):
-        self.owner.state = 'connected'
+        if not self.current() or self.owner.halted:
+            return
+        self.owner.state = 'recovering' if any(self.owner.box.recovery(ch) for ch in self.owner.channels) else 'connected'
+        if self.owner.state == 'recovering':
+            with suppress(ConnectionError, OSError):
+                await self.owner.send({'type':'refresh'})
         # A successful SDK Resume replays events; no REST history polling.
 
 
@@ -61,6 +73,10 @@ class Worker:
         self.lock_file = open(os.path.join(directory, 'collector.lock'), 'a')
         fcntl.flock(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.box = Outbox(os.path.join(directory, 'outbox.db'))
+        self.diagnostics = Diagnostics(os.path.join(directory, 'diagnostics.db'))
+        self.diagnostics_enabled = False
+        self.generation = 0
+        self.error_detail = {}
         self.writer = None
         self.write_lock = asyncio.Lock()
         self.config_lock = asyncio.Lock()
@@ -83,41 +99,68 @@ class Worker:
         self.recovery_barrier = False
 
     def capture(self, raw):
-        packet = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
-        if packet.get('op') == 11:
-            self.last_heartbeat = utcnow()
-        if packet.get('t') == 'READY':
-            self.session_id = packet['d'].get('session_id')
-            # Freeze BEFORE subsequent frames can advance receipts. SDK on_ready
-            # can run later, after guild hydration and other message dispatches.
-            self.state = 'recovering'
-            try:
+        try:
+            packet = json.loads(raw) if isinstance(raw, (str, bytes)) else raw
+            if not isinstance(packet, dict):
+                raise ValueError('invalid envelope')
+            if packet.get('op') == 11:
+                self.last_heartbeat = utcnow()
+                return
+            if packet.get('op') != 0 or self.halted:
+                return
+            kind = packet.get('t')
+            if kind == 'READY':
+                data = packet.get('d')
+                if not isinstance(data, dict):
+                    raise ValueError('invalid ready')
+                self.session_id = data.get('session_id')
+                self.state = 'recovering'
                 for channel in self.channels:
                     self.box.begin_recovery(channel)
                     self.channel_states[channel] = ('recovering', '')
                 self.recovery_barrier = True
-            except Exception:
-                self.fail_buffer()
                 return
-        kind = packet.get('t')
-        data = packet.get('d') or {}
-        channel = str(data.get('channel_id', ''))
-        if self.halted or channel not in self.channels or kind not in {
-                'MESSAGE_CREATE', 'MESSAGE_UPDATE', 'MESSAGE_DELETE', 'MESSAGE_DELETE_BULK'}:
-            return
-        try:
-            ids = data.get('ids', []) if kind == 'MESSAGE_DELETE_BULK' else [data['id']]
+            if kind not in {'MESSAGE_CREATE','MESSAGE_UPDATE','MESSAGE_DELETE','MESSAGE_DELETE_BULK'}:
+                return
+            data = packet.get('d')
+            if not isinstance(data, dict) or not str(data.get('channel_id','')).isdecimal():
+                raise ValueError('invalid message envelope')
+            channel = str(data['channel_id'])
+            if channel not in self.channels:
+                return
+            if any(key in data and not isinstance(data[key], typ) for key,typ in (('content',str),('attachments',list),('embeds',list),('author',dict))):
+                raise ValueError('invalid message fields')
+            ids = data.get('ids') if kind == 'MESSAGE_DELETE_BULK' else [data.get('id')]
+            if not isinstance(ids,list) or not ids or any(not isinstance(i,(str,int)) or isinstance(i,bool) or not str(i).isdecimal() for i in ids):
+                raise ValueError('invalid message identity')
+            # Validate all IDs before appending any bulk event.
             for message_id in ids:
-                payload = dict(data, id=str(message_id), channel_id=channel)
-                self.box.append(kind, payload, session=self.session_id, sequence=packet.get('s'), config_version=self.version)
+                self.box.append(kind, dict(data,id=str(message_id),channel_id=channel),
+                                session=self.session_id, sequence=packet.get('s'), config_version=self.version)
             self.wake.set()
-        except Exception:
-            # Never continue with a silently dropped frame after a disk error.
-            self.fail_buffer()
+        except (ValueError, TypeError, KeyError) as exc:
+            self.fail_buffer(exc, 'MESSAGE_PAYLOAD_INVALID')
+        except Exception as exc:
+            self.fail_buffer(exc)
 
-    def fail_buffer(self):
+    def record_error(self, code, stage, exc=None):
+        detail = {'code':code,'stage':stage,'occurred_at':utcnow()}
+        if self.last_heartbeat:detail['last_heartbeat']=self.last_heartbeat
+        if exc:
+            detail['exception_type'] = type(exc).__name__
+            if isinstance(getattr(exc,'code',None),int):detail['close_code'] = exc.code
+            frames=traceback.extract_tb(exc.__traceback__)
+            if frames:
+                frame=frames[-1]
+                detail.update(file=os.path.basename(frame.filename),function=frame.name,line=frame.lineno)
+        self.error_detail = detail
+        self.last_error = code
+        self.diagnostics.record('gateway.error','error',**detail)
+
+    def fail_buffer(self, exc=None, code='EVENT_BUFFER_FAILED'):
         self.halted = True
-        self.state, self.last_error = 'buffer_failed', 'durable event buffer failed; manual recovery required'
+        self.state = 'buffer_failed'
+        self.record_error(code,'capture',exc)
         if self.client:
             asyncio.create_task(self.client.close())
 
@@ -133,6 +176,8 @@ class Worker:
         recovery = self.box.recovery(channel)
         if recovery:
             checkpoint = recovery
+        if self.channel_states.get(channel) != (state,error):
+            self.diagnostics.record('channel.state', 'warn' if error else 'info',channel_id=channel,state=state)
         self.channel_states[channel] = (state, error)
         await self.send({'type': 'channel', 'data': {
             'channel_id': channel, 'state': state, 'last_error': error,
@@ -248,34 +293,52 @@ class Worker:
             self.state = 'connected'
 
     async def run_gateway(self, client, token):
+        generation = self.generation
         try:
             await client.start(token, reconnect=True)
-        except discord.LoginFailure:
-            self.state, self.last_error = 'auth_invalid', 'Gateway authentication failed'
-        except discord.ConnectionClosed as exc:
-            if not self.halted:
-                self.state = 'auth_invalid' if exc.code == 4004 else 'connection_failed'
-                self.last_error = 'Gateway authentication failed' if exc.code == 4004 else 'Gateway stopped; inspect collector status'
-        except Exception:
-            if not self.halted:
-                self.state, self.last_error = 'connection_failed', 'Gateway stopped; inspect collector status'
+            if self.client is client and not self.halted:
+                self.state = 'connection_failed'
+                self.record_error('GATEWAY_TASK_ENDED','receive')
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self.client is client and generation == self.generation and not self.halted:
+                invalid = isinstance(exc,discord.LoginFailure) or getattr(exc,'code',None) == 4004
+                self.state = 'auth_invalid' if invalid else 'connection_failed'
+                self.record_error('GATEWAY_AUTH_INVALID' if invalid else 'GATEWAY_TASK_FAILED','receive',exc)
+        finally:
+            if self.client is client and generation == self.generation:
+                self.last_heartbeat = None
+                if self.recovery_task:
+                    self.recovery_task.cancel()
+                    await asyncio.gather(self.recovery_task,return_exceptions=True)
+            # Invalidate SDK callbacks before close, including delayed on_ready.
+            if generation == self.generation:self.generation += 1
+            try:
+                await client.close()
+            except Exception as exc:
+                if self.client is client:
+                    self.state = 'connection_failed'
+                    self.record_error('GATEWAY_CLOSE_FAILED','close',exc)
 
     async def configure(self, data):
         async with self.config_lock:
             token = data.get('token', '') if data.get('enabled') else ''
             channels = data.get('channels', {})
             changed = set(channels) != set(self.channels)
-            if token != self.token:
+            token_changed = token != self.token
+            restart = token_changed or bool(token and (self.client_task is None or self.client_task.done()) and self.state != 'auth_invalid' and not self.halted)
+            if restart:
+                self.generation += 1
                 if self.recovery_task:
                     self.recovery_task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await self.recovery_task
+                    await asyncio.gather(self.recovery_task,return_exceptions=True)
                 if self.client:
                     await self.client.close()
                 if self.client_task:
-                    with suppress(asyncio.CancelledError):
-                        await self.client_task
-            token_changed = token != self.token
+                    self.client_task.cancel()
+                    await asyncio.gather(self.client_task,return_exceptions=True)
+            self.diagnostics_enabled = data.get('diagnostics_v1') is True
             self.channels, self.active_cards = channels, data.get('active_cards', [])
             # Backend progress is only a lower bound; local outbox remains the
             # authority for unacknowledged receipts across process restarts.
@@ -288,13 +351,15 @@ class Worker:
                     self.box.begin_recovery(ch)
                     self.channel_states[ch] = ('recovering', '')
             self.version = data['version']
-            if token_changed:
+            if restart and not self.halted:
                 self.token = token
+                self.error_detail = {}
+                self.last_error = ''
                 self.last_heartbeat = None
                 self.state = 'connecting' if token else 'disabled'
                 self.client = Gateway(self) if token else None
                 self.client_task = asyncio.create_task(self.run_gateway(self.client, token)) if token else None
-            elif (changed or self.state == "recovering") and self.client and self.client.is_ready():
+            elif (changed or self.state == "recovering") and not self.halted and self.client and self.client_task and not self.client_task.done() and self.client.is_ready():
                 self.schedule_recovery()
             self.configured.set()
             for ch, (state, error) in list(self.channel_states.items()):
@@ -338,11 +403,37 @@ class Worker:
                              'status_code': getattr(exc, 'status', 0),
                              'error': f"collector request failed ({type(exc).__name__}, HTTP {getattr(exc, 'status', 'n/a')})"})
 
+    async def diagnostic_loop(self):
+        previous = None
+        while True:
+            try:
+                self.diagnostics.flush()
+                if previous != self.state:
+                    self.diagnostics.record('gateway.state',state=self.state,previous_state=previous or '',generation=self.generation)
+                    previous = self.state
+                event = self.diagnostics.next()
+                if event and self.writer and self.configured.is_set() and self.diagnostics_enabled:
+                    future = asyncio.get_running_loop().create_future()
+                    self.acks[event['event_id']] = future
+                    try:
+                        await self.send({'type':'diagnostic','data':event})
+                        await asyncio.wait_for(future,10)
+                        self.diagnostics.ack(event['event_id'])
+                    finally:
+                        self.acks.pop(event['event_id'],None)
+                else:
+                    await asyncio.sleep(1)
+            except asyncio.CancelledError:raise
+            except Exception:
+                logging.warning("diagnostic delivery pending; retained for retry")
+                await asyncio.sleep(2)
+
     async def status_loop(self):
         while True:
             with suppress(ConnectionError, OSError):
                 data = {'state': self.state, 'last_error': self.last_error,
-                        'applied_version': self.version, 'backlog': self.box.count()}
+                        'applied_version': self.version, 'backlog': self.box.count(),
+                        'error_detail':self.error_detail, 'diagnostic_failures':self.diagnostics.failures}
                 if self.last_heartbeat:
                     data['last_heartbeat'] = self.last_heartbeat
                 await self.send({'type': 'status', 'data': data})
@@ -359,7 +450,7 @@ class Worker:
                 self.wake.set()
                 while line := await reader.readline():
                     frame = json.loads(line)
-                    if frame['type'] == 'ack':
+                    if frame['type'] in ('ack','diagnostic_ack'):
                         future = self.acks.get(frame.get('id'))
                         if future and not future.done():
                             if frame.get('error'):
@@ -382,10 +473,11 @@ class Worker:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, task.cancel)
         try:
-            await asyncio.gather(self.connect_backend(), self.deliver(), self.status_loop())
+            await asyncio.gather(self.connect_backend(), self.deliver(), self.status_loop(), self.diagnostic_loop())
         finally:
             if self.client:
                 await self.client.close()
+            self.diagnostics.db.close()
             self.box.db.close()
             self.lock_file.close()
 

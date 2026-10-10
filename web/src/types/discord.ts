@@ -25,6 +25,18 @@ export interface DiscordConfig {
   run_mode: 'observe' | 'live'
   execution_since?: string
   collector?: {
+    ipc_connected?: boolean
+    diagnostic_failures?: number
+    error_detail?: {
+      code?: string
+      stage?: string
+      exception_type?: string
+      file?: string
+      function?: string
+      line?: number
+      occurred_at?: string
+    }
+
     state: string
     last_error?: string
     last_heartbeat?: string
