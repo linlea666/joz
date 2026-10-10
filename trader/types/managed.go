@@ -13,6 +13,8 @@ var ErrManagedOrderRejected = errors.New("managed order definitely rejected")
 
 // MarketRulesReader is optional and does not imply managed entry support.
 // Quantities are always base-asset units, including contract venues.
+// Rejected observed rules may accompany an error for diagnostics only;
+// execution callers must reject every non-nil error, even with non-nil rules.
 type MarketRulesReader interface {
 	MarketRules(symbol string) (*ManagedMarketRules, error)
 }

@@ -35,34 +35,37 @@ const (
 
 // ReplayItem is the dry-run interpretation result of one stored message.
 type ReplayItem struct {
-	RulesSnapshotJSON string    `json:"rules_snapshot_json,omitempty"`
-	EvaluationScope   string    `json:"evaluation_scope"`
-	UncheckedGates    []string  `json:"unchecked_gates"`
-	MessageID         string    `json:"message_id"`
-	Timestamp         time.Time `json:"timestamp"`
-	Author            string    `json:"author"`
-	Excerpt           string    `json:"excerpt"`
-	ImageCount        int       `json:"image_count"` // image attachments on the message
-	ImagesSent        int       `json:"images_sent"` // actually downloaded & sent to the LLM
-	LLMMs             int64     `json:"llm_ms"`
-	Classification    string    `json:"classification,omitempty"`
-	Action            string    `json:"action,omitempty"`
-	Symbol            string    `json:"symbol,omitempty"`
-	Canonical         string    `json:"canonical,omitempty"`
-	Direction         string    `json:"direction,omitempty"`
-	Entries           string    `json:"entries,omitempty"`
-	StopLoss          string    `json:"stop_loss,omitempty"`
-	TakeProfits       string    `json:"take_profits,omitempty"`
-	Verdict           string    `json:"verdict"`
-	VerdictDetail     string    `json:"verdict_detail,omitempty"`
-	Reasoning         string    `json:"reasoning,omitempty"`
-	Warnings          []string  `json:"warnings,omitempty"`
-	Error             string    `json:"error,omitempty"`
-	ImageError        string    `json:"image_error,omitempty"`
-	SystemPrompt      string    `json:"system_prompt,omitempty"`
-	UserPrompt        string    `json:"user_prompt,omitempty"`
-	RawResponse       string    `json:"raw_response,omitempty"`
-	ParsedJSON        string    `json:"parsed_json,omitempty"`
+	Evaluations       []ReplayEvaluation `json:"evaluations,omitempty"`
+	ProcessingPath    string             `json:"processing_path,omitempty"`
+	ProcessingModel   string             `json:"processing_model,omitempty"`
+	RulesSnapshotJSON string             `json:"rules_snapshot_json,omitempty"`
+	EvaluationScope   string             `json:"evaluation_scope"`
+	UncheckedGates    []string           `json:"unchecked_gates"`
+	MessageID         string             `json:"message_id"`
+	Timestamp         time.Time          `json:"timestamp"`
+	Author            string             `json:"author"`
+	Excerpt           string             `json:"excerpt"`
+	ImageCount        int                `json:"image_count"` // image attachments on the message
+	ImagesSent        int                `json:"images_sent"` // actually downloaded & sent to the LLM
+	LLMMs             int64              `json:"llm_ms"`
+	Classification    string             `json:"classification,omitempty"`
+	Action            string             `json:"action,omitempty"`
+	Symbol            string             `json:"symbol,omitempty"`
+	Canonical         string             `json:"canonical,omitempty"`
+	Direction         string             `json:"direction,omitempty"`
+	Entries           string             `json:"entries,omitempty"`
+	StopLoss          string             `json:"stop_loss,omitempty"`
+	TakeProfits       string             `json:"take_profits,omitempty"`
+	Verdict           string             `json:"verdict"`
+	VerdictDetail     string             `json:"verdict_detail,omitempty"`
+	Reasoning         string             `json:"reasoning,omitempty"`
+	Warnings          []string           `json:"warnings,omitempty"`
+	Error             string             `json:"error,omitempty"`
+	ImageError        string             `json:"image_error,omitempty"`
+	SystemPrompt      string             `json:"system_prompt,omitempty"`
+	UserPrompt        string             `json:"user_prompt,omitempty"`
+	RawResponse       string             `json:"raw_response,omitempty"`
+	ParsedJSON        string             `json:"parsed_json,omitempty"`
 }
 
 // ReplayReport is the full state of one replay run. The engine keeps a live
@@ -234,7 +237,9 @@ func (e *Engine) runReplay(queue []*store.DiscordMessage) {
 func replayItemToStore(replayID string, sequence int, item ReplayItem) *store.CopyTradeReplayItem {
 	warnings, _ := json.Marshal(item.Warnings)
 	unchecked, _ := json.Marshal(item.UncheckedGates)
+	evaluations, _ := json.Marshal(item.Evaluations)
 	return &store.CopyTradeReplayItem{
+		EvaluationsJSON: string(evaluations), ProcessingPath: item.ProcessingPath, ProcessingModel: item.ProcessingModel,
 		ReplayID: replayID, Sequence: sequence, MessageID: item.MessageID, Timestamp: item.Timestamp, RulesSnapshotJSON: item.RulesSnapshotJSON, EvaluationScope: item.EvaluationScope, UncheckedGatesJSON: string(unchecked),
 		Author: item.Author, Excerpt: item.Excerpt, ImageCount: item.ImageCount, ImagesSent: item.ImagesSent,
 		LLMMs: item.LLMMs, Classification: item.Classification, Action: item.Action, Symbol: item.Symbol,
@@ -254,6 +259,8 @@ func replayReportFromStore(replay *store.CopyTradeReplay, items []*store.CopyTra
 		StartedAt: replay.StartedAt, FinishedAt: replay.FinishedAt, Items: make([]ReplayItem, 0, len(items)),
 	}
 	for _, item := range items {
+		var evaluations []ReplayEvaluation
+		_ = json.Unmarshal([]byte(item.EvaluationsJSON), &evaluations)
 		var unchecked []string
 		_ = json.Unmarshal([]byte(item.UncheckedGatesJSON), &unchecked)
 		scope := item.EvaluationScope
@@ -263,6 +270,7 @@ func replayReportFromStore(replay *store.CopyTradeReplay, items []*store.CopyTra
 		var warnings []string
 		_ = json.Unmarshal([]byte(item.WarningsJSON), &warnings)
 		report.Items = append(report.Items, ReplayItem{
+			Evaluations: evaluations, ProcessingPath: item.ProcessingPath, ProcessingModel: item.ProcessingModel,
 			MessageID: item.MessageID, Timestamp: item.Timestamp, Author: item.Author, Excerpt: item.Excerpt, RulesSnapshotJSON: item.RulesSnapshotJSON, EvaluationScope: scope, UncheckedGates: unchecked,
 			ImageCount: item.ImageCount, ImagesSent: item.ImagesSent, LLMMs: item.LLMMs,
 			Classification: item.Classification, Action: item.Action, Symbol: item.Symbol, Canonical: item.Canonical,
@@ -282,7 +290,7 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 	item := ReplayItem{
 		RulesSnapshotJSON: e.cfg.MessageRules().Snapshot(),
 		EvaluationScope:   "current_rules_context_and_prices; historical execution state unavailable",
-		UncheckedGates:    []string{"account_ownership", "balance", "contract_capability", "order_limits", "ttl", "source_connection", "message_gap", "activation_boundary", "historical_target_state", "live_execution"},
+		UncheckedGates:    []string{"account_ownership", "balance", "account_contract_permissions", "order_limits", "ttl", "source_connection", "message_gap", "activation_boundary", "historical_target_state", "live_execution"},
 		MessageID:         msg.MessageID,
 		Timestamp:         msg.MessageTimestamp,
 		Author:            msg.AuthorName,
@@ -313,6 +321,10 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 	item.LLMMs = timings.llmMs
 	item.ImageError = timings.imageErr
 	if run != nil {
+		item.ProcessingModel, item.ProcessingPath = run.Model, "ai"
+		if strings.HasPrefix(run.Model, "deterministic:") {
+			item.ProcessingPath = "deterministic"
+		}
 		item.ImagesSent = run.ImageCount
 		item.SystemPrompt = run.SystemPrompt
 		item.UserPrompt = run.InputPrompt
@@ -337,8 +349,9 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 
 	instructions := interp.Flatten()
 	if len(instructions) == 1 {
-		verdict, detail, canonical := e.replayEvaluateSource(instructions[0], msg)
-		item.Canonical = canonical
+		evaluation, verdict, detail := e.replayEvaluateSourceChecks(instructions[0], msg)
+		item.Evaluations = append(item.Evaluations, evaluation)
+		item.Canonical = evaluation.Canonical
 		item.Verdict = verdict
 		item.VerdictDetail = detail
 		return item
@@ -349,7 +362,8 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 	var details []string
 	executes, invalids := 0, 0
 	for _, ins := range instructions {
-		verdict, detail, _ := e.replayEvaluateSource(ins, msg)
+		evaluation, verdict, detail := e.replayEvaluateSourceChecks(ins, msg)
+		item.Evaluations = append(item.Evaluations, evaluation)
 		switch verdict {
 		case VerdictExecute:
 			executes++
@@ -372,36 +386,6 @@ func (e *Engine) replayOne(msg *store.DiscordMessage) ReplayItem {
 	}
 	item.VerdictDetail = strings.Join(details, "; ")
 	return item
-}
-
-// replayEvaluate applies the live pipeline's instrument + validation gates to
-// ONE instruction (TTL is skipped on purpose: replayed history is always
-// expired, and TTL is deterministic, not an AI concern). Returns the dry-run
-// verdict, its detail and the resolved canonical symbol.
-func (e *Engine) replayEvaluate(interp *SourceInterpretation) (verdict, detail, canonical string) {
-	marketPrice := 0.0
-	if interp.Symbol != "" {
-		if c, rerr := ResolveInstrument(interp.Symbol); rerr == nil {
-			canonical = c
-			if mp, perr := e.exec.ex.GetMarketPrice(c); perr == nil {
-				marketPrice = mp
-			}
-		} else if interp.IsActionable() {
-			return VerdictSkip, string(SkipUnsupportedInstrument), ""
-		}
-	}
-
-	skipReason, verr := ValidateInterpretation(interp, marketPrice)
-	if verr != nil {
-		return VerdictInvalid, verr.Error(), canonical
-	}
-	if skipReason != SkipNone {
-		return VerdictSkip, string(skipReason), canonical
-	}
-	if !interp.IsActionable() {
-		return VerdictSkip, string(SkipNotSignal), canonical
-	}
-	return VerdictExecute, fmt.Sprintf("%s %s %s", interp.Action, interp.Direction, canonical), canonical
 }
 
 func excerpt(s string, max int) string {
@@ -469,11 +453,19 @@ func trimFloat(f float64) string {
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", f), "0"), ".")
 }
 
-func (e *Engine) replayEvaluateSource(ins *SourceInterpretation, msg *store.DiscordMessage) (string, string, string) {
+func (e *Engine) replayEvaluateSourceChecks(ins *SourceInterpretation, msg *store.DiscordMessage) (ReplayEvaluation, string, string) {
+	ev := uncheckedReplay(ins)
 	if skip, err := ValidateActionEvidence(ins, e.messageSources(msg)); err != nil {
-		return VerdictInvalid, err.Error(), ""
+		ev.Source = ReplayCheck{Status: "failed", Code: "SOURCE_EVIDENCE", Detail: err.Error()}
+		return ev, VerdictInvalid, err.Error()
 	} else if skip != SkipNone {
-		return VerdictSkip, string(skip), ""
+		ev.Source = ReplayCheck{Status: "failed", Code: string(skip), Detail: string(skip)}
+		return ev, VerdictSkip, string(skip)
 	}
-	return e.replayEvaluate(ins)
+	ev, verdict, detail := e.replayChecks(ins)
+	ev.Source = ReplayCheck{Status: "passed"}
+	if !ins.IsActionable() {
+		ev.Source = ReplayCheck{Status: "not_required", Detail: "no actionable instruction"}
+	}
+	return ev, verdict, detail
 }

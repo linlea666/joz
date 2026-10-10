@@ -49,7 +49,9 @@ func (t *FuturesTrader) MarketRules(symbol string) (*types.ManagedMarketRules, e
 			}
 		}
 		if r.Status != "TRADING" || (r.ContractType != "PERPETUAL" && r.ContractType != "TRADIFI_PERPETUAL") || r.QuoteAsset != "USDT" || r.QuantityStep <= 0 || r.PriceTick <= 0 {
-			return nil, fmt.Errorf("%s is not a supported tradable USDT perpetual or has incomplete rules", symbol)
+			// Preserve observed rules for diagnostics; callers must still honor
+			// the error and cannot use rejected rules for order submission.
+			return r, fmt.Errorf("%s is not a supported tradable USDT perpetual or has incomplete rules (status=%s, contract_type=%s, quote_asset=%s)", symbol, r.Status, r.ContractType, r.QuoteAsset)
 		}
 		return r, nil
 	}

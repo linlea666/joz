@@ -13,6 +13,28 @@ import (
 	"nofx/trader/types"
 )
 
+func TestMarketRulesPreservesRejectedContractStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || r.URL.Path != "/fapi/v1/exchangeInfo" {
+			t.Errorf("unexpected execution request %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"symbols":[{"symbol":"RAYUSDT","status":"SETTLING","contractType":"PERPETUAL","quoteAsset":"USDT","filters":[]}]}`))
+	}))
+	defer server.Close()
+	client := futures.NewClient("test", "test")
+	client.BaseURL = server.URL
+	client.HTTPClient = server.Client()
+	ex := &FuturesTrader{client: client}
+	rules, err := ex.MarketRules("RAYUSDT")
+	if err == nil || rules == nil || rules.Status != "SETTLING" {
+		t.Fatalf("lost rejected status: %+v %v", rules, err)
+	}
+	if _, err := ex.SubmitManagedOrder(&types.ManagedOrderRequest{Symbol: "RAYUSDT", Rules: rules}); err == nil {
+		t.Fatal("rejected diagnostic rules allowed submission")
+	}
+}
+
 func TestManagedOrderUsesStableIDAndPreciseCancel(t *testing.T) {
 	var calls []map[string]string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

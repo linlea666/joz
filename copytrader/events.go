@@ -15,6 +15,7 @@ const (
 	EvAIRequest        = "copytrade.ai.request"
 	EvAIParsed         = "copytrade.ai.parsed"
 	EvAIError          = "copytrade.ai.error"
+	EvRuleMatched      = "copytrade.rule.matched"
 	EvSignalClassified = "copytrade.signal.classified"
 	EvSignalSkipped    = "copytrade.signal.skipped"
 	EvQuantityPlan     = "copytrade.risk.quantity_plan"

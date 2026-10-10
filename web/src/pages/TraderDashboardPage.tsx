@@ -1,3 +1,4 @@
+import { CopyTradeRecognitionStatus } from '../components/trader/CopyTradeRecognitionStatus'
 import { useEffect, useState, useRef } from 'react'
 import { mutate } from 'swr'
 import { api } from '../lib/api'
@@ -524,7 +525,7 @@ export function TraderDashboardPage({
                         {status && (
                             <div className="hidden md:contents">
                                 <span className="w-px h-3 bg-nofx-text/10" />
-                                <span>Cycles: <span className="text-nofx-text-main">{status.call_count}</span></span>
+                                {status.recognition_stats_scope ? <CopyTradeRecognitionStatus status={status} /> : <span>Cycles: <span className="text-nofx-text-main">{status.call_count ?? '—'}</span></span>}
                                 <span className="w-px h-3 bg-nofx-text/10" />
                                 <span>Runtime: <span className="text-nofx-text-main">{status.runtime_minutes} min</span></span>
                             </div>

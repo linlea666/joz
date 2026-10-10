@@ -1,4 +1,5 @@
 import { CopyTradeRulesSnapshot } from './CopyTradeRulesSnapshot'
+import { CopyTradeReplayChecks } from './CopyTradeReplayChecks'
 import { useState, useEffect, useCallback, Fragment } from 'react'
 import { X as IconX, RefreshCw, Radio, Download, Play } from 'lucide-react'
 import { toast } from 'sonner'
@@ -744,6 +745,7 @@ export function CopyTradeLogModal({
                           </>
                         )}
                       </div>
+                      <CopyTradeReplayChecks item={item} language={language} />
                       {item.reasoning && (
                         <div className="text-nofx-text-muted break-all">
                           {item.reasoning}

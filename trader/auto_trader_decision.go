@@ -7,6 +7,7 @@ import (
 	"nofx/kernel"
 	"nofx/logger"
 	"nofx/market"
+	"nofx/mcp"
 	"nofx/store"
 	"nofx/telemetry"
 	"time"
@@ -85,6 +86,20 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 	}
 
 	if at.IsCopyTrading() {
+		result["ai_provider"] = at.aiModel
+		result["interpretation_model"] = at.config.CustomModelName
+		if client, ok := at.mcpClient.(mcp.ClientEmbedder); ok && client.BaseClient() != nil {
+			result["interpretation_model"], result["ai_provider"] = client.BaseClient().Model, client.BaseClient().Provider
+		}
+		result["call_count"] = nil
+		result["recognition_stats_scope"] = "retained_live_ai_runs"
+		if at.store != nil {
+			if stats, err := at.store.CopyTrade().RecognitionStats(at.id); err == nil {
+				result["call_count"], result["recognition_stats"] = stats.ModelCalls, stats
+			} else {
+				result["recognition_stats_error"] = "recognition statistics unavailable"
+			}
+		}
 		if source := discord.Global(); source != nil {
 			result["source_applied"] = source.RouteApplied(at.id)
 		}

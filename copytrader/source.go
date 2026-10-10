@@ -226,6 +226,10 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 			}
 		}
 	}
+	if reason := unresolvedManagement(body); reason != "" {
+		return &SourceInterpretation{Classification: ClassificationAmbiguous, Action: ActionIgnore, Symbol: sym,
+			ActionEvidence: &ActionEvidence{SourceID: actionSourceID, Text: actionEvidence}, Reasoning: reason}
+	}
 	var actions []*SourceInterpretation
 	makeAction := func(a Action) *SourceInterpretation {
 		return &SourceInterpretation{Classification: ClassificationSignal, Action: a, Symbol: sym, ActionEvidence: &ActionEvidence{SourceID: actionSourceID, Text: actionEvidence}, RequiresAddFill: sourceAddCondition.MatchString(body), Reasoning: "TYLER explicit management policy"}

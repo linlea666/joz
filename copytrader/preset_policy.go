@@ -19,6 +19,23 @@ var cardDirection = regexp.MustCompile(`(?i)\b(long|short)\b|做多|做空|多�
 var cardField = regexp.MustCompile(`(?i)^\s*[-•]?\s*(entry|入场价?|入場價?|trailed stop|移动止损|移動止損|跟踪止损|追踪止损|stop/loss|止损(?:\s*\(stop/loss\))?|止損|tp|止盈(?:\s*\(tp\))?)\s*[:：]\s*(.*)$`)
 var cardNumber = regexp.MustCompile(`[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?`)
 
+var unresolvedProtection = regexp.MustCompile(`上套(?:保)?|套保`)
+var managementAlternative = regexp.MustCompile(`(?i)或者|或是|\bor\b`)
+var exitWording = regexp.MustCompile(`(?i)减仓|減倉|止盈|平仓|平倉|\b(?:reduce|trim|close|exit)\b`)
+var holdWording = regexp.MustCompile(`(?i)持有|持倉|持仓|\bhold\b`)
+
+// A recognized fragment is not permission to execute only part of an
+// unresolved instruction. This boundary is shared by deterministic and AI paths.
+func unresolvedManagement(text string) string {
+	if unresolvedProtection.MatchString(text) {
+		return "management contains undefined protection wording (上套/套保); explicit stop target required"
+	}
+	if managementAlternative.MatchString(text) && exitWording.MatchString(text) && (sourceBreakeven.MatchString(text) || holdWording.MatchString(text)) {
+		return "management offers alternative exit/protection/holding actions; no unique action selected"
+	}
+	return ""
+}
+
 func currentPresetText(segments []SourceSegment) string {
 	var parts []string
 	for _, s := range segments {
@@ -135,6 +152,12 @@ func applyPresetPolicy(interp *SourceInterpretation, msg *store.DiscordMessage, 
 	text := currentPresetText(sources)
 	for _, ins := range interp.Flatten() {
 		scope := evidenceScopeForSymbol(text, ins.Symbol)
+		if preset.ID == "tyler_v1" && !sourceOpen.MatchString(sourceCancel.ReplaceAllString(scope, "")) {
+			if reason := unresolvedManagement(scope); reason != "" {
+				ins.Classification, ins.Reasoning = ClassificationAmbiguous, reason
+				continue
+			}
+		}
 		if preset.StrictManagement && (ins.Action == ActionReduce || ins.Action == ActionClose) && discretionaryExit.MatchString(scope) {
 			ins.Classification = ClassificationAmbiguous
 			ins.Reasoning = "preset requires explicit management, not a discretionary suggestion"

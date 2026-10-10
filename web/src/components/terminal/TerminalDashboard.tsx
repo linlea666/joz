@@ -1,3 +1,4 @@
+import { CopyTradeRecognitionStatus } from '../trader/CopyTradeRecognitionStatus'
 import { useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties } from 'react'
@@ -368,7 +369,7 @@ export function TerminalDashboard({
               </select>
             )}
             <span style={{ color: running ? 'var(--tm-up)' : 'var(--tm-muted)' }}>{running ? '● running' : '○ stopped'}</span>
-            <span className="tm-sc" style={{ color: 'var(--tm-muted)' }}>cycle</span><span className="tm-mono" style={{ color: 'var(--tm-ink)' }}>{status?.call_count ?? '—'}</span>
+            {status?.recognition_stats_scope ? <CopyTradeRecognitionStatus status={status} /> : <><span className="tm-sc" style={{ color: 'var(--tm-muted)' }}>cycle</span><span className="tm-mono" style={{ color: 'var(--tm-ink)' }}>{status?.call_count ?? '—'}</span></>}
             <span className="tm-px" style={{ fontSize: 12, color: 'var(--tm-ink)' }}>{clock}</span>
           </span>,
           navSlot,
@@ -394,7 +395,7 @@ export function TerminalDashboard({
         )}
         {/* first-run reassurance — a fresh autopilot looks idle for its first
             minute (the AI is reading the market); tell newcomers what to expect */}
-        {!on && status?.is_running && (status.call_count ?? 0) <= 1 && !status.safe_mode && (
+        {!on && status?.is_running && !status.recognition_stats_scope && (status.call_count ?? 0) <= 1 && !status.safe_mode && (
           <div className="tm-mono" style={{ display: 'flex', gap: 10, alignItems: 'center', margin: '8px 14px 0', padding: '8px 12px', fontSize: 11, border: '1px solid var(--tm-up)', color: 'var(--tm-ink)', background: 'rgba(40,140,80,0.06)', flexWrap: 'wrap' }}>
             <span style={{ fontWeight: 600, color: 'var(--tm-up)' }}>Your AI is live.</span>
             <span style={{ color: 'var(--tm-ink-2)' }}>

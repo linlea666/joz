@@ -225,6 +225,9 @@ func (CopyTradeReplay) TableName() string { return "copytrade_replays" }
 // CopyTradeReplayItem stores the complete per-message dry-run result,
 // including prompts and model output for post-restart troubleshooting.
 type CopyTradeReplayItem struct {
+	EvaluationsJSON    string    `gorm:"type:text" json:"evaluations_json,omitempty"`
+	ProcessingPath     string    `json:"processing_path,omitempty"`
+	ProcessingModel    string    `json:"processing_model,omitempty"`
 	RulesSnapshotJSON  string    `gorm:"type:text" json:"rules_snapshot_json,omitempty"`
 	EvaluationScope    string    `json:"evaluation_scope,omitempty"`
 	UncheckedGatesJSON string    `gorm:"type:text" json:"unchecked_gates_json,omitempty"`

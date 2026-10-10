@@ -273,6 +273,19 @@ export interface CopyTradeAIStat {
 
 // Dry-run recognition replay (accuracy testing, no execution/persistence).
 export interface CopyTradeReplayItem {
+  evaluations?: {
+    action: string
+    symbol: string
+    canonical?: string
+    source: CopyTradeReplayCheck
+    parameters: CopyTradeReplayCheck
+    market: CopyTradeReplayCheck
+    contract: CopyTradeReplayCheck
+    market_price?: number
+    checked_at: string
+  }[]
+  processing_path?: string
+  processing_model?: string
   rules_snapshot_json?: string
   evaluation_scope?: string
   unchecked_gates?: string[]
@@ -301,6 +314,18 @@ export interface CopyTradeReplayItem {
   user_prompt?: string
   raw_response?: string
   parsed_json?: string
+}
+
+export interface CopyTradeReplayCheck {
+  status:
+    | 'passed'
+    | 'failed'
+    | 'unavailable'
+    | 'needs_price'
+    | 'not_checked'
+    | 'not_required'
+  code?: string
+  detail?: string
 }
 
 export interface CopyTradeAIRun {

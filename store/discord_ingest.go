@@ -98,6 +98,16 @@ func (s *DiscordMessageStore) CommitInbound(event *DiscordInbound, msg *DiscordM
 		if err := tx.Create(event).Error; err != nil {
 			return err
 		}
+		progress := &DiscordSourceState{ChannelID: event.ChannelID, State: "unknown", UpdatedAt: event.ReceivedAt}
+		if event.Kind == "MESSAGE_CREATE" {
+			progress.LastMessageID = event.MessageID
+		}
+		if !event.Baseline {
+			progress.LastEventAt = event.ReceivedAt
+		}
+		if err := saveSourceProgress(tx, progress, false); err != nil {
+			return err
+		}
 		if changed && !event.Baseline {
 			for _, recipient := range recipients {
 				recipient.EventID, recipient.MessageJSON, recipient.Status = event.EventID, event.MessageJSON, DiscordMsgPending
@@ -182,7 +192,22 @@ func (s *DiscordMessageStore) PendingDeliveries() (int64, error) {
 	return n, err
 }
 func (s *DiscordMessageStore) SaveSourceState(state *DiscordSourceState) error {
-	return s.db.Save(state).Error
+	return saveSourceProgress(s.db, state, true)
+}
+
+// Receipt progress is distinct from readiness. A late channel-state frame must
+// not rewind a committed message or erase its receipt time. Snowflakes are
+// unsigned decimal strings, compared without signed-integer overflow.
+func saveSourceProgress(db *gorm.DB, state *DiscordSourceState, control bool) error {
+	updates := map[string]interface{}{
+		"last_message_id": gorm.Expr("CASE WHEN discord_source_states.last_message_id IS NULL OR LENGTH(excluded.last_message_id) > LENGTH(discord_source_states.last_message_id) OR (LENGTH(excluded.last_message_id) = LENGTH(discord_source_states.last_message_id) AND excluded.last_message_id > discord_source_states.last_message_id) THEN excluded.last_message_id ELSE discord_source_states.last_message_id END"),
+		"last_event_at":   gorm.Expr("CASE WHEN discord_source_states.last_event_at IS NULL OR excluded.last_event_at > discord_source_states.last_event_at THEN excluded.last_event_at ELSE discord_source_states.last_event_at END"),
+		"updated_at":      gorm.Expr("CASE WHEN discord_source_states.updated_at IS NULL OR excluded.updated_at > discord_source_states.updated_at THEN excluded.updated_at ELSE discord_source_states.updated_at END"),
+	}
+	if control {
+		updates["state"], updates["last_error"] = state.State, state.LastError
+	}
+	return db.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "channel_id"}}, DoUpdates: clause.Assignments(updates)}).Create(state).Error
 }
 func (s *DiscordMessageStore) SourceStates() ([]DiscordSourceState, error) {
 	var rows []DiscordSourceState

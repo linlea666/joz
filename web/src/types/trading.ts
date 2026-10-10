@@ -5,7 +5,16 @@ export interface SystemStatus {
   is_running: boolean
   start_time: string
   runtime_minutes: number
-  call_count: number
+  call_count: number | null
+  interpretation_model?: string
+  recognition_stats_scope?: 'retained_live_ai_runs'
+  recognition_stats_error?: string
+  recognition_stats?: {
+    model_calls: number
+    deterministic_runs: number
+    recognition_runs: number
+    earliest_run?: string
+  }
   initial_balance: number
   scan_interval: string
   stop_until: string

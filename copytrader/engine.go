@@ -84,6 +84,11 @@ type Engine struct {
 
 // NewEngine creates the engine (Start must be called to begin processing).
 func NewEngine(p EngineParams) *Engine {
+	// The client may resolve a provider default when no custom model is set.
+	// Record what CallWithRequest actually uses, not the empty form field.
+	if client, ok := p.LLM.(mcp.ClientEmbedder); ok && client.BaseClient() != nil {
+		p.ModelID, p.Provider = client.BaseClient().Model, client.BaseClient().Provider
+	}
 	events := NewEventLogger(p.Store, p.TraderID, p.Config.PrimaryChannelID)
 	e := &Engine{
 		traderID:   p.TraderID,
@@ -279,6 +284,14 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 		skip(SkipNeedsContext, "rule snapshot unavailable: "+err.Error())
 		return
 	}
+	// Only brand-new tasks can be discarded before interpretation. Either zero
+	// TTL disables this optimization; management may outlive an opening signal.
+	// Stored interpretations and uncertain execution continue through recovery.
+	if existing == nil && e.cfg.OpenSignalTTLSeconds > 0 && e.cfg.MgmtSignalTTLSeconds > 0 &&
+		IsExpired(latencyRef, time.Now().UTC(), time.Duration(max(e.cfg.OpenSignalTTLSeconds, e.cfg.MgmtSignalTTLSeconds))*time.Second) {
+		skip(SkipExpired, "expired before interpretation (both opening and management TTL); source retained for context")
+		return
+	}
 	if existing != nil && existing.Status == "retry_wait" && IsExpired(latencyRef, time.Now().UTC(), e.interpretationRetryTTL(msg, signalID)) {
 		skip(SkipExpired, "deferred interpretation expired before retry")
 		return
@@ -326,10 +339,17 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 		"error_message":        "",
 		"skip_reason":          "",
 	})
+	processingPath, processingModel := "stored_interpretation", ""
+	if run != nil {
+		processingPath, processingModel = "ai", run.Model
+		if strings.HasPrefix(run.Model, "deterministic:") {
+			processingPath = "deterministic"
+		}
+	}
 	e.events.Success(traceID, signalID, msg.MessageID, EvSignalClassified,
-		fmt.Sprintf("%s / %s %s %s (LLM %.1fs)", interp.Classification, interp.Action,
+		fmt.Sprintf("%s / %s %s %s ("+processingPath+" %.1fs)", interp.Classification, interp.Action,
 			interp.Symbol, interp.Direction, float64(timings.llmMs)/1000),
-		timings.llmMs, map[string]interface{}{"reasoning": interp.Reasoning, "warnings": interp.Warnings})
+		timings.llmMs, map[string]interface{}{"reasoning": interp.Reasoning, "warnings": interp.Warnings, "processing_path": processingPath, "model": processingModel})
 
 	if pipelineErr != nil {
 		return
@@ -821,11 +841,6 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 		StartedAt:         time.Now().UTC(),
 	}
 
-	if !dryRun {
-		e.events.Info(traceID, signalID, msg.MessageID, EvAIRequest,
-			fmt.Sprintf("LLM request (%s, %d images, prompt %d chars)", e.modelID, imageCount, len(userPrompt)), nil)
-	}
-
 	llmStart := time.Now()
 	var raw string
 	var callErr error
@@ -837,10 +852,15 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 		b, _ := json.Marshal(known)
 		raw = string(b)
 		run.Model = "deterministic:" + rules.Profile
+		run.Provider = "deterministic"
 		if rules.SourceMode == "chroma" {
 			run.Model = "deterministic:chroma"
 		}
 	} else {
+		if !dryRun {
+			e.events.Info(traceID, signalID, msg.MessageID, EvAIRequest,
+				fmt.Sprintf("LLM request (%s, %d images, prompt %d chars)", e.modelID, imageCount, len(userPrompt)), nil)
+		}
 		raw, callErr = e.llm.CallWithRequest(&mcp.Request{Messages: messages})
 	}
 	t.llmMs = time.Since(llmStart).Milliseconds()
@@ -892,8 +912,13 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 		if dbErr := e.st.CopyTrade().CreateAIRun(run); dbErr != nil {
 			return nil, run, t, fmt.Errorf("persist AI run: %w", dbErr)
 		}
-		e.events.Success(traceID, signalID, msg.MessageID, EvAIParsed,
-			fmt.Sprintf("LLM responded in %.1fs", float64(t.llmMs)/1000), t.llmMs, nil)
+		if known != nil {
+			e.events.Success(traceID, signalID, msg.MessageID, EvRuleMatched,
+				"deterministic interpretation ("+run.Model+")", t.llmMs, map[string]interface{}{"model": run.Model})
+		} else {
+			e.events.Success(traceID, signalID, msg.MessageID, EvAIParsed,
+				fmt.Sprintf("LLM responded in %.1fs", float64(t.llmMs)/1000), t.llmMs, map[string]interface{}{"model": run.Model})
+		}
 	}
 	return interp, run, t, nil
 }
