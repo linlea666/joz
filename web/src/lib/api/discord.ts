@@ -1,5 +1,7 @@
 import type {
   DiscordConfig,
+  ChannelNotificationConfig,
+  ChannelNotificationState,
   EmailDraft,
   EmailSettings,
   CopyTradePreset,
@@ -25,6 +27,46 @@ async function emailPayload(data: unknown) {
 }
 
 export const discordApi = {
+  async getChannelNotifications(): Promise<ChannelNotificationState> {
+    const result = await httpClient.get<ChannelNotificationState>(
+      `${API_BASE}/discord/channel-notifications`
+    )
+    if (!result.success || !result.data)
+      throw new Error(result.message || 'Failed to load channel notifications')
+    return result.data
+  },
+  async saveChannelNotifications(
+    config: ChannelNotificationConfig
+  ): Promise<ChannelNotificationState> {
+    const result = await httpClient.put<ChannelNotificationState>(
+      `${API_BASE}/discord/channel-notifications`,
+      {
+        revision: config.revision,
+        enabled: config.enabled,
+        recipient: config.recipient,
+        monitors: config.monitors.map(({ id, channel_id, label, enabled }) => ({
+          id,
+          channel_id,
+          label,
+          enabled,
+        })),
+      }
+    )
+    if (!result.success || !result.data)
+      throw new Error(result.message || 'Failed to save channel notifications')
+    return result.data
+  },
+  async testChannelNotificationEmail(
+    recipient: string
+  ): Promise<{ ok: boolean; error?: string }> {
+    const result = await httpClient.post<{ ok: boolean; error?: string }>(
+      `${API_BASE}/discord/channel-notifications/test-email`,
+      { recipient }
+    )
+    if (!result.success || !result.data)
+      throw new Error(result.message || 'Email test failed')
+    return result.data
+  },
   async getCopyTradeProfiles(): Promise<CopyTradePreset[]> {
     const result = await httpClient.get<{ profiles: CopyTradePreset[] }>(
       `${API_BASE}/copytrade/profiles`

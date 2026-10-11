@@ -228,7 +228,7 @@ export function DiscordEmailSettings({ language }: { language: Language }) {
           checked={draft.enabled}
           onChange={(e) => update({ enabled: e.target.checked })}
         />
-        {zh ? '启用邮件告警' : 'Enable email alerts'}
+        {zh ? '采集异常邮件告警' : 'Collection error email alerts'}
       </label>
       <div className="flex gap-3 flex-wrap">
         <button

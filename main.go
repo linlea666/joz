@@ -145,6 +145,8 @@ func main() {
 	// recipient when the token goes invalid (and again on recovery).
 	discordMonitor := discord.InitGlobalMonitor(st, discordSource)
 	discordMonitor.Start()
+	channelNotifier := discord.NewChannelNotifier(st, discordSource.NotificationEpoch())
+	channelNotifier.Start()
 
 	// Daily retention cleanup for copy-trading data (events/signals/AI runs/
 	// raw messages/media cache) so the tables never grow without bound.
@@ -215,6 +217,7 @@ func main() {
 	traderManager.StopAll()
 
 	// Stop Discord source and connection monitor
+	channelNotifier.Stop()
 	discordMonitor.Stop()
 	discordSource.Stop()
 	logger.Info("✅ System shut down safely")
@@ -246,6 +249,9 @@ func runCopyTradeRetentionLoop(st *store.Store) {
 	mediaDays := retentionDays("DISCORD_MEDIA_RETENTION_DAYS", 30)
 
 	runOnce := func() {
+		if err := st.CleanChannelNotifications(); err != nil {
+			logger.Warn("Channel notification retention failed")
+		}
 		if n, err := st.CopyTrade().CleanOldEvents(eventDays); err != nil {
 			logger.Warnf("⚠️ CopyTrade retention: events cleanup failed: %v", err)
 		} else if n > 0 {

@@ -6,6 +6,7 @@ import os
 import signal
 import time
 import traceback
+import uuid
 from contextlib import suppress
 
 import discord
@@ -40,9 +41,12 @@ class Gateway(discord.Client):
     async def on_ready(self):
         if not self.current() or self.owner.halted:
             return
+        self.owner.invalidate_notifications()
         self.owner.state = 'recovering'
         for channel in self.owner.channels:
+            self.owner.channel_generations[channel] = self.owner.channel_generations.get(channel, 0) + 1
             self.owner.box.begin_recovery(channel)
+            self.owner.channel_states[channel] = ('recovering', '')
         # Get the CURRENT active-card inventory on every new session. Resume
         # has its own callback and does not trigger this bounded REST repair.
         with suppress(ConnectionError, OSError):
@@ -51,15 +55,18 @@ class Gateway(discord.Client):
     async def on_disconnect(self):
         if self.current() and not self.owner.halted:
             self.owner.last_heartbeat = None
+            self.owner.invalidate_notifications()
             self.owner.state = 'reconnecting'
 
     async def on_resumed(self):
         if not self.current() or self.owner.halted:
             return
-        self.owner.state = 'recovering' if any(self.owner.box.recovery(ch) for ch in self.owner.channels) else 'connected'
-        if self.owner.state == 'recovering':
+        incomplete = {ch for ch in self.owner.channels if self.owner.box.recovery(ch)}
+        self.owner.state = 'recovering' if any(self.owner.channels[ch].get('trade_recovery', True) for ch in incomplete) else 'connected'
+        if incomplete:
             with suppress(ConnectionError, OSError):
                 await self.owner.send({'type':'refresh'})
+        self.owner.notification_since = {ch:time.time() for ch in self.owner.channels if self.owner.channel_states.get(ch, ('',))[0]=='ready'}
         # A successful SDK Resume replays events; no REST history polling.
 
 
@@ -97,6 +104,16 @@ class Worker:
         self.wake = asyncio.Event()
         self.halted = False
         self.recovery_barrier = False
+        self.recovery_pending = set()
+        self.notification_since = {}
+        self.notification_epoch = ''
+        self.notification_supported = False
+        self.notification_instance = str(uuid.uuid4())
+        self.channel_generations = {}
+
+    def invalidate_notifications(self):
+        self.notification_since.clear()
+        self.notification_instance = str(uuid.uuid4())
 
     def capture(self, raw):
         try:
@@ -114,8 +131,10 @@ class Worker:
                 if not isinstance(data, dict):
                     raise ValueError('invalid ready')
                 self.session_id = data.get('session_id')
+                self.invalidate_notifications()
                 self.state = 'recovering'
                 for channel in self.channels:
+                    self.channel_generations[channel] = self.channel_generations.get(channel, 0) + 1
                     self.box.begin_recovery(channel)
                     self.channel_states[channel] = ('recovering', '')
                 self.recovery_barrier = True
@@ -128,6 +147,8 @@ class Worker:
             channel = str(data['channel_id'])
             if channel not in self.channels:
                 return
+            if not self.channels[channel].get('trade_recovery', True) and kind != 'MESSAGE_CREATE':
+                return
             if any(key in data and not isinstance(data[key], typ) for key,typ in (('content',str),('attachments',list),('embeds',list),('author',dict))):
                 raise ValueError('invalid message fields')
             ids = data.get('ids') if kind == 'MESSAGE_DELETE_BULK' else [data.get('id')]
@@ -136,7 +157,9 @@ class Worker:
             # Validate all IDs before appending any bulk event.
             for message_id in ids:
                 self.box.append(kind, dict(data,id=str(message_id),channel_id=channel),
-                                session=self.session_id, sequence=packet.get('s'), config_version=self.version)
+                                session=self.session_id, sequence=packet.get('s'), config_version=self.version, origin='gateway',
+                                notification_epoch=self.notification_epoch, notification_instance=self.notification_instance,
+                                notification_realtime=bool(self.notification_supported and self.writer and self.configured.is_set() and self.state=='connected' and kind=='MESSAGE_CREATE' and self.channel_states.get(channel, ('',))[0]=='ready' and channel in self.notification_since and snowflake_time(message_id)>=self.notification_since[channel]))
             self.wake.set()
         except (ValueError, TypeError, KeyError) as exc:
             self.fail_buffer(exc, 'MESSAGE_PAYLOAD_INVALID')
@@ -220,6 +243,11 @@ class Worker:
                     for channel in self.channels:
                         await self.channel_status(channel, 'recovering')
                     self.recovery_barrier = False
+                # Never turn buffered receipts from an earlier process/connection
+                # into live email, even when the Go backend did not restart.
+                event['notification_realtime'] = bool(event.get('notification_realtime') and event.get('notification_instance') == self.notification_instance)
+                if event['notification_realtime']:
+                    event['notification_payload'] = event['payload']
                 event['payload'] = await self.hydrate(event)
                 future = asyncio.get_running_loop().create_future()
                 self.acks[event['event_id']] = future
@@ -238,55 +266,98 @@ class Worker:
                 self.last_error = 'event delivery pending; retrying without dropping receipt'
                 await asyncio.sleep(2)
 
-    def schedule_recovery(self):
-        # Freeze the oldest unverified checkpoint BEFORE processing new frames.
-        for channel in self.channels:
+    def schedule_recovery(self, channels=None):
+        # Incremental subscriptions cannot put healthy trading channels behind
+        # a new notification channel's permissions/history barrier.
+        selected = set(self.channels if channels is None else channels)
+        for channel in selected:
             self.box.begin_recovery(channel)
             self.channel_states[channel] = ('recovering', '')
-        if self.recovery_task and not self.recovery_task.done():
-            self.recovery_task.cancel()
-        self.recovery_task = asyncio.create_task(self.recover())
+            self.notification_since.pop(channel, None)
+            self.channel_generations[channel] = self.channel_generations.get(channel, 0) + 1
+        self.recovery_pending.update(selected)
+        if self.recovery_task is None or self.recovery_task.done():
+            self.recovery_task = asyncio.create_task(self.drain_recovery())
 
-    async def recover(self):
-        for channel in list(self.channels):
+    async def drain_recovery(self):
+        while self.recovery_pending:
+            selected = self.recovery_pending.copy()
+            self.recovery_pending.difference_update(selected)
+            await self.recover(selected)
+
+    async def recover(self, channels=None):
+        for channel in list(self.channels if channels is None else channels):
             if channel not in self.channels:
                 continue
+            generation = self.channel_generations.get(channel, 0)
+            client = self.client
+            def current():
+                return channel in self.channels and self.channel_generations.get(channel, 0) == generation and self.client is client
+            trade_recovery = self.channels[channel].get('trade_recovery', True)
             try:
                 await self.channel_status(channel, 'recovering')
-                obj = self.client.get_channel(int(channel)) or await self.client.fetch_channel(int(channel))
+                obj = (client.get_channel(int(channel)) if trade_recovery else None) or await client.fetch_channel(int(channel))
+                if not current():
+                    continue
                 guild = getattr(obj, 'guild', None)
                 if guild:
                     await guild.subscribe(typing=True, activities=False, threads=False, member_updates=False)
+                if not current():
+                    continue
+                if not trade_recovery:
+                    # Permission/subscription validation only; never read history
+                    # for a channel whose sole consumer is realtime email.
+                    me = getattr(guild, 'me', None) if guild else None
+                    if me is not None and hasattr(obj, 'permissions_for') and not obj.permissions_for(me).view_channel:
+                        raise PermissionError('channel not visible')
+                    self.box.end_recovery(channel, True)
+                    self.notification_since[channel] = time.time()
+                    await self.channel_status(channel, 'ready')
+                    continue
                 start, baseline_at, prior_state = self.box.begin_recovery(channel)
                 if start != '0':
                     history, complete = await bounded_history(self.fetch_history, channel, start)
                 else:
                     history, complete = await bounded_history(self.fetch_history, channel, baseline_snowflake(baseline_at), include_baseline=True)
+                if not current():
+                    continue
                 for msg in history:
                     msg['channel_id'] = channel
-                    self.box.append('MESSAGE_CREATE', msg, baseline=snowflake_time(msg['id']) < baseline_at, config_version=self.version)
+                    self.box.append('MESSAGE_CREATE', msg, baseline=snowflake_time(msg['id']) < baseline_at, config_version=self.version, origin='recovery')
                 for card in self.active_cards:
                     if card['channel_id'] == channel:
                         try:
                             msg = await self.client.http.get_message(int(channel), int(card['message_id']))
+                            if not current():
+                                break
                             self.box.append('MESSAGE_UPDATE', dict(msg, channel_id=channel), config_version=self.version)
                         except discord.NotFound:
+                            if not current():
+                                break
                             self.box.append('MESSAGE_DELETE', {'channel_id':channel, 'id':card['message_id']}, config_version=self.version)
+                if not current():
+                    continue
                 watermark = self.box.watermark()
                 self.wake.set()
-                while not self.box.drained(watermark):
+                while current() and not self.box.drained(watermark):
                     await asyncio.sleep(0.1)
+                if not current():
+                    continue
                 if not self.box.checkpoint(channel):
                     self.box.advance(channel, '0', baseline_at)
                 self.box.end_recovery(channel, complete)
+                if complete:
+                    self.notification_since[channel] = time.time()
                 await self.channel_status(channel, 'ready' if complete else 'gap',
                                           '' if complete else 'history exceeds 1000 messages; source review required')
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if not current():
+                    continue
                 self.box.end_recovery(channel, False)
                 status = getattr(exc, 'status', None)
-                await self.channel_status(channel, 'forbidden' if status in (403, 404) else 'gap',
+                await self.channel_status(channel, 'forbidden' if status in (403, 404) or isinstance(exc, PermissionError) else 'gap',
                                           'source recovery incomplete')
 
         if not self.halted and self.state not in {'reconnecting', 'connection_failed', 'auth_invalid', 'disabled'}:
@@ -325,11 +396,14 @@ class Worker:
         async with self.config_lock:
             token = data.get('token', '') if data.get('enabled') else ''
             channels = data.get('channels', {})
-            changed = set(channels) != set(self.channels)
+            affected = {ch for ch in channels if ch not in self.channels or channels[ch].get('trade_recovery', True) != self.channels[ch].get('trade_recovery', True)}
+            changed = set(channels) != set(self.channels) or bool(affected)
             token_changed = token != self.token
             restart = token_changed or bool(token and (self.client_task is None or self.client_task.done()) and self.state != 'auth_invalid' and not self.halted)
             if restart:
                 self.generation += 1
+                self.recovery_pending.clear()
+                self.invalidate_notifications()
                 if self.recovery_task:
                     self.recovery_task.cancel()
                     await asyncio.gather(self.recovery_task,return_exceptions=True)
@@ -339,7 +413,17 @@ class Worker:
                     self.client_task.cancel()
                     await asyncio.gather(self.client_task,return_exceptions=True)
             self.diagnostics_enabled = data.get('diagnostics_v1') is True
+            for ch in set(self.channels)-set(channels):
+                self.notification_since.pop(ch, None)
+                self.channel_generations[ch] = self.channel_generations.get(ch, 0) + 1
+                self.channel_states.pop(ch, None)
+                self.recovery_pending.discard(ch)
             self.channels, self.active_cards = channels, data.get('active_cards', [])
+            epoch = data.get('notification_epoch', '')
+            if epoch != self.notification_epoch or restart or not self.configured.is_set():
+                self.notification_since = {ch:time.time() for ch in channels if self.channel_states.get(ch, ('',))[0]=='ready'}
+            self.notification_epoch = epoch
+            self.notification_supported = data.get('channel_notification_v1') is True
             # Backend progress is only a lower bound; local outbox remains the
             # authority for unacknowledged receipts across process restarts.
             for item in data.get('checkpoints', []):
@@ -359,13 +443,13 @@ class Worker:
                 self.state = 'connecting' if token else 'disabled'
                 self.client = Gateway(self) if token else None
                 self.client_task = asyncio.create_task(self.run_gateway(self.client, token)) if token else None
-            elif (changed or self.state == "recovering") and not self.halted and self.client and self.client_task and not self.client_task.done() and self.client.is_ready():
-                self.schedule_recovery()
+            elif (changed or self.state == "recovering" or any(self.channel_states.get(ch, ("",))[0] != "ready" for ch in channels)) and not self.halted and self.client and self.client_task and not self.client_task.done() and self.client.is_ready():
+                self.schedule_recovery(affected | {ch for ch in channels if self.channel_states.get(ch, ('',))[0] != 'ready'})
             self.configured.set()
             for ch, (state, error) in list(self.channel_states.items()):
                 if ch in channels:
                     await self.channel_status(ch, state, error)
-            return {'applied_version': self.version}
+            return {'applied_version': self.version, 'channel_notification_v1': True}
 
     async def request(self, frame):
         try:
@@ -462,6 +546,7 @@ class Worker:
             except (OSError, ConnectionError, ValueError):
                 pass
             finally:
+                self.invalidate_notifications()
                 if self.writer:
                     self.writer.close()
                 self.writer = None

@@ -225,3 +225,127 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):await task
+
+    async def test_notification_realtime_and_resume_boundary(self):
+        import time
+        from core import baseline_snowflake
+        from unittest.mock import AsyncMock
+        w=self.worker;w.writer=object();w.configured.set();w.state='connected'
+        w.notification_supported=True;w.notification_epoch='backend-1'
+        w.notification_since={'200':time.time()-1};w.channel_states={'200':('ready','')}
+        mid=baseline_snowflake(time.time())
+        w.capture({'op':0,'t':'MESSAGE_CREATE','d':{'id':mid,'channel_id':'200'}})
+        event=w.box.next();self.assertTrue(event['notification_realtime'])
+        self.assertEqual(event['notification_epoch'],'backend-1');w.box.ack(event['event_id'])
+        gateway=Gateway(w);w.client=gateway;w.send=AsyncMock()
+        await gateway.on_disconnect()
+        w.capture({'op':0,'t':'MESSAGE_CREATE','d':{'id':mid,'channel_id':'200'}})
+        event=w.box.next();self.assertFalse(event['notification_realtime']);w.box.ack(event['event_id'])
+        await gateway.on_resumed()
+        w.capture({'op':0,'t':'MESSAGE_CREATE','d':{'id':mid,'channel_id':'200'}})
+        self.assertFalse(w.box.next()['notification_realtime'])
+        await gateway.close()
+
+    async def test_notification_only_permission_check_never_fetches_history(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        w=self.worker;w.channels={'200':{'trade_recovery':False}};w.send=AsyncMock()
+        w.client=SimpleNamespace(fetch_channel=AsyncMock(return_value=SimpleNamespace(guild=None)))
+        w.fetch_history=AsyncMock(side_effect=AssertionError('no notification history'))
+        await w.recover()
+        self.assertEqual(w.channel_states['200'][0],'ready')
+        w.fetch_history.assert_not_called();self.assertEqual(w.box.count(),0)
+        w.capture({'op':0,'t':'MESSAGE_UPDATE','d':{'id':'9','channel_id':'200'}})
+        self.assertEqual(w.box.count(),0)
+
+    async def test_adding_notification_leaves_trade_channel_ready(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        w=self.worker;w.send=AsyncMock();w.token='same';w.state='connected'
+        w.channels={'200':{'trade_recovery':True}};w.channel_states={'200':('ready','')}
+        w.client=SimpleNamespace(is_ready=lambda:True)
+        w.client_task=asyncio.create_task(asyncio.sleep(100))
+        w.schedule_recovery=lambda channels=None:setattr(w,'selected_recovery',channels)
+        try:
+            await w.configure({'token':'same','enabled':True,'version':'new',
+                'channels':{'200':{'trade_recovery':True},'300':{'trade_recovery':False}},
+                'notification_epoch':'boot','channel_notification_v1':True})
+            self.assertEqual(w.selected_recovery,{'300'})
+            self.assertEqual(w.channel_states['200'][0],'ready')
+            self.assertEqual(w.state,'connected')
+        finally:
+            w.client_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):await w.client_task
+
+    async def test_removed_channel_cannot_be_marked_ready_by_old_check(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        w=self.worker;w.channels={'200':{'trade_recovery':False}};w.send=AsyncMock()
+        entered=asyncio.Event();release=asyncio.Event()
+        async def fetch(_):
+            entered.set();await release.wait();return SimpleNamespace(guild=None)
+        w.client=SimpleNamespace(fetch_channel=fetch)
+        recovery=asyncio.create_task(w.recover())
+        await entered.wait()
+        await w.configure({'enabled':False,'channels':{},'version':'removed'})
+        # Re-add the same ID with a new verification generation.
+        await w.configure({'enabled':False,'channels':{'200':{'trade_recovery':False}},'version':'readded'})
+        release.set();await recovery
+        self.assertEqual(w.channel_states['200'][0],'recovering')
+        self.assertNotIn('200',w.notification_since)
+
+    async def test_notification_snapshot_and_collector_restart_boundary(self):
+        from unittest.mock import AsyncMock
+        w=self.worker;w.writer=object();w.configured.set()
+        original={'id':'900','channel_id':'200','author':{'id':'7'},'timestamp':'2026-10-09T12:00:00Z','content':'first'}
+        w.box.append('MESSAGE_CREATE',original,notification_realtime=True,notification_epoch='same-go',notification_instance=w.notification_instance)
+        w.box.cache(dict(original,content='edited',edited_timestamp='2026-10-09T12:01:00Z'))
+        sent=[]
+        async def send(frame):
+            sent.append(frame['data']);w.acks[frame['data']['event_id']].set_result(None)
+        w.send=send
+        task=asyncio.create_task(w.deliver())
+        try:
+            for _ in range(20):
+                if sent:break
+                await asyncio.sleep(.01)
+            self.assertTrue(sent[0]['notification_realtime'])
+            self.assertEqual(sent[0]['notification_payload']['content'],'first')
+            self.assertEqual(sent[0]['payload']['content'],'edited')
+            w.box.append('MESSAGE_CREATE',original,notification_realtime=True,notification_epoch='same-go',notification_instance='previous-worker')
+            w.wake.set()
+            for _ in range(20):
+                if len(sent)>1:break
+                await asyncio.sleep(.01)
+            self.assertFalse(sent[1]['notification_realtime'])
+        finally:
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):await task
+
+    async def test_notification_gap_does_not_put_trade_route_in_recovery_on_resume(self):
+        from unittest.mock import AsyncMock
+        w=self.worker;w.channels={'200':{'trade_recovery':True},'300':{'trade_recovery':False}}
+        w.channel_states={'200':('ready',''),'300':('forbidden','no access')}
+        w.box.begin_recovery('300');w.send=AsyncMock()
+        gateway=Gateway(w);w.client=gateway
+        await gateway.on_resumed()
+        self.assertEqual(w.state,'connected')
+        self.assertEqual(w.channel_states['200'][0],'ready')
+        w.send.assert_awaited_once_with({'type':'refresh'})
+        await gateway.close()
+
+    async def test_local_ipc_reconnect_reestablishes_notification_boundary_without_gateway_restart(self):
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+        w=self.worker;w.send=AsyncMock();w.token='same';w.state='connected'
+        w.channel_states={'200':('ready','')};w.notification_epoch='same-go'
+        w.client=SimpleNamespace(is_ready=lambda:True);w.client_task=asyncio.create_task(asyncio.sleep(100))
+        w.invalidate_notifications();w.configured.clear()
+        try:
+            await w.configure({'enabled':True,'token':'same','channels':{'200':{}},'version':'v', 'notification_epoch':'same-go','channel_notification_v1':True})
+            self.assertIn('200',w.notification_since)
+            self.assertIsNone(w.recovery_task)
+            self.assertEqual(w.state,'connected')
+        finally:
+            w.client_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):await w.client_task

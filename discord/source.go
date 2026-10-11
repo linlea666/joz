@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"nofx/logger"
 	"nofx/store"
 )
@@ -60,16 +61,20 @@ type wireFrame struct {
 	Error      string          `json:"error,omitempty"`
 }
 type GatewayEvent struct {
-	ConfigVersion string          `json:"config_version"`
-	Session       string          `json:"session,omitempty"`
-	Sequence      int64           `json:"sequence,omitempty"`
-	EventID       string          `json:"event_id"`
-	Kind          string          `json:"kind"`
-	ChannelID     string          `json:"channel_id"`
-	MessageID     string          `json:"message_id"`
-	ReceivedAt    time.Time       `json:"received_at"`
-	Baseline      bool            `json:"baseline"`
-	Payload       json.RawMessage `json:"payload"`
+	Origin               string          `json:"origin,omitempty"`
+	NotificationRealtime bool            `json:"notification_realtime,omitempty"`
+	NotificationEpoch    string          `json:"notification_epoch,omitempty"`
+	NotificationPayload  json.RawMessage `json:"notification_payload,omitempty"`
+	ConfigVersion        string          `json:"config_version"`
+	Session              string          `json:"session,omitempty"`
+	Sequence             int64           `json:"sequence,omitempty"`
+	EventID              string          `json:"event_id"`
+	Kind                 string          `json:"kind"`
+	ChannelID            string          `json:"channel_id"`
+	MessageID            string          `json:"message_id"`
+	ReceivedAt           time.Time       `json:"received_at"`
+	Baseline             bool            `json:"baseline"`
+	Payload              json.RawMessage `json:"payload"`
 }
 type sourceSubscription struct {
 	done        chan struct{}
@@ -79,29 +84,34 @@ type sourceSubscription struct {
 	stop        chan struct{}
 }
 type SourceManager struct {
-	st                 *store.Store
-	mu                 sync.Mutex
-	ingestMu           sync.Mutex
-	writeMu            sync.Mutex
-	configMu           sync.Mutex
-	closed             bool
-	conn               net.Conn
-	listener           net.Listener
-	stop               chan struct{}
-	draining           map[string]<-chan struct{}
-	retainOnReload     map[string]bool
-	pendingRevocations map[string]bool
-	subscriptions      map[string]*sourceSubscription
-	pending            map[string]chan wireFrame
-	cfg                *store.DiscordConfig
-	storageError       string
-	status             CollectorStatus
-	serial             atomic.Uint64
-	wg                 sync.WaitGroup
+	notificationEpoch           string
+	notificationSupported       bool
+	appliedNotificationRevision uint64
+	desiredTradingVersion       string
+	appliedTradingVersion       string
+	st                          *store.Store
+	mu                          sync.Mutex
+	ingestMu                    sync.Mutex
+	writeMu                     sync.Mutex
+	configMu                    sync.Mutex
+	closed                      bool
+	conn                        net.Conn
+	listener                    net.Listener
+	stop                        chan struct{}
+	draining                    map[string]<-chan struct{}
+	retainOnReload              map[string]bool
+	pendingRevocations          map[string]bool
+	subscriptions               map[string]*sourceSubscription
+	pending                     map[string]chan wireFrame
+	cfg                         *store.DiscordConfig
+	storageError                string
+	status                      CollectorStatus
+	serial                      atomic.Uint64
+	wg                          sync.WaitGroup
 }
 
 func NewSourceManager(st *store.Store) *SourceManager {
-	return &SourceManager{pendingRevocations: map[string]bool{}, draining: map[string]<-chan struct{}{}, retainOnReload: map[string]bool{}, st: st, subscriptions: map[string]*sourceSubscription{}, pending: map[string]chan wireFrame{}, stop: make(chan struct{}), status: CollectorStatus{State: "disconnected"}}
+	return &SourceManager{notificationEpoch: uuid.NewString(), pendingRevocations: map[string]bool{}, draining: map[string]<-chan struct{}{}, retainOnReload: map[string]bool{}, st: st, subscriptions: map[string]*sourceSubscription{}, pending: map[string]chan wireFrame{}, stop: make(chan struct{}), status: CollectorStatus{State: "disconnected"}}
 }
 func (m *SourceManager) Start() error {
 	m.configMu.Lock()
@@ -199,6 +209,8 @@ func (m *SourceManager) serve(c net.Conn) {
 			m.conn = nil
 			m.status.State = "disconnected"
 			m.status.AppliedVersion = ""
+			m.appliedTradingVersion = ""
+			m.notificationSupported = false
 			for id, p := range m.pending {
 				p <- wireFrame{Error: "collector disconnected"}
 				delete(m.pending, id)
@@ -366,15 +378,26 @@ func (m *SourceManager) ReloadConfig() error {
 		Routes   []Route
 	}{cfg.Revision, routes})
 	h := sha256.Sum256(b)
-	version := hex.EncodeToString(h[:])
+	tradingVersion := hex.EncodeToString(h[:])
+	notifications, err := m.st.ChannelNotifications()
+	if err != nil {
+		return fmt.Errorf("notification configuration unreadable")
+	}
+	frozenNotifications, err := json.Marshal(notifications)
+	if err != nil {
+		return err
+	}
+	combined := sha256.Sum256(append(b, frozenNotifications...))
+	version := hex.EncodeToString(combined[:])
 	m.mu.Lock()
 	m.status.DesiredVersion = version
+	m.desiredTradingVersion = tradingVersion
 	m.mu.Unlock()
 	frozenRoutes, err := json.Marshal(routes)
 	if err != nil {
 		return err
 	}
-	if err = m.st.DiscordMessage().SaveSourceConfig(version, string(frozenRoutes)); err != nil {
+	if err = m.st.DiscordMessage().SaveSourceConfig(version, string(frozenRoutes), string(frozenNotifications)); err != nil {
 		return err
 	}
 	channels := map[string]interface{}{}
@@ -386,7 +409,7 @@ func (m *SourceManager) ReloadConfig() error {
 				if e != nil {
 					return e
 				}
-				channels[ch] = map[string]interface{}{"since": last}
+				channels[ch] = map[string]interface{}{"since": last, "trade_recovery": true}
 			}
 		}
 		contexts, e := m.st.CopyTrade().GetActiveContexts(r.TraderID)
@@ -397,6 +420,16 @@ func (m *SourceManager) ReloadConfig() error {
 			cards = append(cards, map[string]string{"channel_id": ctx.ChannelID, "message_id": ctx.RootMessageID})
 		}
 	}
+	if notifications.Enabled {
+		for _, monitor := range notifications.Monitors {
+			if !monitor.Enabled {
+				continue
+			}
+			if _, ok := channels[monitor.ChannelID]; !ok {
+				channels[monitor.ChannelID] = map[string]interface{}{"trade_recovery": false}
+			}
+		}
+	}
 	states, err := m.st.DiscordMessage().SourceStates()
 	if err != nil {
 		return err
@@ -405,9 +438,10 @@ func (m *SourceManager) ReloadConfig() error {
 	m.status.DesiredVersion = version
 	m.mu.Unlock()
 	var result struct {
-		AppliedVersion string `json:"applied_version"`
+		AppliedVersion        string `json:"applied_version"`
+		NotificationSupported bool   `json:"channel_notification_v1"`
 	}
-	err = m.call("configure", map[string]interface{}{"version": version, "token": string(cfg.Token), "enabled": cfg.Enabled, "channels": channels, "checkpoints": states, "active_cards": cards, "diagnostics_v1": true}, &result)
+	err = m.call("configure", map[string]interface{}{"version": version, "token": string(cfg.Token), "enabled": cfg.Enabled, "channels": channels, "checkpoints": states, "active_cards": cards, "diagnostics_v1": true, "notification_epoch": m.notificationEpoch, "channel_notification_v1": true}, &result)
 	if err != nil {
 		return err
 	}
@@ -416,6 +450,9 @@ func (m *SourceManager) ReloadConfig() error {
 	}
 	m.mu.Lock()
 	m.status.AppliedVersion = version
+	m.appliedTradingVersion = tradingVersion
+	m.notificationSupported = result.NotificationSupported
+	m.appliedNotificationRevision = notifications.Revision
 	m.mu.Unlock()
 	m.st.Logs().Record("discord", "config.applied", "info", "采集路由配置已确认应用", map[string]any{"config_version": version})
 	return nil
@@ -667,7 +704,7 @@ func (m *SourceManager) CheckExecution(traderID string, msg *store.DiscordMessag
 			return fmt.Errorf("CONFIG_REVOKED")
 		}
 		status := m.CollectorStatus()
-		if status.State != "connected" || status.AppliedVersion != status.DesiredVersion {
+		if status.State != "connected" || !m.tradingConfigApplied() {
 			return fmt.Errorf("SOURCE_NOT_READY")
 		}
 		if !m.HistoryComplete(traderID) {
@@ -774,7 +811,28 @@ func (m *SourceManager) Ingest(ev GatewayEvent) error {
 			}
 		}
 	}
-	event := &store.DiscordInbound{ConfigVersion: ev.ConfigVersion, Session: ev.Session, Sequence: ev.Sequence, EventID: ev.EventID, Kind: ev.Kind, ChannelID: ev.ChannelID, MessageID: ev.MessageID, ReceivedAt: ev.ReceivedAt, Payload: string(ev.Payload), Baseline: ev.Baseline}
+	event := &store.DiscordInbound{ConfigVersion: ev.ConfigVersion, Session: ev.Session, Sequence: ev.Sequence, EventID: ev.EventID, Kind: ev.Kind, ChannelID: ev.ChannelID, MessageID: ev.MessageID, ReceivedAt: ev.ReceivedAt, Origin: ev.Origin, NotificationRealtime: ev.NotificationRealtime, NotificationEpoch: ev.NotificationEpoch, Payload: string(ev.Payload), Baseline: ev.Baseline}
+	// Preserve the first wire contents for email even when trading hydration
+	// already knows a newer card revision. Bad optional email data never rejects
+	// a valid trading receipt.
+	if ev.NotificationRealtime {
+		raw := ev.NotificationPayload
+		if len(raw) == 0 {
+			raw = ev.Payload
+		}
+		var initial Message
+		if e := json.Unmarshal(raw, &initial); e == nil && initial.ID == ev.MessageID && initial.ChannelID == ev.ChannelID && !initial.Timestamp.IsZero() && initial.Author.ID != "" {
+			if original, e := ToStoreMessage(&initial, ev.ChannelID); e == nil {
+				b, e := json.Marshal(original)
+				if e == nil {
+					event.NotificationMessageJSON = string(b)
+				}
+			}
+		}
+		if event.NotificationMessageJSON == "" {
+			event.NotificationRealtime = false
+		}
+	}
 	if err := m.st.DiscordMessage().CommitInbound(event, msg, recipients); err != nil {
 		return err
 	}
@@ -805,7 +863,7 @@ func (m *SourceManager) RouteApplied(traderID string) bool {
 	exists := m.subscriptions[traderID] != nil
 	m.mu.Unlock()
 	status := m.CollectorStatus()
-	return exists && status.AppliedVersion != "" && status.AppliedVersion == status.DesiredVersion && status.State == "connected"
+	return exists && m.tradingConfigApplied() && status.State == "connected"
 }
 
 // Called only by the configuration-save path before replacing an engine.
@@ -853,4 +911,21 @@ func (m *SourceManager) PrepareShutdown() {
 	for id := range m.subscriptions {
 		m.retainOnReload[id] = true
 	}
+}
+
+// Notification-only configuration updates must not invalidate a trading route.
+// The original global version remains visible as collection application status.
+func (m *SourceManager) tradingConfigApplied() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.desiredTradingVersion == "" {
+		return m.status.AppliedVersion != "" && m.status.AppliedVersion == m.status.DesiredVersion
+	}
+	return m.appliedTradingVersion == m.desiredTradingVersion
+}
+func (m *SourceManager) NotificationEpoch() string { return m.notificationEpoch }
+func (m *SourceManager) NotificationsApplied(revision uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.notificationSupported && m.appliedNotificationRevision == revision
 }

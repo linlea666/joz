@@ -327,6 +327,9 @@ Both fields are required. After saving, the user must send /start in Telegram to
 				`No body needed. Clears the Telegram chat_id binding so the user can re-bind with /start.`,
 				s.handleUnbindTelegram)
 
+			protected.GET("/discord/channel-notifications", s.handleGetChannelNotifications)
+			protected.PUT("/discord/channel-notifications", s.handleSaveChannelNotifications)
+			protected.POST("/discord/channel-notifications/test-email", s.handleTestChannelNotificationEmail)
 			protected.GET("/discord/email", s.handleGetDiscordEmail)
 			protected.POST("/discord/email", s.handleSaveDiscordEmail)
 			// Discord copy-trading configuration (global token shared by all copy-trading traders)

@@ -13,20 +13,24 @@ import (
 // DiscordInbound is an immutable receipt and normalized revision. ACK is sent
 // only after this row and every recipient's delivery have committed together.
 type DiscordInbound struct {
-	ConfigVersion string    `json:"config_version"`
-	Session       string    `json:"session,omitempty"`
-	Sequence      int64     `json:"sequence,omitempty"`
-	ID            int64     `gorm:"primaryKey" json:"id"`
-	EventID       string    `gorm:"uniqueIndex;not null" json:"event_id"`
-	Kind          string    `json:"kind"`
-	ChannelID     string    `gorm:"index" json:"channel_id"`
-	MessageID     string    `gorm:"index" json:"message_id"`
-	Revision      int       `json:"revision"`
-	Payload       string    `json:"-"`
-	MessageJSON   string    `json:"-"`
-	Baseline      bool      `json:"baseline"`
-	ReceivedAt    time.Time `json:"received_at"`
-	CreatedAt     time.Time `json:"created_at"`
+	NotificationRealtime    bool      `json:"notification_realtime,omitempty"`
+	NotificationEpoch       string    `gorm:"index" json:"notification_epoch,omitempty"`
+	NotificationMessageJSON string    `json:"-"`
+	Origin                  string    `json:"origin,omitempty"`
+	ConfigVersion           string    `json:"config_version"`
+	Session                 string    `json:"session,omitempty"`
+	Sequence                int64     `json:"sequence,omitempty"`
+	ID                      int64     `gorm:"primaryKey" json:"id"`
+	EventID                 string    `gorm:"uniqueIndex;not null" json:"event_id"`
+	Kind                    string    `json:"kind"`
+	ChannelID               string    `gorm:"index" json:"channel_id"`
+	MessageID               string    `gorm:"index" json:"message_id"`
+	Revision                int       `json:"revision"`
+	Payload                 string    `json:"-"`
+	MessageJSON             string    `json:"-"`
+	Baseline                bool      `json:"baseline"`
+	ReceivedAt              time.Time `json:"received_at"`
+	CreatedAt               time.Time `json:"created_at"`
 }
 
 type DiscordDelivery struct {
@@ -116,6 +120,19 @@ func (s *DiscordMessageStore) CommitInbound(event *DiscordInbound, msg *DiscordM
 					recipient.SourceTime = *msg.EditedAt
 				}
 				if err := tx.Create(&recipient).Error; err != nil {
+					return err
+				}
+			}
+		}
+		// An unbound notification message is not a pending trade. Never alter
+		// a shared message while any trading delivery remains unfinished.
+		if msg != nil && len(recipients) == 0 {
+			var pending int64
+			if err := tx.Model(&DiscordDelivery{}).Where("event_id IN (?) AND status != ?", tx.Model(&DiscordInbound{}).Select("event_id").Where("channel_id=? AND message_id=?", msg.ChannelID, msg.MessageID), DiscordMsgDone).Count(&pending).Error; err != nil {
+				return err
+			}
+			if pending == 0 {
+				if err := tx.Model(&DiscordMessage{}).Where("id=? AND revision=? AND processing_status=?", msg.ID, msg.Revision, DiscordMsgPending).Update("processing_status", DiscordMsgDone).Error; err != nil {
 					return err
 				}
 			}
@@ -256,13 +273,18 @@ func (s *DiscordMessageStore) ResetTraderDeliveries(traderID string) error {
 // SourceConfigSnapshot binds events captured during backend outages to the
 // exact routing and interpretation rules acknowledged by that collector.
 type DiscordSourceConfig struct {
-	Version    string `gorm:"primaryKey"`
-	RoutesJSON string
-	CreatedAt  time.Time
+	Version           string `gorm:"primaryKey"`
+	RoutesJSON        string
+	NotificationsJSON string
+	CreatedAt         time.Time
 }
 
-func (s *DiscordMessageStore) SaveSourceConfig(version, routesJSON string) error {
-	return s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&DiscordSourceConfig{Version: version, RoutesJSON: routesJSON}).Error
+func (s *DiscordMessageStore) SaveSourceConfig(version, routesJSON string, notifications ...string) error {
+	snapshot := ""
+	if len(notifications) > 0 {
+		snapshot = notifications[0]
+	}
+	return s.db.Clauses(clause.OnConflict{DoNothing: true}).Create(&DiscordSourceConfig{Version: version, RoutesJSON: routesJSON, NotificationsJSON: snapshot}).Error
 }
 func (s *DiscordMessageStore) SourceConfig(version string) (string, error) {
 	var row DiscordSourceConfig

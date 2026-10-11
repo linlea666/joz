@@ -89,7 +89,7 @@ func NewDiscordMessageStore(db *gorm.DB) *DiscordMessageStore {
 }
 
 func (s *DiscordMessageStore) initTables() error {
-	return s.db.AutoMigrate(&DiscordMessage{}, &DiscordChannelBaseline{}, &DiscordInbound{}, &DiscordDelivery{}, &DiscordRoute{}, &DiscordSourceState{}, &DiscordSourceConfig{})
+	return s.db.AutoMigrate(&DiscordMessage{}, &DiscordChannelBaseline{}, &DiscordInbound{}, &DiscordDelivery{}, &DiscordRoute{}, &DiscordSourceState{}, &DiscordSourceConfig{}, &ChannelNotification{})
 }
 
 // UpsertResult describes what the upsert observed.

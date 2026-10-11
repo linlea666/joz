@@ -3,10 +3,12 @@ package notify
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"mime"
 	"net"
 	"net/smtp"
+	"net/textproto"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +16,19 @@ import (
 
 func SendWithConfig(cfg SMTPConfig, to, subject, body string) error {
 	return sendSMTP(cfg, to, subject, body, 20*time.Second, nil)
+}
+
+// SendBefore also respects a notification's receipt deadline. Existing alert
+// callers keep SendWithConfig's unchanged 20-second limit.
+func SendBefore(cfg SMTPConfig, to, subject, body string, deadline time.Time) error {
+	timeout := time.Until(deadline)
+	if timeout <= 0 {
+		return &DeliveryError{Kind: "permanent", Stage: "deadline", message: "notification deadline expired before SMTP"}
+	}
+	if timeout > 20*time.Second {
+		timeout = 20 * time.Second
+	}
+	return sendSMTP(cfg, to, subject, body, timeout, nil)
 }
 
 // tlsConfig is an internal test seam for a local CA, never an API option.
@@ -78,11 +93,39 @@ func sendSMTP(cfg SMTPConfig, to, subject, body string, timeout time.Duration, t
 }
 
 // Do not relay remote SMTP text: a hostile/erroring server may echo credentials.
+type DeliveryError struct {
+	Kind    string
+	Stage   string
+	message string
+}
+
+func (e *DeliveryError) Error() string { return e.message }
+
 func smtpError(stage string, err error) error {
-	if e, ok := err.(net.Error); ok && e.Timeout() {
-		return fmt.Errorf("SMTP %s timed out", stage)
+	kind := "permanent"
+	var reply *textproto.Error
+	if errors.As(err, &reply) {
+		if reply.Code >= 400 && reply.Code < 500 {
+			kind = "temporary"
+		}
+	} else if stage == "delivery" || stage == "write" {
+		kind = "uncertain"
+	} else {
+		var network net.Error
+		if errors.As(err, &network) {
+			kind = "temporary"
+		}
 	}
-	return fmt.Errorf("SMTP %s failed (check credentials, certificate and server settings)", stage)
+	// Certificate and authentication failures require operator intervention.
+	var cert *tls.CertificateVerificationError
+	if stage == "authentication" || errors.As(err, &cert) {
+		kind = "permanent"
+	}
+	message := fmt.Sprintf("SMTP %s failed (check credentials, certificate and server settings)", stage)
+	if e, ok := err.(net.Error); ok && e.Timeout() {
+		message = fmt.Sprintf("SMTP %s timed out", stage)
+	}
+	return &DeliveryError{Kind: kind, Stage: stage, message: message}
 }
 
 // buildMessage assembles RFC 5322 headers + body with UTF-8 subject encoding

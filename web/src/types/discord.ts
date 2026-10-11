@@ -379,3 +379,40 @@ export interface EmailSettings extends Omit<EmailDraft, 'password'> {
   password_set: boolean
   configured: boolean
 }
+
+export interface ChannelMonitor {
+  id: string
+  channel_id: string
+  label: string
+  enabled: boolean
+  generation: number
+  activated_at: string
+}
+export interface ChannelNotificationConfig {
+  revision: number
+  enabled: boolean
+  recipient: string
+  monitors: ChannelMonitor[]
+}
+export interface ChannelNotificationState {
+  config: ChannelNotificationConfig
+  smtp_configured: boolean
+  collection_enabled: boolean
+  credential_configured: boolean
+  applied: boolean
+  apply_error?: string
+  channels: {
+    monitor_id: string
+    channel_id: string
+    state: string
+    applied: boolean
+    last_message_at?: string
+    last_error?: string
+    last_result?: {
+      status: string
+      attempts: number
+      error?: string
+      updated_at: string
+    }
+  }[]
+}

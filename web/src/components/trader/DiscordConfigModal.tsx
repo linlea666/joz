@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { MessageSquare, Trash2, PlugZap, RefreshCw } from 'lucide-react'
 import { toast } from 'sonner'
+import { DiscordChannelNotifications } from './DiscordChannelNotifications'
 import { DiscordEmailSettings } from './DiscordEmailSettings'
 import { api } from '../../lib/api'
 import type { DiscordConfig } from '../../types'
@@ -439,6 +440,7 @@ export function DiscordConfigModal({
                 )}
 
                 <DiscordEmailSettings language={language} />
+                <DiscordChannelNotifications language={language} />
               </div>
 
               {/* Safety note */}

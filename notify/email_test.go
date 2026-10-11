@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"net/http/httptest"
@@ -119,6 +120,19 @@ func TestSMTPTransport(t *testing.T) {
 			err = sendSMTP(SMTPConfig{"127.0.0.1", n, tc.security, "sender@example.com", "private-secret"}, "recipient@example.com", "test", "body", timeout, trust)
 			if (err == nil) != tc.success {
 				t.Fatalf("success=%v error=%v", tc.success, err)
+			}
+			if tc.fault == "delivery" || tc.fault == "greeting" || tc.fault == "auth" || tc.fault == "recipient" || tc.fault == "cert" {
+				expected := "permanent"
+				if tc.fault == "delivery" {
+					expected = "uncertain"
+				}
+				if tc.fault == "greeting" {
+					expected = "temporary"
+				}
+				var classified *DeliveryError
+				if !errors.As(err, &classified) || classified.Kind != expected {
+					t.Fatalf("classification expected %s, got %v", expected, err)
+				}
 			}
 			if err != nil && strings.Contains(err.Error(), "private-secret") {
 				t.Fatal("credential leaked")

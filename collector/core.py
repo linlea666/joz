@@ -40,8 +40,8 @@ class Outbox:
         ''')
         self.max_bytes = max_bytes
 
-    def append(self, kind, payload, baseline=False, received_at=None, session=None, sequence=None, config_version=""):
-        event = {'event_id': str(uuid.uuid4()), 'kind': kind,
+    def append(self, kind, payload, baseline=False, received_at=None, session=None, sequence=None, config_version="", origin="unknown", notification_realtime=False, notification_epoch="", notification_instance=""):
+        event = {'event_id': str(uuid.uuid4()), 'kind': kind, 'origin':origin, 'notification_realtime':notification_realtime, 'notification_epoch':notification_epoch, 'notification_instance':notification_instance,
                  'channel_id': str(payload['channel_id']), 'message_id': str(payload['id']),
                  'received_at': received_at or utcnow(), 'config_version':config_version, 'session': session or '', 'sequence': sequence or 0, 'baseline': baseline, 'payload': payload}
         body = json.dumps(event, separators=(',', ':'))
