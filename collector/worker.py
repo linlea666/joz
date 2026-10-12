@@ -137,7 +137,10 @@ class Worker:
                     self.channel_generations[channel] = self.channel_generations.get(channel, 0) + 1
                     self.box.begin_recovery(channel)
                     self.channel_states[channel] = ('recovering', '')
-                self.recovery_barrier = True
+                # Identity distinguishes a new READY arriving while an older
+                # status publication is waiting for the local socket to drain.
+                self.recovery_barrier = object()
+                self.wake.set()
                 return
             if kind not in {'MESSAGE_CREATE','MESSAGE_UPDATE','MESSAGE_DELETE','MESSAGE_DELETE_BULK'}:
                 return
@@ -191,20 +194,49 @@ class Worker:
         async with self.write_lock:
             if self.writer is None:
                 raise ConnectionError('backend unavailable')
-            self.writer.write((json.dumps(frame, separators=(',', ':')) + '\n').encode())
+            barrier = self.recovery_barrier
+            if barrier and (frame is None or frame['type'] != 'hello'):
+                # Publish CURRENT states, without changing them. A recovery
+                # may already have completed with an empty outbox. Keep the
+                # snapshot and the following event ordered on the same stream.
+                for channel in self.channels:
+                    self.write_frame(self.channel_frame(channel))
+            else:
+                barrier = None
+            if frame is not None:
+                if frame['type'] == 'channel':
+                    # A READY or configuration change can occur while waiting
+                    # for write_lock. Never publish a captured, obsolete state.
+                    frame = self.channel_frame(frame['data']['channel_id'])
+                elif frame['type'] == 'event':
+                    event = frame['data']
+                    if event.get('notification_instance') != self.notification_instance:
+                        event['notification_realtime'] = False
+                        event.pop('notification_payload', None)
+                if frame is not None:
+                    self.write_frame(frame)
             await self.writer.drain()
+            if barrier and self.recovery_barrier is barrier:
+                self.recovery_barrier = False
+
+    def write_frame(self, frame):
+        # Only called while write_lock is held; no await before writer.write.
+        self.writer.write((json.dumps(frame, separators=(',', ':')) + '\n').encode())
+
+    def channel_frame(self, channel):
+        if channel not in self.channels:
+            return None
+        state, error = self.channel_states.get(channel, ('recovering', ''))
+        checkpoint = self.box.recovery(channel) or self.box.checkpoint(channel)
+        return {'type': 'channel', 'data': {
+            'channel_id': channel, 'state': state, 'last_error': error,
+            'last_message_id': checkpoint[0] if checkpoint else '', 'updated_at': utcnow()}}
 
     async def channel_status(self, channel, state, error=''):
-        checkpoint = self.box.checkpoint(channel)
-        recovery = self.box.recovery(channel)
-        if recovery:
-            checkpoint = recovery
         if self.channel_states.get(channel) != (state,error):
             self.diagnostics.record('channel.state', 'warn' if error else 'info',channel_id=channel,state=state)
         self.channel_states[channel] = (state, error)
-        await self.send({'type': 'channel', 'data': {
-            'channel_id': channel, 'state': state, 'last_error': error,
-            'last_message_id': checkpoint[0] if checkpoint else '', 'updated_at': utcnow()}})
+        await self.send(self.channel_frame(channel))
 
     async def fetch_history(self, channel, limit, before=None):
         return await self.client.http.logs_from(int(channel), limit, before=before)
@@ -229,6 +261,10 @@ class Worker:
     async def deliver(self):
         while True:
             try:
+                if self.recovery_barrier and self.writer and self.configured.is_set():
+                    # An empty outbox must not postpone publication until the
+                    # first live message. send() also checks again after awaits.
+                    await self.send(None)
                 event = self.box.next()
                 if not event or not self.writer or not self.configured.is_set():
                     self.wake.clear()
@@ -237,12 +273,6 @@ class Worker:
                     except asyncio.TimeoutError:
                         pass
                     continue
-                if self.recovery_barrier:
-                    # This frame precedes events on the same local stream, so
-                    # Go cannot dispatch a new arrival ahead of gap repair.
-                    for channel in self.channels:
-                        await self.channel_status(channel, 'recovering')
-                    self.recovery_barrier = False
                 # Never turn buffered receipts from an earlier process/connection
                 # into live email, even when the Go backend did not restart.
                 event['notification_realtime'] = bool(event.get('notification_realtime') and event.get('notification_instance') == self.notification_instance)
@@ -446,9 +476,11 @@ class Worker:
             elif (changed or self.state == "recovering" or any(self.channel_states.get(ch, ("",))[0] != "ready" for ch in channels)) and not self.halted and self.client and self.client_task and not self.client_task.done() and self.client.is_ready():
                 self.schedule_recovery(affected | {ch for ch in channels if self.channel_states.get(ch, ('',))[0] != 'ready'})
             self.configured.set()
-            for ch, (state, error) in list(self.channel_states.items()):
+            for ch in list(self.channel_states):
                 if ch in channels:
-                    await self.channel_status(ch, state, error)
+                    # Report the live state; do not write a snapshot back over
+                    # recovery progress made while a previous frame was sent.
+                    await self.send(self.channel_frame(ch))
             return {'applied_version': self.version, 'channel_notification_v1': True}
 
     async def request(self, frame):
