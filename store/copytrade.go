@@ -173,6 +173,7 @@ func (CopyTradeSignal) TableName() string { return "copytrade_signals" }
 type CopyTradeSignalView struct {
 	*CopyTradeSignal
 	TradeState         string                 `json:"trade_state,omitempty"`
+	RecoveryError      string                 `json:"recovery_error,omitempty"`
 	ActionResults      []*CopyTradeActionView `json:"action_results,omitempty"`
 	OrderLegs          []*CopyTradeOrder      `json:"order_legs,omitempty"`
 	InstructionResults []json.RawMessage      `json:"instruction_results,omitempty"`
@@ -575,12 +576,13 @@ func (s *CopyTradeStore) SignalViews(traderID string, signals []*CopyTradeSignal
 		ids = append(ids, id)
 	}
 	var contexts []CopyTradeContext
-	if err := s.db.Select("id", "state").Where("trader_id = ? AND id IN ?", traderID, ids).Find(&contexts).Error; err != nil {
+	if err := s.db.Select("id", "state", "last_error").Where("trader_id = ? AND id IN ?", traderID, ids).Find(&contexts).Error; err != nil {
 		return nil, err
 	}
 	for _, ctx := range contexts {
 		for _, view := range eligible[ctx.ID] {
 			view.TradeState = ctx.State
+			view.RecoveryError = ctx.LastError
 		}
 	}
 	return views, nil

@@ -1,6 +1,7 @@
 package copytrader
 
 import (
+	"errors"
 	"fmt"
 	"nofx/trader/types"
 	"time"
@@ -93,6 +94,8 @@ func (e *Engine) replayChecks(ins *SourceInterpretation) (ReplayEvaluation, stri
 				ev.Contract = ReplayCheck{Status: "failed", Code: "CONTRACT_NOT_TRADING", Detail: rules.Status}
 			case rules != nil && err != nil:
 				ev.Contract = ReplayCheck{Status: "failed", Code: "CONTRACT_RULES_REJECTED", Detail: err.Error()}
+			case errors.Is(err, types.ErrInstrumentUnavailable):
+				ev.Contract = ReplayCheck{Status: "failed", Code: "CONTRACT_UNAVAILABLE", Detail: err.Error()}
 			case err != nil:
 				ev.Contract = ReplayCheck{Status: "unavailable", Code: "CONTRACT_CHECK_FAILED", Detail: err.Error()}
 			case rules == nil:
@@ -109,6 +112,9 @@ func (e *Engine) replayChecks(ins *SourceInterpretation) (ReplayEvaluation, stri
 	price, err := e.exec.ex.GetMarketPrice(canonical)
 	if err != nil || !finite(price) || price <= 0 {
 		ev.Market = ReplayCheck{Status: "unavailable", Code: "PRICE_UNAVAILABLE", Detail: "current market price unavailable; this does not establish an interpretation error"}
+		if ev.Contract.Status == "failed" {
+			return ev, VerdictSkip, ev.Contract.Code + ": " + ev.Contract.Detail
+		}
 		return ev, VerdictSkip, ev.Market.Detail
 	}
 	ev.MarketPrice = price

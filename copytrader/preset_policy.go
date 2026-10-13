@@ -26,7 +26,12 @@ var holdWording = regexp.MustCompile(`(?i)持有|持倉|持仓|\bhold\b`)
 
 // A recognized fragment is not permission to execute only part of an
 // unresolved instruction. This boundary is shared by deterministic and AI paths.
+var retainedPosition = regexp.MustCompile(`(?:留|保留|剩)[下著着餘余]?\s*[0-9]+(?:\.[0-9]+)?\s*[%％成]`)
+
 func unresolvedManagement(text string) string {
+	if sourceFullProfitExit.MatchString(text) && retainedPosition.MatchString(text) {
+		return "full exit conflicts with retained-position wording"
+	}
 	if unresolvedProtection.MatchString(text) {
 		return "management contains undefined protection wording (上套/套保); explicit stop target required"
 	}
@@ -162,7 +167,7 @@ func applyPresetPolicy(interp *SourceInterpretation, msg *store.DiscordMessage, 
 			ins.Classification = ClassificationAmbiguous
 			ins.Reasoning = "preset requires explicit management, not a discretionary suggestion"
 		}
-		if preset.ID != "default" && (ins.Action == ActionReduce || ins.Action == ActionClose) && recapOnly.MatchString(scope) && !explicitManagement.MatchString(scope) && !jonziTerminal.MatchString(scope) {
+		if preset.ID != "default" && (ins.Action == ActionReduce || ins.Action == ActionClose) && recapOnly.MatchString(scope) && !explicitManagement.MatchString(scope) && !hasFullCloseIntent(scope) && !hasCurrentManagementWording(scope) && !jonziTerminal.MatchString(scope) {
 			ins.Classification = ClassificationIgnore
 			ins.Reasoning = "performance recap is not a management instruction"
 		}

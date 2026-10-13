@@ -11,6 +11,46 @@ import (
 var ErrManagedOrderNotFound = errors.New("managed order not found")
 var ErrManagedOrderRejected = errors.New("managed order definitely rejected")
 
+// ManagedRejection preserves the venue error while retaining sentinel compatibility.
+type ManagedRejection struct {
+	Code  int64
+	Cause error
+}
+
+func (e *ManagedRejection) Error() string {
+	return fmt.Sprintf("%v: %v", ErrManagedOrderRejected, e.Cause)
+}
+func (e *ManagedRejection) Unwrap() []error { return []error{ErrManagedOrderRejected, e.Cause} }
+
+// StopOrderReader is optional. A missing history row is NOT evidence of rejection.
+// Implementations query using the executor's authenticated account credentials.
+type StopOrderReader interface {
+	GetStopOrder(symbol, orderID, clientID string) (*StopOrderResult, error)
+}
+type StopOrderResult struct {
+	OpenOrder
+	Status            string
+	ActualOrderID     string
+	ActualOrderStatus string
+}
+
+func (r *StopOrderResult) Terminal() bool {
+	switch r.Status {
+	case "CANCELED", "EXPIRED", "REJECTED", "FINISHED":
+		if r.ActualOrderID != "" && r.ActualOrderID != "0" {
+			switch r.ActualOrderStatus {
+			case "FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED":
+				return true
+			}
+			return false
+		}
+		return r.Status != "FINISHED"
+	}
+	return false
+}
+
+var ErrInstrumentUnavailable = errors.New("instrument explicitly unavailable")
+
 // MarketRulesReader is optional and does not imply managed entry support.
 // Quantities are always base-asset units, including contract venues.
 // Rejected observed rules may accompany an error for diagnostics only;

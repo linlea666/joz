@@ -2,6 +2,7 @@ package copytrader
 
 import (
 	"encoding/json"
+	"sync"
 	"time"
 
 	"nofx/logger"
@@ -40,9 +41,11 @@ const (
 // EventLogger writes trace events to the store and mirrors them to the
 // application log. Persistence failures never break the pipeline.
 type EventLogger struct {
-	st        *store.Store
-	traderID  string
-	channelID string
+	st         *store.Store
+	traderID   string
+	channelID  string
+	recoveryMu sync.Mutex
+	recovery   map[string]recoveryEvent
 }
 
 // NewEventLogger creates an event logger bound to one trader.

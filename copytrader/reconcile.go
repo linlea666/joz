@@ -55,10 +55,8 @@ func (e *Engine) reconcileOnce() {
 				if c.ExchangeID != "" && c.ExchangeID != bound {
 					continue
 				}
-				if err = e.exec.finishTradeOrders(c); err != nil && c.LastError != err.Error() {
-					e.exec.updateContext(c, map[string]interface{}{"last_error": err.Error()})
-					e.events.Warn("reconcile-"+c.ID, "", "", EvExecutionError, err.Error(), nil)
-				}
+				err = e.exec.finishTradeOrders(c)
+				e.recordRecovery(c, "terminal_cleanup", err, false)
 			}
 		}
 	}
@@ -102,9 +100,12 @@ func (e *Engine) reconcileOnce() {
 			continue
 		}
 		if ctx.ExecutionVersion > 0 && ctx.EntryPlanJSON != "" {
-			if err := e.exec.reconcileManagedEntry("reconcile-"+ctx.ID, ctx); err != nil {
-				e.events.Warn("reconcile-"+ctx.ID, "", "", EvExecutionError, err.Error(), nil)
+			entryErr := e.exec.reconcileManagedEntry("reconcile-"+ctx.ID, ctx)
+			message := ""
+			if entryErr != nil {
+				message = entryErr.Error()
 			}
+			e.events.recoveryResult(ctx.ID, "entry_recovery", message, time.Now().UTC())
 			if ctx.State == string(StateOpen) || ctx.State == string(StateBreakeven) {
 				e.reconcileOpenTrade(ctx)
 			}
@@ -235,7 +236,6 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 				fmt.Sprintf("%s position not found on exchange; re-checking next cycle before closing", ctx.Symbol), nil)
 			return
 		}
-		delete(e.posMissSeen, ctx.ID)
 		if err := e.exec.closeEntryEligibility(traceID, ctx, "POSITION_GONE"); err != nil {
 			return
 		}
@@ -244,9 +244,12 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 		}
 		// Position gone: SL hit, TP ladder completed, or closed manually.
 		if err := e.exec.finishTradeOrders(ctx); err != nil {
-			e.events.Warn(traceID, "", "", EvExecutionError, err.Error(), nil)
+			e.recordRecovery(ctx, "terminal_cleanup", err, true)
 			return
 		}
+		e.recordRecovery(ctx, "terminal_cleanup", nil, true)
+		e.events.recoveryResult(ctx.ID, "protection", "", time.Now().UTC())
+		delete(e.posMissSeen, ctx.ID)
 		if err := e.exec.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "RECONCILE_CLOSED"}); err != nil {
 			return
 		}
@@ -285,10 +288,7 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 	if !ctx.BreakevenApplied && confirmedTPLevel(ctx, level) && e.breakevenWanted(ctx) {
 		e.applyBreakeven(traceID, ctx, pos.qty)
 	}
-	if err := e.exec.restoreRemainingProtections(traceID, "", ctx, pos.qty); err != nil {
-		e.exec.updateContext(ctx, map[string]interface{}{"last_error": err.Error()})
-		e.events.Warn(traceID, "", "", EvExecutionError, "protection reconciliation: "+err.Error(), nil)
-	}
+	e.recordRecovery(ctx, "protection", e.exec.restoreRemainingProtections(traceID, "", ctx, pos.qty), false)
 
 }
 

@@ -220,7 +220,8 @@ func (s *CopyTradeStore) FinalizeExit(ctx *CopyTradeContext, signalID string, up
 
 type CopyTradeActionView struct {
 	*CopyTradeAction
-	TradeState string `json:"trade_state,omitempty"`
+	TradeState    string `json:"trade_state,omitempty"`
+	RecoveryError string `json:"recovery_error,omitempty"`
 }
 
 func (s *CopyTradeStore) attachExecutionViews(traderID string, views []*CopyTradeSignalView) error {
@@ -251,18 +252,20 @@ func (s *CopyTradeStore) attachExecutionViews(traderID string, views []*CopyTrad
 		}
 	}
 	states := map[string]string{}
+	recoveryErrors := map[string]string{}
 	if len(contextIDs) > 0 {
 		var contexts []*CopyTradeContext
-		if err := s.db.Select("id", "state").Where("trader_id = ? AND id IN ?", traderID, contextIDs).Find(&contexts).Error; err != nil {
+		if err := s.db.Select("id", "state", "last_error").Where("trader_id = ? AND id IN ?", traderID, contextIDs).Find(&contexts).Error; err != nil {
 			return err
 		}
 		for _, c := range contexts {
 			states[c.ID] = c.State
+			recoveryErrors[c.ID] = c.LastError
 		}
 	}
 	for _, a := range actions {
 		if v := bySignal[a.SignalID]; v != nil {
-			v.ActionResults = append(v.ActionResults, &CopyTradeActionView{CopyTradeAction: a, TradeState: states[a.ContextID]})
+			v.ActionResults = append(v.ActionResults, &CopyTradeActionView{CopyTradeAction: a, TradeState: states[a.ContextID], RecoveryError: recoveryErrors[a.ContextID]})
 		}
 	}
 	for _, o := range orders {

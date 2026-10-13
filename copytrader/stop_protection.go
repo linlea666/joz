@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"nofx/store"
 	"nofx/trader/types"
@@ -15,12 +16,15 @@ var ErrProtectionUnconfirmed = errors.New("protection observation or submission 
 // stopIntent is saved before touching the exchange. SUBMITTING is deliberately
 // not retried: a lost acknowledgement must be reconciled by client identity.
 type stopIntent struct {
-	ClientID  string           `json:"client_id"`
-	Price     float64          `json:"price"`
-	Requested float64          `json:"requested"`
-	Quantity  float64          `json:"quantity"`
-	Old       *types.OpenOrder `json:"old,omitempty"`
-	Stage     string           `json:"stage"`
+	ClientID   string           `json:"client_id"`
+	Price      float64          `json:"price"`
+	Requested  float64          `json:"requested"`
+	Quantity   float64          `json:"quantity"`
+	Old        *types.OpenOrder `json:"old,omitempty"`
+	Stage      string           `json:"stage"`
+	ErrorCode  int64            `json:"error_code,omitempty"`
+	ErrorStage string           `json:"error_stage,omitempty"`
+	ErrorAt    *time.Time       `json:"error_at,omitempty"`
 }
 
 func (x *Executor) normalizeStop(symbol string, price float64) (float64, float64, float64, error) {
@@ -163,11 +167,33 @@ func (x *Executor) setStopProtection(traceID, signalID string, ctx *store.CopyTr
 		}
 	}
 	if pending.Stage == "REJECTED" {
-		return fmt.Errorf("stop explicitly rejected; requires a new reviewed target")
+		// -4509 proves this request did not create an order. A new, freshly observed
+		// position may still need protection after the close/submission race.
+		if pending.ErrorCode == -4509 {
+			pos, err := x.freshPosition(ctx.Symbol, ctx.Direction)
+			if err != nil {
+				return fmt.Errorf("%w: rejected stop position check: %v", ErrProtectionUnconfirmed, err)
+			}
+			if pos != nil && pos.qty > 0 {
+				if err = x.persistContext(ctx, map[string]interface{}{"stop_intent_json": ""}); err != nil {
+					return err
+				}
+				return fmt.Errorf("%w: rejected request resolved; fresh position requires a new protection pass", ErrProtectionUnconfirmed)
+			}
+		}
+		return fmt.Errorf("stop explicitly rejected; awaiting flat-position cleanup or reviewed target")
 	}
 	if pending.Stage == "SUBMITTING" || pending.Stage == "UNKNOWN" {
-		return fmt.Errorf("%w: stop submission outcome unknown (%s); retained intent requires reconciliation", ErrProtectionUnconfirmed, pending.ClientID)
+		if err := x.resolveTerminalStop(ctx, pending); err != nil {
+			return err
+		}
+		// Do not immediately resubmit against the pre-query position snapshot.
+		if err := x.persistContext(ctx, map[string]interface{}{"stop_intent_json": "", "stop_order_id": ""}); err != nil {
+			return err
+		}
+		return fmt.Errorf("%w: previous stop terminated; recheck current position before protecting", ErrProtectionUnconfirmed)
 	}
+
 	if pending.Old != nil && pending.Stage == "PLANNED" {
 		// Re-query above covers a cancellation whose acknowledgement was lost.
 		present := false
@@ -183,12 +209,37 @@ func (x *Executor) setStopProtection(traceID, signalID string, ctx *store.CopyTr
 		}
 	}
 	pending.Stage = "SUBMITTING"
+	pending.ErrorCode, pending.ErrorStage, pending.ErrorAt = 0, "", nil
 	if err = x.saveStopIntent(ctx, pending); err != nil {
 		return err
 	}
 	err = managed.SetManagedStopLoss(ctx.Symbol, positionSideOf(ctx.Direction), pending.Quantity, pending.Price, pending.ClientID)
 	if err != nil {
-		if errors.Is(err, types.ErrManagedOrderRejected) && pending.Old != nil {
+		pending.ErrorStage = "submit_stop"
+		now := time.Now().UTC()
+		pending.ErrorAt = &now
+		var rejection *types.ManagedRejection
+		if errors.As(err, &rejection) {
+			pending.ErrorCode = rejection.Code
+		}
+		rejected := errors.Is(err, types.ErrManagedOrderRejected)
+		pending.Stage = "UNKNOWN"
+		if rejected {
+			pending.Stage = "REJECTED"
+		}
+		if perr := x.saveStopIntent(ctx, pending); perr != nil {
+			return perr
+		}
+		x.events.Warn(traceID, signalID, "", EvExecutionError, "stop submission requires reconciliation", map[string]interface{}{"context_id": ctx.ID, "client_id": pending.ClientID, "error_code": pending.ErrorCode, "stage": pending.Stage, "error_stage": pending.ErrorStage, "occurred_at": pending.ErrorAt})
+		restore := false
+		if rejected {
+			pos, checkErr := x.freshPosition(ctx.Symbol, ctx.Direction)
+			if checkErr != nil {
+				return fmt.Errorf("%w: rejected stop position check: %v", ErrProtectionUnconfirmed, checkErr)
+			}
+			restore = pos != nil && pos.qty > 0
+		}
+		if rejected && restore && pending.Old != nil {
 			// Restore with its own durable identity, never retry the rejected request.
 			rejected := err
 			pending.Price = pending.Old.StopPrice
@@ -203,14 +254,6 @@ func (x *Executor) setStopProtection(traceID, signalID string, ctx *store.CopyTr
 				return fmt.Errorf("stop rejected (%v), restoration: %w", rejected, err)
 			}
 			return rejected
-		}
-		if errors.Is(err, types.ErrManagedOrderRejected) {
-			pending.Stage = "REJECTED"
-		} else {
-			pending.Stage = "UNKNOWN"
-		}
-		if perr := x.saveStopIntent(ctx, pending); perr != nil {
-			return perr
 		}
 		if !errors.Is(err, types.ErrManagedOrderRejected) {
 			return fmt.Errorf("%w: %v", ErrProtectionUnconfirmed, err)

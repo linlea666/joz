@@ -1,3 +1,4 @@
+import { EntryPolicyThresholds } from './EntryPolicyThresholds'
 import { useState, useEffect } from 'react'
 import type {
   AIModel,
@@ -693,6 +694,10 @@ export function TraderConfigModal({
                     </select>
                     <p className="text-xs text-nofx-text-muted mt-1">
                       {t('copytrade.splitHint', language)}
+                      <EntryPolicyThresholds
+                        config={copyConfig}
+                        language={language}
+                      />
                     </p>
                     {invalidEntryPolicy && (
                       <p role="alert" className="text-xs text-nofx-danger mt-1">

@@ -34,6 +34,22 @@ var sourceTPLevel = regexp.MustCompile(`(?i)TP\s*([1-9][0-9]*)`)
 var sourceAddCondition = regexp.MustCompile(`(有[補补][倉仓]|[補补][倉仓][後后]|after (?:an? )?add|if (?:you )?added)`)
 var sourceCancel = regexp.MustCompile(`(?i)(撤(?:掉(?:[掛挂])?|[掛挂])?[單单]|取消[掛挂][單单]|取消[補补][倉仓]|取消(?:[這这](?:[筆笔])?)?(?:[訂订][單单]|(?:入[場场]|[進进][場场]|限[價价])(?:[訂订])?[單单])|\bcancel(?:\s+(?:the\s+)?(?:bid|order|entry|position))?\b)`)
 var sourceAdd = regexp.MustCompile(`(?i)([補补][倉仓]|加[倉仓]|\badd\b)`)
+
+// Reporting that a TP was hit is not itself a new management instruction.
+var sourceTPRecap = regexp.MustCompile(`(?i)止盈\s*(?:已)?(?:到達|到达|到了|已到|到|完成|hit|✅)`)
+
+func hasCurrentManagementWording(text string) bool {
+	return sourceManagement.MatchString(sourceTPRecap.ReplaceAllString(text, ""))
+}
+
+// Shared by deterministic interpretation and AI evidence validation. Ratios,
+// negations, conditions and reference-source gates are still enforced separately.
+var sourceFullProfitExit = regexp.MustCompile(`止盈\s*(?:全部|所有)\s*[倉仓]位`)
+
+func hasFullCloseIntent(text string) bool {
+	return (sourceFullProfitExit.MatchString(text) && !retainedPosition.MatchString(text)) || sourceCloseIntent.MatchString(text)
+}
+
 var sourceCloseIntent = regexp.MustCompile(`(?i)(全平|平[倉仓]|提前.*(?:止[損损](?:出局|出場|出|離場|离场|退出)|[離离][場场]|退出|出場|出场)|止[損损].*(?:已觸發|已触发|出局|出場|离场|離場|退出)|取消[倉仓]位|\bcancel.*\bposition\b|\b(?:close|closing|exit|out|cut it)(?:\s+here)?\b|manually closed|stopped out|stop(?:ped)? .*hit|trade (?:was )?closed|position closed|已平[倉仓]|交易已平[倉仓])`)
 var sourceClosedStatus = regexp.MustCompile(`(?i)(交易已平[倉仓]|已平[倉仓]|trade (?:was )?closed|position closed|manually closed|stopped out|stop(?:ped)? .*hit|止[損损].*(?:已觸發|已触发|出局|退出)|已經出場|已经出场)`)
 
@@ -234,7 +250,7 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 	makeAction := func(a Action) *SourceInterpretation {
 		return &SourceInterpretation{Classification: ClassificationSignal, Action: a, Symbol: sym, ActionEvidence: &ActionEvidence{SourceID: actionSourceID, Text: actionEvidence}, RequiresAddFill: sourceAddCondition.MatchString(body), Reasoning: "TYLER explicit management policy"}
 	}
-	full := sourceCloseIntent.MatchString(body) || strings.Contains(body, "提前平倉") || strings.Contains(body, "提前平仓") || strings.Contains(body, "提前止損離場") || strings.Contains(body, "提前止损离场") || strings.Contains(body, "這單就不拿") || strings.Contains(body, "这单就不拿")
+	full := hasFullCloseIntent(body) || strings.Contains(body, "提前平倉") || strings.Contains(body, "提前平仓") || strings.Contains(body, "提前止損離場") || strings.Contains(body, "提前止损离场") || strings.Contains(body, "這單就不拿") || strings.Contains(body, "这单就不拿")
 	reduce := strings.Contains(body, "減倉") || strings.Contains(body, "减仓") || strings.Contains(body, "可以先跑") || regexp.MustCompile(`(?i)(提前|可做|可以作|自行.*作)\s*TP\s*\d`).MatchString(body) || regexp.MustCompile(`(?:平倉|平仓)\s*[0-9]+(?:\.[0-9]+)?\s*[%％]`).MatchString(body)
 	// A fraction after "close / 平仓" is a partial exit, never a full close.
 	if full && !sourceClosedStatus.MatchString(body) {
@@ -287,7 +303,7 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 		}
 	}
 	if len(actions) == 0 {
-		if sourceProfit.MatchString(body) {
+		if sourceProfit.MatchString(body) && !hasCurrentManagementWording(body) {
 			return &SourceInterpretation{Classification: ClassificationIgnore, Action: ActionIgnore, Symbol: sym, Reasoning: "TYLER performance recap has no current management instruction"}
 		}
 		return nil
@@ -454,15 +470,15 @@ func segmentCarriesAction(ins *SourceInterpretation, text string) bool {
 		}
 		return !sourceCancel.MatchString(text) && (sourceOpen.MatchString(text) || (ins.Action == ActionAdd && sourceAdd.MatchString(text)))
 	case ActionCancel:
-		return sourceCancel.MatchString(text) && !sourceCloseIntent.MatchString(text)
+		return sourceCancel.MatchString(text) && !hasFullCloseIntent(text)
 	case ActionClose:
-		return sourceCloseIntent.MatchString(text) || regexp.MustCompile(`(?i)(\b(?:close|closing|exit|out|cut it)\b|[這这][單单]就不拿)`).MatchString(text)
+		return hasFullCloseIntent(text) || regexp.MustCompile(`(?i)(\b(?:close|closing|exit|out|cut it)\b|[這这][單单]就不拿)`).MatchString(text)
 	case ActionReduce:
 		if sourceReduce.MatchString(text) {
 			return true
 		}
 		_, explicit, err := explicitReductionRatio(text)
-		return sourceCloseIntent.MatchString(text) && explicit && err == nil
+		return hasFullCloseIntent(text) && explicit && err == nil
 	default:
 		return sourceManagement.MatchString(text) && !sourceCancel.MatchString(text)
 	}

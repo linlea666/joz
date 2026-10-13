@@ -1,3 +1,4 @@
+import { copyTradeOutcome } from './copyTradeOutcome'
 import type { CopyTradeEvent, CopyTradeSignal } from '../../types'
 import { CopyTradeRulesSnapshot } from './CopyTradeRulesSnapshot'
 import { t, type Language } from '../../i18n/translations'
@@ -75,6 +76,12 @@ export function CopyTradeExecutionDetails({
       <h3 className="font-semibold text-nofx-text">
         {t('copytrade.executionDetails', language)}
       </h3>
+      {signal && (
+        <p className="font-semibold">{copyTradeOutcome(signal, language)}</p>
+      )}
+      {signal?.recovery_error && (
+        <p className="text-nofx-danger break-words">{signal.recovery_error}</p>
+      )}
       {signal?.source_event_id && (
         <div className="text-xs break-all space-y-1">
           <p>
@@ -141,6 +148,7 @@ export function CopyTradeExecutionDetails({
                 ? ` · ${tradeStateLabel(action.trade_state, language)}`
                 : ''}
               {action.error ? `: ${action.error}` : ''}
+              {action.recovery_error ? ` · ${action.recovery_error}` : ''}
             </p>
           ))}
         </div>

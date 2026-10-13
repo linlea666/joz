@@ -159,6 +159,7 @@ export interface CopyTradeActionResult {
   status: string
   context_id?: string
   trade_state?: string
+  recovery_error?: string
   error?: string
 }
 export interface CopyTradeOrderLeg {
@@ -207,6 +208,7 @@ export interface CopyTradeSignal {
   trade_context_id: string
   // Current state of a uniquely linked trade; signal.status is processing only.
   trade_state?: string
+  recovery_error?: string
   classification: string
   action: string
   symbol: string

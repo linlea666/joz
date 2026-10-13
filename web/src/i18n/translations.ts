@@ -1323,7 +1323,8 @@ export const translations = {
         'Saved; restart requested. Check the trader status for the running result.',
       entryPolicy: 'Single-reference market entry execution (market A)',
       entryLegacy: 'Existing entry rules',
-      entrySplit: '50% market + 50% reference limit (risk budget)',
+      entrySplit:
+        'By deviation: split risk within threshold; reference limit beyond',
       splitHint:
         'Binance + By Risk only. For market signals with a reference: favorable/equal prices use full market; adverse prices within the configured threshold split risk equally; beyond it use full reference limit. Thresholds remain unchanged.',
       splitUnsupported:
@@ -2718,7 +2719,7 @@ export const translations = {
         '已保存，已请求重新启动。实际运行结果请查看交易员状态。',
       entryPolicy: '单参考价市价信号的执行方式（市价 A）',
       entryLegacy: '沿用原进场规则',
-      entrySplit: '50% 风险市价 + 50% 风险参考价限价',
+      entrySplit: '按偏移分配：阈值内各半风险，超阈值参考价限价',
       splitHint:
         '仅支持 Binance＋以损定量。只用于带参考价的市价信号：优价或同价全额市价；不利偏移在阈值内平分风险；超阈值全额参考价限价。不会自动修改偏移阈值。',
       splitUnsupported: '请选择 Binance 和以损定量，或恢复原进场策略。',

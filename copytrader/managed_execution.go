@@ -568,7 +568,7 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 			return err
 		}
 	}
-	if ctx.LastError != "" {
+	if ctx.LastError != "" && !strings.HasPrefix(ctx.LastError, "FLAT_RECOVERY_PENDING:") {
 		hasRejected := false
 		for _, o := range orders {
 			hasRejected = hasRejected || o.Status == "REJECTED"

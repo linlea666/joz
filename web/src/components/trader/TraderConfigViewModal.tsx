@@ -1,3 +1,4 @@
+import { EntryPolicyThresholds } from './EntryPolicyThresholds'
 import { useCopyTradeProfiles } from '../../hooks/useCopyTradeProfiles'
 import type { CopyTradingConfig, TraderConfigData } from '../../types'
 import { t } from '../../i18n/translations'
@@ -190,6 +191,7 @@ export function TraderConfigViewModal({
                   language
                 )}
               />
+              <EntryPolicyThresholds config={copyConfig} language={language} />
               <InfoRow
                 label={t('copytrade.dualPriceLabel', language)}
                 value={t(

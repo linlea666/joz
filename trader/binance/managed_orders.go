@@ -51,11 +51,11 @@ func (t *FuturesTrader) MarketRules(symbol string) (*types.ManagedMarketRules, e
 		if r.Status != "TRADING" || (r.ContractType != "PERPETUAL" && r.ContractType != "TRADIFI_PERPETUAL") || r.QuoteAsset != "USDT" || r.QuantityStep <= 0 || r.PriceTick <= 0 {
 			// Preserve observed rules for diagnostics; callers must still honor
 			// the error and cannot use rejected rules for order submission.
-			return r, fmt.Errorf("%s is not a supported tradable USDT perpetual or has incomplete rules (status=%s, contract_type=%s, quote_asset=%s)", symbol, r.Status, r.ContractType, r.QuoteAsset)
+			return r, fmt.Errorf("%w: %s is not a supported tradable USDT perpetual or has incomplete rules (status=%s, contract_type=%s, quote_asset=%s)", types.ErrInstrumentUnavailable, symbol, r.Status, r.ContractType, r.QuoteAsset)
 		}
 		return r, nil
 	}
-	return nil, fmt.Errorf("%s is not listed on Binance Futures", symbol)
+	return nil, fmt.Errorf("%w: %s is not listed on Binance Futures", types.ErrInstrumentUnavailable, symbol)
 }
 
 func (t *FuturesTrader) SubmitManagedOrder(req *types.ManagedOrderRequest) (*types.ManagedOrderResult, error) {
@@ -157,8 +157,8 @@ func classifyManagedRejection(err error) error {
 	var apiErr *common.APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.Code {
-		case -1100, -1102, -1111, -1116, -1117, -1121, -2019, -2020, -2021, -2022, -2027, -4003, -4004, -4005, -4014, -4023, -4164:
-			return fmt.Errorf("%w: %v", types.ErrManagedOrderRejected, err)
+		case -1100, -1102, -1111, -1116, -1117, -1121, -2019, -2020, -2021, -2022, -2027, -4003, -4004, -4005, -4014, -4023, -4164, -4509:
+			return &types.ManagedRejection{Code: apiErr.Code, Cause: err}
 		}
 	}
 	return err

@@ -1,3 +1,4 @@
+import { copyTradeOutcome } from './copyTradeOutcome'
 import { CopyTradeRulesSnapshot } from './CopyTradeRulesSnapshot'
 import { CopyTradeReplayChecks } from './CopyTradeReplayChecks'
 import { useState, useEffect, useCallback, Fragment } from 'react'
@@ -450,15 +451,7 @@ export function CopyTradeLogModal({
                                       : '#8A8478',
                             }}
                           >
-                            {sig.status === 'executed'
-                              ? t('copytrade.processed', language)
-                              : sig.status === 'execution_wait'
-                                ? language === 'zh'
-                                  ? '等待核对'
-                                  : 'Awaiting reconciliation'
-                                : sig.status === 'retry_wait'
-                                  ? t('copytrade.retryWaiting', language)
-                                  : sig.status}
+                            {copyTradeOutcome(sig, language)}
                             {sig.skip_reason ? ` (${sig.skip_reason})` : ''}
                           </span>
                           {sig.trade_state && (

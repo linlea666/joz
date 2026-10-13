@@ -580,6 +580,14 @@ func (e *Engine) processInstruction(traceID, signalID string, msg *store.Discord
 		}
 	}
 
+	// If the quote failed, retain independent contract evidence before generic
+	// price validation. This does not authorize execution without either check.
+	if marketPrice <= 0 && canonical != "" && interp.IsActionable() && (interp.Action == ActionOpen || interp.Action == ActionAdd) {
+		if err := e.checkEntryContract(traceID, signalID, msg.MessageID, canonical); err != nil {
+			return SkipNone, "", err
+		}
+	}
+
 	// Validation & classification gates.
 	skipReason, verr := ValidateInterpretation(interp, marketPrice)
 	if verr != nil {
@@ -1123,9 +1131,9 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 	if e.cfg.Paused {
 		return SkipPaused, nil
 	}
-	if managed, ok := e.exec.ex.(types.ManagedOrderTrader); ok {
-		if _, err := managed.MarketRules(canonical); err != nil {
-			return SkipUnsupportedInstrument, fmt.Errorf("contract capability: %w", err)
+	if _, ok := e.exec.ex.(types.ManagedOrderTrader); ok {
+		if err := e.checkEntryContract(traceID, signalID, msg.MessageID, canonical); err != nil {
+			return SkipUnsupportedInstrument, err
 		}
 	}
 	// Duplicate protection: an active trade on this symbol+direction already exists.

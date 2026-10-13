@@ -31,8 +31,8 @@ export function CopyTradeReplayChecks({
       {!item.evaluations?.length ? (
         <div>
           {zh
-            ? '此记录未保存分层检查证据；不能推断历史行情或合约状态。'
-            : 'No layered checks saved; historical market and contract state are unknown.'}
+            ? '此记录历史版本结果：未保存分层检查证据；不能推断历史行情或合约状态。'
+            : 'Legacy result: no layered checks saved; historical market and contract state are unknown.'}
         </div>
       ) : (
         <>

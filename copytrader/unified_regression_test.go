@@ -107,6 +107,7 @@ func TestProtectionDefiniteFailureRestoresOldStop(t *testing.T) {
 	v := &preciseStopVenue{managedVenue: newManagedVenue(), rejectNext: true}
 	x := NewExecutor("trader-1", v, st, NewEventLogger(st, "trader-1", "chan-1"))
 	ctx := newTestContext(t, st, StateOpen)
+	v.qty = .5
 	v.openOrders = []types.OpenOrder{{OrderID: "old", OrderKind: "ALGO", Symbol: ctx.Symbol, PositionSide: "LONG", Type: "STOP_MARKET", StopPrice: 95, Quantity: .5}}
 	if err := x.setStopProtection("trace", "signal", ctx, .5, 99); !errors.Is(err, types.ErrManagedOrderRejected) {
 		t.Fatalf("expected rejection, got %v", err)

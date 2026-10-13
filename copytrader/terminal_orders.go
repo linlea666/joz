@@ -68,7 +68,9 @@ func (x *Executor) finishTradeOrders(ctx *store.CopyTradeContext) error {
 			}
 		}
 		if !found {
-			return fmt.Errorf("unresolved stop submission retained after position closed; verify exchange history")
+			if err := x.resolveTerminalStop(ctx, &pending); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -99,6 +101,15 @@ func (x *Executor) finishTradeOrders(ctx *store.CopyTradeContext) error {
 		if stopMatchesSide(o, ctx.Direction) {
 			return fmt.Errorf("terminal order cancellation not yet confirmed")
 		}
+	}
+	// Re-check after network operations: never release protection bookkeeping
+	// on the strength of the earlier flat snapshot if a fill raced cleanup.
+	pos, err = x.freshPosition(ctx.Symbol, ctx.Direction)
+	if err != nil {
+		return err
+	}
+	if pos != nil && pos.qty > 0 {
+		return fmt.Errorf("position reappeared during terminal cleanup")
 	}
 	return x.persistContext(ctx, map[string]interface{}{"stop_intent_json": "", "tp_update_intent_json": "", "stop_order_id": "", "entry_working": false})
 }
