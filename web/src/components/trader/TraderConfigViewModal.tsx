@@ -1,4 +1,7 @@
-import { EntryPolicyThresholds } from './EntryPolicyThresholds'
+import {
+  EntryPolicyThresholds,
+  entryPolicyLabel,
+} from './EntryPolicyThresholds'
 import { useCopyTradeProfiles } from '../../hooks/useCopyTradeProfiles'
 import type { CopyTradingConfig, TraderConfigData } from '../../types'
 import { t } from '../../i18n/translations'
@@ -184,10 +187,8 @@ export function TraderConfigViewModal({
               />
               <InfoRow
                 label={t('copytrade.entryPolicy', language)}
-                value={t(
-                  copyConfig.entry_policy === 'market_reference_split'
-                    ? 'copytrade.entrySplit'
-                    : 'copytrade.entryLegacy',
+                value={entryPolicyLabel(
+                  copyConfig.entry_policy || 'legacy',
                   language
                 )}
               />

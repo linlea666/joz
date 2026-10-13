@@ -24,6 +24,9 @@ type ReplayEvaluation struct {
 	Contract    ReplayCheck `json:"contract"`
 	MarketPrice float64     `json:"market_price,omitempty"`
 	CheckedAt   time.Time   `json:"checked_at"`
+	// A preview of entry shape only: sizing, protection and execution are not simulated.
+	EntryPlan  *resolvedEntryPlan `json:"entry_plan,omitempty"`
+	EntryCheck *ReplayCheck       `json:"entry_check,omitempty"`
 }
 
 func uncheckedReplay(ins *SourceInterpretation) ReplayEvaluation {
@@ -124,6 +127,19 @@ func (e *Engine) replayChecks(ins *SourceInterpretation) (ReplayEvaluation, stri
 	}
 	if ev.Market.Status != "passed" {
 		return ev, VerdictSkip, "CURRENT_MARKET_CHECK: " + ev.Market.Detail
+	}
+	if ins.Action == ActionOpen {
+		plan, skip, planErr := resolveEntryPlan(ins.Direction, ins.EntryOrders, price, e.cfg.PriceOffsetPctFor(canonical), e.cfg.LimitToMarketWithin, e.cfg.MessageRules().EntryPolicy)
+		if planErr != nil || skip != SkipNone {
+			detail := string(skip)
+			if planErr != nil {
+				detail = planErr.Error()
+			}
+			ev.EntryCheck = &ReplayCheck{Status: "failed", Code: string(skip), Detail: detail}
+			return ev, VerdictSkip, "ENTRY_PLAN_CHECK: " + detail
+		}
+		ev.EntryPlan = &plan
+		ev.EntryCheck = &ReplayCheck{Status: "passed", Detail: "entry shape only; sizing, protection and execution not simulated"}
 	}
 	return ev, VerdictExecute, fmt.Sprintf("%s %s %s; recognition only, execution gates not evaluated", ins.Action, ins.Direction, canonical)
 }

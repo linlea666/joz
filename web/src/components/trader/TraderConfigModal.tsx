@@ -219,6 +219,7 @@ export function TraderConfigModal({
       ?.exchange_type?.toLowerCase() === 'binance'
   const invalidEntryPolicy =
     (copyConfig.entry_policy === 'market_reference_split' ||
+      copyConfig.entry_policy === 'market_reference_participate' ||
       copyConfig.market_dual_price_mode === 'market_then_limit') &&
     !splitAvailable
   const entryTimeoutMinutes = Number(entryTimeoutInput)
@@ -690,6 +691,12 @@ export function TraderConfigModal({
                         disabled={!splitAvailable}
                       >
                         {t('copytrade.entrySplit', language)}
+                      </option>
+                      <option
+                        value="market_reference_participate"
+                        disabled={!splitAvailable}
+                      >
+                        {t('copytrade.entryParticipate', language)}
                       </option>
                     </select>
                     <p className="text-xs text-nofx-text-muted mt-1">

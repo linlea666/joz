@@ -1,4 +1,5 @@
 import { copyTradeOutcome } from './copyTradeOutcome'
+import { entryPolicyLabel } from './EntryPolicyThresholds'
 import type { CopyTradeEvent, CopyTradeSignal } from '../../types'
 import { CopyTradeRulesSnapshot } from './CopyTradeRulesSnapshot'
 import { t, type Language } from '../../i18n/translations'
@@ -203,7 +204,9 @@ export function CopyTradeExecutionDetails({
           ],
           [
             t('copytrade.appliedThreshold', language),
-            numeric(d.threshold_pct, true),
+            d.threshold_applied === false
+              ? `${language === 'zh' ? '本策略不用于拦截；配置值' : 'Not used as a gate; configured'} ${numeric(d.threshold_pct, true)}`
+              : numeric(d.threshold_pct, true),
           ],
           [
             t('copytrade.limitToMarket', language),
@@ -229,6 +232,16 @@ export function CopyTradeExecutionDetails({
             </div>
             {d.plan && typeof d.plan === 'object' && 'origin' in d.plan ? (
               <div className="space-y-1">
+                {typeof (d.plan as Record<string, unknown>).entry_policy ===
+                  'string' && (
+                  <p>
+                    {entryPolicyLabel(
+                      (d.plan as Record<string, unknown>)
+                        .entry_policy as string,
+                      language
+                    )}
+                  </p>
+                )}
                 <p>
                   {language === 'zh' ? '采用规则：' : 'Applied rule: '}
                   {String((d.plan as Record<string, unknown>).origin)}

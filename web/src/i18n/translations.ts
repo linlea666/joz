@@ -1325,8 +1325,10 @@ export const translations = {
       entryLegacy: 'Existing entry rules',
       entrySplit:
         'By deviation: split risk within threshold; reference limit beyond',
+      entryParticipate:
+        'Participation first: adverse prices split risk; no first-leg offset gate',
       splitHint:
-        'Binance + By Risk only. For market signals with a reference: favorable/equal prices use full market; adverse prices within the configured threshold split risk equally; beyond it use full reference limit. Thresholds remain unchanged.',
+        'The two split policies require Binance + By Risk and apply only to single-reference market signals. Select a policy explicitly; thresholds are not changed.',
       splitUnsupported:
         'Select Binance and By Risk, or switch back to existing entry rules.',
       entryTimeout: 'Unfilled Entry Order Lifetime (minutes)',
@@ -1404,6 +1406,8 @@ export const translations = {
         INVALID: 'Invalid trade',
       },
       entryReasons: {
+        participation_adverse_split:
+          'Participation first: adverse price uses shared-risk market + reference limit. The offset threshold is recorded but not used as an entry gate.',
         market_without_reference:
           'Author requested market entry without a reference price.',
         favorable_price:
@@ -2720,8 +2724,9 @@ export const translations = {
       entryPolicy: '单参考价市价信号的执行方式（市价 A）',
       entryLegacy: '沿用原进场规则',
       entrySplit: '按偏移分配：阈值内各半风险，超阈值参考价限价',
+      entryParticipate: '优先参与：不利价各半风险，首笔不受偏移限制',
       splitHint:
-        '仅支持 Binance＋以损定量。只用于带参考价的市价信号：优价或同价全额市价；不利偏移在阈值内平分风险；超阈值全额参考价限价。不会自动修改偏移阈值。',
+        '两种分批策略仅支持 Binance＋以损定量，只用于单参考价市价信号。需明确选择，不会自动修改偏移阈值。',
       splitUnsupported: '请选择 Binance 和以损定量，或恢复原进场策略。',
       entryTimeout: '未成交挂单有效期（分钟）',
       entryTimeoutHint:
@@ -2795,6 +2800,8 @@ export const translations = {
         INVALID: '交易无效',
       },
       entryReasons: {
+        participation_adverse_split:
+          '优先参与：不利价格采用共享风险的市价＋参考价限价。记录偏移和阈值，但本策略不据此拦截首笔。',
         market_without_reference: '博主要求市价进场，未提供参考价。',
         favorable_price: '市价优于或等于参考价，使用市价进场。',
         adverse_within_threshold: '不利价差在阈值内，使用市价进场。',

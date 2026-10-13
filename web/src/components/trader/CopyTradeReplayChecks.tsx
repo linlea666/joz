@@ -1,4 +1,5 @@
 import type { CopyTradeReplayItem } from '../../types'
+import { entryPolicyLabel } from './EntryPolicyThresholds'
 
 export function CopyTradeReplayChecks({
   item,
@@ -65,6 +66,42 @@ export function CopyTradeReplayChecks({
                   {ev[key].detail && ` — ${ev[key].detail}`}
                 </div>
               ))}
+              {ev.entry_check && (
+                <div>
+                  {zh ? '入场规则预览' : 'Entry policy preview'}:{' '}
+                  {names[ev.entry_check.status]}
+                  {ev.entry_check.detail && ` — ${ev.entry_check.detail}`}
+                </div>
+              )}
+              {ev.entry_plan && (
+                <div className="space-y-1">
+                  <div>
+                    {entryPolicyLabel(ev.entry_plan.entry_policy, language)}
+                  </div>
+                  <div>
+                    {ev.entry_plan.decision.order_type} @{' '}
+                    {ev.entry_plan.decision.entry_price}
+                    {ev.entry_plan.second_limit
+                      ? ` + LIMIT @ ${ev.entry_plan.second_limit} (${zh ? '各 50% 风险预算' : '50% risk each'})`
+                      : ` (${zh ? '单笔' : 'one leg'})`}
+                  </div>
+                  <div>
+                    {zh ? '不利偏移' : 'Adverse deviation'}:{' '}
+                    {ev.entry_plan.decision.adverse_deviation_pct?.toFixed(4) ??
+                      '—'}
+                    %{' · '}
+                    {zh ? '当次配置阈值' : 'Configured threshold'}:{' '}
+                    {ev.entry_plan.decision.threshold_pct}%
+                    {ev.entry_plan.decision.threshold_applied === false &&
+                      (zh ? '（本策略不用于拦截）' : ' (not used as a gate)')}
+                  </div>
+                  <div>
+                    {zh
+                      ? '仅预览订单形态；未核验资金、数量、保护及实时执行条件，不会下单。'
+                      : 'Order shape only; balance, quantity, protection and live execution gates are not evaluated. No orders are placed.'}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </>

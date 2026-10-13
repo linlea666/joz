@@ -15,6 +15,45 @@ const base: CopyTradeReplayItem = {
   verdict: 'SKIP',
 }
 describe('recognition evidence display', () => {
+  it('shows the recorded participation shape without claiming an executable order', () => {
+    render(
+      <CopyTradeReplayChecks
+        language="zh"
+        item={{
+          ...base,
+          evaluations: [
+            {
+              action: 'OPEN',
+              symbol: 'BTC',
+              checked_at: '2026-10-13T00:00:00Z',
+              source: { status: 'passed' },
+              parameters: { status: 'passed' },
+              market: { status: 'passed' },
+              contract: { status: 'passed' },
+              entry_check: { status: 'passed' },
+              entry_plan: {
+                entry_policy: 'market_reference_participate',
+                origin: 'single_reference_participation',
+                second_limit: 85100,
+                decision: {
+                  order_type: 'MARKET',
+                  entry_price: 83829.2,
+                  adverse_deviation_pct: 1.4933,
+                  threshold_pct: 0.2,
+                  threshold_applied: false,
+                },
+              },
+            },
+          ],
+        }}
+      />
+    )
+    expect(
+      screen.getByText(/MARKET @ 83829.2 \+ LIMIT @ 85100/)
+    ).toBeInTheDocument()
+    expect(screen.getByText(/本策略不用于拦截/)).toBeInTheDocument()
+    expect(screen.getByText(/不会下单/)).toBeInTheDocument()
+  })
   it('separates valid parameters, failed current market and unavailable contracts', () => {
     render(
       <CopyTradeReplayChecks

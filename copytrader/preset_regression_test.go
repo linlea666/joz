@@ -215,7 +215,7 @@ func TestPresetConditionsAndRecaps(t *testing.T) {
 func TestDualPriceAndSingleReferencePolicyMatrix(t *testing.T) {
 	for _, dir := range []Direction{DirectionLong, DirectionShort} {
 		for _, dual := range []string{DualPriceLegacy, DualPriceRange, DualPriceSplit, DualPriceReject} {
-			for _, policy := range []string{EntryPolicyLegacy, EntryPolicySplit} {
+			for _, policy := range []string{EntryPolicyLegacy, EntryPolicySplit, EntryPolicyParticipate} {
 				for _, kind := range []string{"dual", "single", "plain", "limit", "explicit-range", "explicit-two"} {
 					t.Run(string(dir)+dual+policy+kind, func(t *testing.T) {
 						b, market, stop, tp := 95.0, 100.1, 90.0, 120.0
@@ -258,7 +258,7 @@ func TestDualPriceAndSingleReferencePolicyMatrix(t *testing.T) {
 						want := 0.0
 						if kind == "explicit-two" || (kind == "dual" && dual == DualPriceSplit) {
 							want = b
-						} else if (kind == "single" || (kind == "dual" && dual == DualPriceLegacy)) && policy == EntryPolicySplit {
+						} else if (kind == "single" || (kind == "dual" && dual == DualPriceLegacy)) && sharedRiskEntryPolicy(policy) {
 							want = 100
 						}
 						if plan.SplitReference != want {

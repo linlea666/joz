@@ -238,15 +238,17 @@ describe('copy-trading opt-in settings', () => {
   )
 
   it.each([
-    ['okx', 'by_loss'],
-    ['binance', 'fixed'],
+    ['okx', 'by_loss', 'market_reference_split'],
+    ['binance', 'fixed', 'market_reference_split'],
+    ['okx', 'by_loss', 'market_reference_participate'],
+    ['binance', 'fixed', 'market_reference_participate'],
   ])(
-    'rejects saved split policy with %s / %s without silently changing it',
-    async (exchange, riskMode) => {
-      const save = setup(exchange, 'market_reference_split', riskMode)
+    'rejects saved policy with %s / %s / %s without silently changing it',
+    async (exchange, riskMode, policy) => {
+      const save = setup(exchange, policy, riskMode)
       expect(
         screen.getByLabelText('单参考价市价信号的执行方式（市价 A）')
-      ).toHaveValue('market_reference_split')
+      ).toHaveValue(policy)
       expect(screen.getByRole('alert')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: '保存修改' })).toBeDisabled()
       fireEvent.change(
@@ -262,6 +264,30 @@ describe('copy-trading opt-in settings', () => {
       ).toBe(riskMode)
     }
   )
+
+  it('requires explicit participation selection and preserves other risk settings', async () => {
+    const save = setup('binance', 'market_reference_split', 'by_loss', 1400)
+    const selector = screen.getByLabelText(
+      '单参考价市价信号的执行方式（市价 A）'
+    )
+    expect(selector).toHaveValue('market_reference_split')
+    fireEvent.change(selector, {
+      target: { value: 'market_reference_participate' },
+    })
+    expect(screen.getByText(/阈值为 0 也一样/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '保存修改' }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(1))
+    expect(JSON.parse(save.mock.calls[0][0].copy_trading_config)).toMatchObject(
+      {
+        entry_policy: 'market_reference_participate',
+        market_dual_price_mode: 'legacy',
+        risk_amount_usd: 15,
+        altcoin_price_offset_pct: 0.2,
+        entry_timeout_minutes: 1400,
+        auto_breakeven_after_tp: true,
+      }
+    )
+  })
 })
 
 describe('author preset recommendations', () => {

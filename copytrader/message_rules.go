@@ -70,7 +70,7 @@ func (e *Engine) rulesForSignal(signalID string) (MessageRules, error) {
 	default:
 		return r, fmt.Errorf("invalid frozen dual-price mode")
 	}
-	if r.Version >= 2 && r.EntryPolicy != EntryPolicyLegacy && r.EntryPolicy != EntryPolicySplit {
+	if r.Version >= 2 && r.EntryPolicy != EntryPolicyLegacy && !sharedRiskEntryPolicy(r.EntryPolicy) {
 		return r, fmt.Errorf("invalid frozen entry policy")
 	}
 	return r, nil

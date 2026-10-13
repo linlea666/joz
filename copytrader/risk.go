@@ -158,6 +158,9 @@ type entryDecision struct {
 	OrderType           EntryPlanType `json:"order_type"`
 	EntryPrice          float64       `json:"entry_price"`
 	Reason              string        `json:"reason"`
+
+	// Omitted for older decisions; false explicitly documents an opt-in bypass.
+	ThresholdApplied *bool `json:"threshold_applied,omitempty"`
 }
 
 // Only absorbs floating-point rounding at the inclusive threshold boundary.

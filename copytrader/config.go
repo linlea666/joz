@@ -32,13 +32,19 @@ const (
 )
 
 const (
-	EntryPolicyLegacy = "legacy"
-	EntryPolicySplit  = "market_reference_split"
-	DualPriceLegacy   = "legacy"
-	DualPriceRange    = "range"
-	DualPriceSplit    = "market_then_limit"
-	DualPriceReject   = "reject"
+	EntryPolicyLegacy      = "legacy"
+	EntryPolicySplit       = "market_reference_split"
+	EntryPolicyParticipate = "market_reference_participate"
+	DualPriceLegacy        = "legacy"
+	DualPriceRange         = "range"
+	DualPriceSplit         = "market_then_limit"
+	DualPriceReject        = "reject"
 )
+
+// Both opt-in policies use the same managed two-leg execution and risk budget.
+func sharedRiskEntryPolicy(policy string) bool {
+	return policy == EntryPolicySplit || policy == EntryPolicyParticipate
+}
 
 // CopyTradingConfig is the per-trader copy-trading configuration.
 // Stored as JSON in traders.copy_trading_config; parse via ParseCopyTradingConfig.
@@ -185,11 +191,11 @@ func (c *CopyTradingConfig) Validate() error {
 	if _, ok := LookupInterpretationPreset(c.InterpretationProfile); !ok {
 		return fmt.Errorf("unknown interpretation_profile %q", c.InterpretationProfile)
 	}
-	if c.EntryPolicy != "" && c.EntryPolicy != EntryPolicyLegacy && c.EntryPolicy != EntryPolicySplit {
+	if c.EntryPolicy != "" && c.EntryPolicy != EntryPolicyLegacy && !sharedRiskEntryPolicy(c.EntryPolicy) {
 		return fmt.Errorf("unknown entry_policy %q", c.EntryPolicy)
 	}
-	if (c.EntryPolicy == EntryPolicySplit || c.MarketDualPriceMode == DualPriceSplit) && c.RiskMode != RiskModeByLoss {
-		return fmt.Errorf("market_reference_split requires by_loss risk mode")
+	if (sharedRiskEntryPolicy(c.EntryPolicy) || c.MarketDualPriceMode == DualPriceSplit) && c.RiskMode != RiskModeByLoss {
+		return fmt.Errorf("shared-risk entry requires by_loss risk mode")
 	}
 	if strings.TrimSpace(c.PrimaryChannelID) == "" {
 		return fmt.Errorf("primary_channel_id is required")
@@ -234,8 +240,8 @@ func (c *CopyTradingConfig) ValidateExchange(exchangeType string) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	if (c.EntryPolicy == EntryPolicySplit || c.MarketDualPriceMode == DualPriceSplit) && strings.ToLower(exchangeType) != "binance" {
-		return fmt.Errorf("market_reference_split currently supports Binance only")
+	if (sharedRiskEntryPolicy(c.EntryPolicy) || c.MarketDualPriceMode == DualPriceSplit) && strings.ToLower(exchangeType) != "binance" {
+		return fmt.Errorf("shared-risk entry currently supports Binance only")
 	}
 	return nil
 }

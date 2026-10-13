@@ -6,6 +6,7 @@ import (
 )
 
 type resolvedEntryPlan struct {
+	EntryPolicy     string         `json:"entry_policy,omitempty"`
 	SourceOrderType EntryOrderType `json:"source_order_type"`
 	Decision        entryDecision  `json:"decision"`
 	Origin          string         `json:"origin"`
@@ -16,7 +17,7 @@ type resolvedEntryPlan struct {
 // Resolve the complete shape once. Explicit legs and the optional single-
 // reference strategy are mutually exclusive branches, not successive rewrites.
 func resolveEntryPlan(direction Direction, orders []EntryOrder, market, threshold float64, convert bool, policy string) (resolvedEntryPlan, SkipReason, error) {
-	var p resolvedEntryPlan
+	p := resolvedEntryPlan{EntryPolicy: policy}
 	if len(orders) == 0 {
 		return p, SkipUnsupportedPriceSpec, fmt.Errorf("entry orders missing")
 	}
@@ -41,6 +42,18 @@ func resolveEntryPlan(direction Direction, orders []EntryOrder, market, threshol
 	p.Origin = "single"
 	p.PolicyNote = "single-reference split not applicable to this order type"
 	if orders[0].OrderType == EntryMarket && orders[0].Price.Type == PriceMarket && orders[0].Price.Price > 0 {
+		if policy == EntryPolicyParticipate {
+			applied := false
+			p.Decision.ThresholdApplied = &applied
+			p.PolicyNote = "participation policy: favorable/equal full market; adverse shared-risk market plus reference limit; offset threshold not applied"
+			if d.AdverseDeviationPct != nil && *d.AdverseDeviationPct > 0 {
+				p.Origin = "single_reference_participation"
+				p.SplitReference = orders[0].Price.Price
+				p.Decision.OrderType, p.Decision.EntryPrice = EntryPlanMarket, market
+				p.Decision.Reason = "participation_adverse_split"
+			}
+			return p, SkipNone, nil
+		}
 		if policy == "" && d.Reason == "adverse_within_threshold" {
 			return p, SkipNeedsContext, fmt.Errorf("legacy signal lacks frozen single-reference policy; no entry resubmission")
 		}

@@ -89,6 +89,27 @@ const openSignals = async (signals: CopyTradeSignal[]) => {
 }
 
 describe('copy-trading execution visibility', () => {
+  it('labels the frozen participation decision and does not claim the threshold blocked it', () => {
+    const context = JSON.parse(decision.context_json)
+    context.decision.threshold_applied = false
+    context.decision.reason = 'participation_adverse_split'
+    context.decision.order_type = 'MARKET'
+    context.decision.entry_price = 11.08
+    context.plan = {
+      origin: 'single_reference_participation',
+      entry_policy: 'market_reference_participate',
+    }
+    render(
+      <CopyTradeExecutionDetails
+        events={[{ ...decision, context_json: JSON.stringify(context) }]}
+        language="zh"
+        expectsEntry
+      />
+    )
+    expect(screen.getByText(/本策略不用于拦截；配置值 0%/)).toBeInTheDocument()
+    expect(screen.getByText(/优先参与：不利价各半风险/)).toBeInTheDocument()
+    expect(screen.getByText(/不据此拦截首笔/)).toBeInTheDocument()
+  })
   it('shows independent action outcomes and actual split fills', () => {
     const detailed = {
       ...signal('split', 'OPEN'),

@@ -70,7 +70,10 @@ export interface CopyTradingConfig {
   source_author_ids?: string[]
   channel_notes?: string
   interpretation_profile?: 'default' | 'tyler_v1' | 'cmm_v1' | 'jonzi_v1'
-  entry_policy?: 'legacy' | 'market_reference_split'
+  entry_policy?:
+    | 'legacy'
+    | 'market_reference_split'
+    | 'market_reference_participate'
   market_dual_price_mode?: 'legacy' | 'range' | 'market_then_limit' | 'reject'
   default_reduce_ratio?: number
   source_channel_ids?: string[]
@@ -283,6 +286,20 @@ export interface CopyTradeReplayItem {
     parameters: CopyTradeReplayCheck
     market: CopyTradeReplayCheck
     contract: CopyTradeReplayCheck
+    entry_check?: CopyTradeReplayCheck
+    entry_plan?: {
+      entry_policy?: string
+      origin: string
+      second_limit?: number
+      decision: {
+        order_type: string
+        entry_price: number
+        reference_price?: number
+        adverse_deviation_pct?: number
+        threshold_pct: number
+        threshold_applied?: boolean
+      }
+    }
     market_price?: number
     checked_at: string
   }[]
