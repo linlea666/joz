@@ -358,6 +358,9 @@ The token is validated against the Discord API before saving and stored encrypte
 			s.route(protected, "PUT", "/logs/settings", "Set system log retention", s.handleLogSettings)
 			s.route(protected, "POST", "/logs/cleanup/preview", "Preview historical system log cleanup", s.handleLogCleanupPreview)
 			s.route(protected, "POST", "/logs/cleanup", "Confirm system log cleanup", s.handleLogCleanup)
+			s.route(protected, "POST", "/copytrade/contexts/:id/recovery-review/preview", "Preview local recovery closure (read-only exchange checks)", s.handleRecoveryReviewPreview)
+			s.route(protected, "POST", "/copytrade/contexts/:id/recovery-review/confirm", "Confirm audited local recovery closure", s.handleRecoveryReviewConfirm)
+			s.route(protected, "GET", "/copytrade/history-sync", "Owned account history synchronization state", s.handleHistorySyncStatus)
 			// Copy-trading observability
 			s.route(protected, "GET", "/copytrade/profiles", "Copy trading author presets", s.handleGetCopyTradeProfiles)
 			s.route(protected, "GET", "/copytrade/events", "Copy trading event stream (trader_id or trace_id)", s.handleGetCopyTradeEvents)

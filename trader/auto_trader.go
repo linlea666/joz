@@ -210,6 +210,7 @@ type AutoTrader struct {
 	aiWalletStatus        string             // "ok"|"low"|"empty"|"unknown" — see runtime_health.go
 	aiWalletBalanceUSDC   float64            // Last observed Base USDC balance of the claw402 wallet
 	aiWalletCheckedAt     time.Time          // When the balance was last observed
+	copyLifecycleMu       sync.Mutex
 	copyEngine            *copytrader.Engine // Copy-trading engine (only for TraderType=copy_trading)
 }
 
@@ -492,6 +493,7 @@ func (at *AutoTrader) Run() error {
 	at.runPreLaunchChecks()
 	at.monitorWg.Add(1)
 	defer at.monitorWg.Done()
+	at.startBinanceHistorySync()
 
 	// Start drawdown monitoring
 	at.startDrawdownMonitor()
@@ -541,14 +543,6 @@ func (at *AutoTrader) Run() error {
 		if asterTrader, ok := at.trader.(*aster.AsterTrader); ok && at.store != nil {
 			asterTrader.StartOrderSync(at.id, at.exchangeID, at.exchange, at.store, 30*time.Second, at.stopMonitorCh)
 			at.logInfof("🔄 Aster order+position sync enabled (every 30s)")
-		}
-	}
-
-	// Start Binance order sync if using Binance exchange
-	if at.exchange == "binance" {
-		if binanceTrader, ok := at.trader.(*binance.FuturesTrader); ok && at.store != nil {
-			binanceTrader.StartOrderSync(at.id, at.exchangeID, at.exchange, at.store, 30*time.Second, at.stopMonitorCh)
-			at.logInfof("🔄 Binance order+position sync enabled (every 30s)")
 		}
 	}
 
@@ -790,4 +784,12 @@ func deriveWalletAddress(privateKeyHex string) string {
 
 	address := crypto.PubkeyToAddress(privateKey.PublicKey)
 	return address.Hex()
+}
+
+func (at *AutoTrader) startBinanceHistorySync() {
+	if bt, ok := at.trader.(*binance.FuturesTrader); ok && at.exchange == "binance" && at.store != nil {
+		done := bt.StartOrderSync(at.id, at.exchangeID, at.exchange, at.store, 30*time.Second, at.stopMonitorCh)
+		at.monitorWg.Add(1)
+		go func() { defer at.monitorWg.Done(); <-done }()
+	}
 }

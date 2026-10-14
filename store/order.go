@@ -13,11 +13,11 @@ import (
 type TraderOrder struct {
 	ID                int64   `gorm:"primaryKey;autoIncrement" json:"id"`
 	TraderID          string  `gorm:"column:trader_id;not null;index:idx_orders_trader_id" json:"trader_id"`
-	ExchangeID        string  `gorm:"column:exchange_id;not null;default:''" json:"exchange_id"`
+	ExchangeID        string  `gorm:"column:exchange_id;not null;default:'';uniqueIndex:idx_orders_account_symbol_v2,priority:1" json:"exchange_id"`
 	ExchangeType      string  `gorm:"column:exchange_type;not null;default:''" json:"exchange_type"`
-	ExchangeOrderID   string  `gorm:"column:exchange_order_id;not null;uniqueIndex:idx_orders_exchange_unique,priority:2" json:"exchange_order_id"`
+	ExchangeOrderID   string  `gorm:"column:exchange_order_id;not null;uniqueIndex:idx_orders_account_symbol_v2,priority:3" json:"exchange_order_id"`
 	ClientOrderID     string  `gorm:"column:client_order_id;default:''" json:"client_order_id"`
-	Symbol            string  `gorm:"column:symbol;not null;index:idx_orders_symbol" json:"symbol"`
+	Symbol            string  `gorm:"column:symbol;not null;index:idx_orders_symbol;uniqueIndex:idx_orders_account_symbol_v2,priority:2" json:"symbol"`
 	Side              string  `gorm:"column:side;not null" json:"side"`
 	PositionSide      string  `gorm:"column:position_side;default:''" json:"position_side"`
 	Type              string  `gorm:"column:type;not null" json:"type"`
@@ -37,9 +37,9 @@ type TraderOrder struct {
 	PriceProtect      bool    `gorm:"column:price_protect;default:false" json:"price_protect"`
 	OrderAction       string  `gorm:"column:order_action;default:''" json:"order_action"`
 	RelatedPositionID int64   `gorm:"column:related_position_id;default:0" json:"related_position_id"`
-	CreatedAt         int64   `gorm:"column:created_at" json:"created_at"`         // Unix milliseconds UTC
-	UpdatedAt         int64   `gorm:"column:updated_at" json:"updated_at"`         // Unix milliseconds UTC
-	FilledAt          int64   `gorm:"column:filled_at" json:"filled_at"`           // Unix milliseconds UTC
+	CreatedAt         int64   `gorm:"column:created_at" json:"created_at"` // Unix milliseconds UTC
+	UpdatedAt         int64   `gorm:"column:updated_at" json:"updated_at"` // Unix milliseconds UTC
+	FilledAt          int64   `gorm:"column:filled_at" json:"filled_at"`   // Unix milliseconds UTC
 }
 
 // TableName returns the table name for TraderOrder
@@ -52,12 +52,12 @@ func (TraderOrder) TableName() string {
 type TraderFill struct {
 	ID              int64   `gorm:"primaryKey;autoIncrement" json:"id"`
 	TraderID        string  `gorm:"column:trader_id;not null;index:idx_fills_trader_id" json:"trader_id"`
-	ExchangeID      string  `gorm:"column:exchange_id;not null;default:''" json:"exchange_id"`
+	ExchangeID      string  `gorm:"column:exchange_id;not null;default:'';uniqueIndex:idx_fills_account_symbol_v2,priority:1" json:"exchange_id"`
 	ExchangeType    string  `gorm:"column:exchange_type;not null;default:''" json:"exchange_type"`
 	OrderID         int64   `gorm:"column:order_id;not null;index:idx_fills_order_id" json:"order_id"`
 	ExchangeOrderID string  `gorm:"column:exchange_order_id;not null" json:"exchange_order_id"`
-	ExchangeTradeID string  `gorm:"column:exchange_trade_id;not null;uniqueIndex:idx_fills_exchange_unique,priority:2" json:"exchange_trade_id"`
-	Symbol          string  `gorm:"column:symbol;not null" json:"symbol"`
+	ExchangeTradeID string  `gorm:"column:exchange_trade_id;not null;uniqueIndex:idx_fills_account_symbol_v2,priority:3" json:"exchange_trade_id"`
+	Symbol          string  `gorm:"column:symbol;not null;uniqueIndex:idx_fills_account_symbol_v2,priority:2" json:"symbol"`
 	Side            string  `gorm:"column:side;not null" json:"side"`
 	Price           float64 `gorm:"column:price;not null" json:"price"`
 	Quantity        float64 `gorm:"column:quantity;not null" json:"quantity"`
@@ -125,14 +125,13 @@ func (s *OrderStore) InitTables() error {
 			}
 
 			// Ensure indexes exist
-			s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_exchange_unique ON trader_orders(exchange_id, exchange_order_id)`)
-			s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_exchange_unique ON trader_fills(exchange_id, exchange_trade_id)`)
+			// Scoped history identity installed below.
 			s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_orders_trader_id ON trader_orders(trader_id)`)
 			s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_orders_symbol ON trader_orders(symbol)`)
 			s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_orders_status ON trader_orders(status)`)
 			s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_fills_trader_id ON trader_fills(trader_id)`)
 			s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_fills_order_id ON trader_fills(order_id)`)
-			return nil
+			return s.ensureHistoryIdentity()
 		}
 	}
 
@@ -140,12 +139,22 @@ func (s *OrderStore) InitTables() error {
 		return fmt.Errorf("failed to migrate order tables: %w", err)
 	}
 
-	// Create unique composite index for exchange_id + exchange_order_id
-	s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_exchange_unique ON trader_orders(exchange_id, exchange_order_id)`)
-	// Create unique composite index for exchange_id + exchange_trade_id
-	s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_exchange_unique ON trader_fills(exchange_id, exchange_trade_id)`)
+	return s.ensureHistoryIdentity()
+}
 
-	return nil
+func (s *OrderStore) ensureHistoryIdentity() error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		for _, sql := range []string{
+			"CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_account_symbol_v2 ON trader_orders(exchange_id,symbol,exchange_order_id)",
+			"CREATE UNIQUE INDEX IF NOT EXISTS idx_fills_account_symbol_v2 ON trader_fills(exchange_id,symbol,exchange_trade_id)",
+			"DROP INDEX IF EXISTS idx_orders_exchange_unique", "DROP INDEX IF EXISTS idx_fills_exchange_unique",
+		} {
+			if err := tx.Exec(sql).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // CreateOrder creates order record
@@ -425,4 +434,23 @@ func (s *OrderStore) GetRecentFillSymbolsByExchange(exchangeID string, sinceMs i
 		return nil, err
 	}
 	return symbols, nil
+}
+
+// TradeHistorySyncState is progress of read-only exchange history ingestion.
+// It is deliberately separate from trading execution/admission cursors.
+type TradeHistorySyncState struct {
+	ExchangeID  string     `gorm:"primaryKey" json:"-"`
+	CursorMS    int64      `json:"-"`
+	LastAttempt *time.Time `json:"last_attempt,omitempty"`
+	LastSuccess *time.Time `json:"last_success,omitempty"`
+	LastError   string     `json:"last_error,omitempty"`
+}
+
+func (s *OrderStore) HistorySyncState(exchangeID string) (*TradeHistorySyncState, error) {
+	var row TradeHistorySyncState
+	err := s.db.First(&row, "exchange_id = ?", exchangeID).Error
+	if err == gorm.ErrRecordNotFound {
+		return &TradeHistorySyncState{ExchangeID: exchangeID}, nil
+	}
+	return &row, err
 }

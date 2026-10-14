@@ -161,6 +161,9 @@ func (t *FuturesTrader) GetTrades(startTime time.Time, limit int) ([]types.Trade
 // GetTradesForSymbol retrieves trade history for a specific symbol
 // This is more reliable than using Income API which may have delays
 func (t *FuturesTrader) GetTradesForSymbol(symbol string, startTime time.Time, limit int) ([]types.TradeRecord, error) {
+	return t.getTradesSince(context.Background(), symbol, startTime, limit)
+}
+func (t *FuturesTrader) getTradesSince(ctx context.Context, symbol string, startTime time.Time, limit int) ([]types.TradeRecord, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -172,38 +175,20 @@ func (t *FuturesTrader) GetTradesForSymbol(symbol string, startTime time.Time, l
 		Symbol(symbol).
 		StartTime(startTime.UnixMilli()).
 		Limit(limit).
-		Do(context.Background())
+		Do(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get trade history for %s: %w", symbol, err)
+		return nil, fmt.Errorf("trade history query %s: %w", symbol, &stopHistoryError{cause: err})
 	}
 
-	var trades []types.TradeRecord
-	for _, at := range accountTrades {
-		price, _ := strconv.ParseFloat(at.Price, 64)
-		qty, _ := strconv.ParseFloat(at.Quantity, 64)
-		fee, _ := strconv.ParseFloat(at.Commission, 64)
-		pnl, _ := strconv.ParseFloat(at.RealizedPnl, 64)
-
-		trade := types.TradeRecord{
-			TradeID:      strconv.FormatInt(at.ID, 10),
-			Symbol:       at.Symbol,
-			Side:         string(at.Side),
-			PositionSide: string(at.PositionSide),
-			Price:        price,
-			Quantity:     qty,
-			RealizedPnL:  pnl,
-			Fee:          fee,
-			Time:         time.UnixMilli(at.Time).UTC(),
-		}
-		trades = append(trades, trade)
-	}
-
-	return trades, nil
+	return decodeAccountTrades(accountTrades)
 }
 
 // GetTradesForSymbolFromID retrieves trade history for a specific symbol starting from a given trade ID
 // This is used for incremental sync - only fetch new trades since last sync
 func (t *FuturesTrader) GetTradesForSymbolFromID(symbol string, fromID int64, limit int) ([]types.TradeRecord, error) {
+	return t.getTradesFromID(context.Background(), symbol, fromID, limit)
+}
+func (t *FuturesTrader) getTradesFromID(ctx context.Context, symbol string, fromID int64, limit int) ([]types.TradeRecord, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -211,89 +196,59 @@ func (t *FuturesTrader) GetTradesForSymbolFromID(symbol string, fromID int64, li
 		limit = 1000
 	}
 
-	accountTrades, err := t.client.NewListAccountTradeService().
-		Symbol(symbol).
-		FromID(fromID).
-		Limit(limit).
-		Do(context.Background())
+	accountTrades, err := t.accountTradesFromID(ctx, symbol, fromID, limit)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get trade history for %s from ID %d: %w", symbol, fromID, err)
+		return nil, fmt.Errorf("trade history query %s from %d: %w", symbol, fromID, &stopHistoryError{cause: err})
 	}
 
-	var trades []types.TradeRecord
-	for _, at := range accountTrades {
-		price, _ := strconv.ParseFloat(at.Price, 64)
-		qty, _ := strconv.ParseFloat(at.Quantity, 64)
-		fee, _ := strconv.ParseFloat(at.Commission, 64)
-		pnl, _ := strconv.ParseFloat(at.RealizedPnl, 64)
-
-		trade := types.TradeRecord{
-			TradeID:      strconv.FormatInt(at.ID, 10),
-			Symbol:       at.Symbol,
-			Side:         string(at.Side),
-			PositionSide: string(at.PositionSide),
-			Price:        price,
-			Quantity:     qty,
-			RealizedPnL:  pnl,
-			Fee:          fee,
-			Time:         time.UnixMilli(at.Time).UTC(),
-		}
-		trades = append(trades, trade)
-	}
-
-	return trades, nil
+	return decodeAccountTrades(accountTrades)
 }
 
 // GetCommissionSymbols returns symbols that have new commission records since lastSyncTime
 // COMMISSION income is generated for every trade, so this is more reliable than REALIZED_PNL
 func (t *FuturesTrader) GetCommissionSymbols(lastSyncTime time.Time) ([]string, error) {
-	incomes, err := t.client.NewGetIncomeHistoryService().
-		IncomeType("COMMISSION").
-		StartTime(lastSyncTime.UnixMilli()).
-		Limit(1000).
-		Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get commission history: %w", err)
-	}
-
-	symbolMap := make(map[string]bool)
-	for _, income := range incomes {
-		if income.Symbol != "" {
-			symbolMap[income.Symbol] = true
-		}
-	}
-
-	var symbols []string
-	for symbol := range symbolMap {
-		symbols = append(symbols, symbol)
-	}
-
-	return symbols, nil
+	return t.historyIncomeSymbols("COMMISSION", lastSyncTime)
+}
+func (t *FuturesTrader) GetPnLSymbols(lastSyncTime time.Time) ([]string, error) {
+	return t.historyIncomeSymbols("REALIZED_PNL", lastSyncTime)
 }
 
-// GetPnLSymbols returns symbols that have REALIZED_PNL records since lastSyncTime
-// This is a fallback when COMMISSION detection fails (VIP users, BNB fee discount)
-func (t *FuturesTrader) GetPnLSymbols(lastSyncTime time.Time) ([]string, error) {
-	incomes, err := t.client.NewGetIncomeHistoryService().
-		IncomeType("REALIZED_PNL").
-		StartTime(lastSyncTime.UnixMilli()).
-		Limit(1000).
-		Do(context.Background())
-	if err != nil {
-		return nil, fmt.Errorf("failed to get PnL history: %w", err)
-	}
-
-	symbolMap := make(map[string]bool)
-	for _, income := range incomes {
-		if income.Symbol != "" {
-			symbolMap[income.Symbol] = true
+// The SDK has no income page parameter. Bisect full time windows instead;
+// equal-millisecond saturation fails explicitly rather than skipping a boundary.
+func (t *FuturesTrader) historyIncomeSymbols(kind string, start time.Time) ([]string, error) {
+	return t.historyIncomeSymbolsContext(context.Background(), kind, start)
+}
+func (t *FuturesTrader) historyIncomeSymbolsContext(ctx context.Context, kind string, start time.Time) ([]string, error) {
+	type window struct{ lo, hi int64 }
+	pending := []window{{start.UnixMilli(), time.Now().UTC().UnixMilli()}}
+	symbols := map[string]bool{}
+	for requests := 0; len(pending) > 0; requests++ {
+		if requests >= 100 {
+			return nil, fmt.Errorf("income discovery incomplete: request budget reached")
+		}
+		w := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		records, err := t.client.NewGetIncomeHistoryService().IncomeType(kind).StartTime(w.lo).EndTime(w.hi).Limit(1000).Do(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("income discovery failed: %w", &stopHistoryError{cause: err})
+		}
+		if len(records) >= 1000 {
+			if w.lo >= w.hi {
+				return nil, fmt.Errorf("income discovery incomplete: timestamp saturated")
+			}
+			mid := w.lo + (w.hi-w.lo)/2
+			pending = append(pending, window{mid + 1, w.hi}, window{w.lo, mid})
+			continue
+		}
+		for _, r := range records {
+			if r.Symbol != "" {
+				symbols[r.Symbol] = true
+			}
 		}
 	}
-
-	var symbols []string
-	for symbol := range symbolMap {
-		symbols = append(symbols, symbol)
+	out := make([]string, 0, len(symbols))
+	for s := range symbols {
+		out = append(out, s)
 	}
-
-	return symbols, nil
+	return out, nil
 }

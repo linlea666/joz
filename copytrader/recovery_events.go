@@ -25,7 +25,11 @@ func (l *EventLogger) recoveryResult(contextID, phase, message string, now time.
 	fields := func(n int) map[string]interface{} {
 		return map[string]interface{}{"context_id": contextID, "stage": phase, "repeat_count": n}
 	}
-	if exists && message == previous.message && now.Sub(previous.since) < time.Minute {
+	window := time.Minute
+	if strings.HasPrefix(message, "FLAT_RECOVERY_PENDING:") {
+		window = 15 * time.Minute
+	}
+	if exists && message == previous.message && now.Sub(previous.since) < window {
 		previous.repeats++
 		l.recovery[key] = previous
 		return

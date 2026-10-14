@@ -119,6 +119,10 @@ func (e *Engine) Start() error {
 		e.stateMu.Unlock()
 		return nil
 	}
+	if err := e.st.CopyTrade().InterruptAIRuns(e.traderID); err != nil {
+		e.stateMu.Unlock()
+		return err
+	}
 	e.running = true
 	e.stopCh = make(chan struct{})
 	e.stateMu.Unlock()
@@ -192,7 +196,7 @@ func (e *Engine) HandleMessage(msg *store.DiscordMessage, isEdit bool) error {
 		if sig == nil {
 			return fmt.Errorf("signal persistence incomplete")
 		}
-		if sig.Status == store.SignalStatusReceived || sig.Status == store.SignalStatusParsed || sig.Status == store.SignalStatusExecuting {
+		if sig.Status == "interpreting" || sig.Status == store.SignalStatusReceived || sig.Status == store.SignalStatusParsed || sig.Status == store.SignalStatusExecuting {
 			return fmt.Errorf("signal outcome not committed")
 		}
 	}
@@ -243,7 +247,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 		MessageRevision:  msg.Revision,
 		Status:           store.SignalStatusReceived,
 		MessageTimestamp: msg.MessageTimestamp,
-		ReceivedAt:       time.Now().UTC(),
+		ReceivedAt:       msg.ReceivedAt,
 		ReceiveLatencyMs: msg.ReceivedAt.Sub(latencyRef).Milliseconds(),
 	}
 	if existing != nil {
@@ -251,6 +255,11 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 	}
 	if existing == nil {
 		if err := e.st.CopyTrade().CreateSignal(sig); err != nil {
+			return err
+		}
+	}
+	if existing != nil && existing.Status == "retry_wait" {
+		if err := e.st.CopyTrade().FinishRetryWait(sig); err != nil {
 			return err
 		}
 	}
@@ -304,6 +313,14 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 		interp, err = ParseInterpretation(existing.InterpretationJSON)
 	} else {
 		interp, run, timings, err = e.interpret(traceID, signalID, msg, isEdit, false)
+	}
+	select {
+	case <-stopForThisRun:
+		if run != nil && msg.DeliveryID == 0 {
+			_ = e.st.CopyTrade().StopInterpretingSignal(signalID, run.ID, string(SkipPaused))
+		}
+		return fmt.Errorf("interpretation interrupted by engine stop")
+	default:
 	}
 	if run != nil {
 		persist(map[string]interface{}{"ai_run_id": run.ID, "media_download_ms": timings.mediaMs, "prompt_build_ms": timings.promptMs, "llm_request_ms": timings.llmMs})
@@ -406,7 +423,7 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 		if insSkip == SkipWaitingReconciliation || insSkip == "SOURCE_NOT_READY" || insSkip == "SOURCE_GAP_OR_PERMISSION" {
 			waiting = true
 		}
-		result := InstructionResult{Index: i, Action: ins.Action, Symbol: ins.Symbol, Direction: ins.Direction, Status: "executed", SkipReason: insSkip, Detail: insDetail}
+		result := InstructionResult{ReduceTPLevel: ins.ReduceTPLevel, CancelPendingEntry: ins.CancelPendingEntry, Index: i, Action: ins.Action, Symbol: ins.Symbol, Direction: ins.Direction, Status: "executed", SkipReason: insSkip, Detail: insDetail}
 		if insErr != nil {
 			result.Status = "failed"
 			result.Detail = insErr.Error()
@@ -742,6 +759,25 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 		return nil, nil, t, rulesErr
 	}
 
+	// New frozen rules can recognize complete management text without network
+	// image/context requests. Execution still correlates and reads fresh state.
+	if rules.Version >= 4 && rules.SourceMode != "chroma" {
+		sources := e.messageSources(msg, rules.Profile)
+		if known := interpretKnownVersion(msg, sources, rules.Profile, rules.Version); known != nil {
+			known = applySourcePolicyVersion(known, msg, sources, rules.Profile, rules.Version)
+			known = ApplyMessageRules(known, msg, sources, rules)
+			b, _ := json.Marshal(known)
+			now := time.Now().UTC()
+			run := &store.CopyTradeAIRun{TraderID: e.traderID, SignalID: signalID, ChannelID: msg.ChannelID, MessageID: msg.MessageID, Model: "deterministic:" + rules.Profile, Provider: "deterministic", PromptVersion: PromptVersion, RulesSnapshotJSON: rules.Snapshot(), InputPrompt: msg.Content, ParsedJSON: string(b), RawResponse: string(b), Status: "completed", StartedAt: now, FinishedAt: now}
+			if !dryRun {
+				if err := e.st.CopyTrade().CreateAIRun(run); err != nil {
+					return nil, run, t, err
+				}
+				e.events.Info(traceID, signalID, msg.MessageID, EvRuleMatched, "management text recognized before media and AI", map[string]interface{}{"rules_version": rules.Version})
+			}
+			return known, run, t, nil
+		}
+	}
 	// Context: active trades, recent signals, reply/linked messages.
 	activeCtxs, _ := e.st.CopyTrade().GetActiveContexts(e.traderID)
 	filtered := activeCtxs[:0]
@@ -836,6 +872,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	}
 
 	run := &store.CopyTradeAIRun{
+		SignalID:          signalID,
 		TraderID:          e.traderID,
 		ChannelID:         msg.ChannelID,
 		MessageID:         msg.MessageID,
@@ -854,7 +891,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	var callErr error
 	known := InterpretChromaNotification(msg, rules)
 	if known == nil {
-		known = InterpretKnownSource(msg, sources, rules.Profile)
+		known = interpretKnownVersion(msg, sources, rules.Profile, rules.Version)
 	}
 	if known != nil {
 		b, _ := json.Marshal(known)
@@ -869,6 +906,20 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 			e.events.Info(traceID, signalID, msg.MessageID, EvAIRequest,
 				fmt.Sprintf("LLM request (%s, %d images, prompt %d chars)", e.modelID, imageCount, len(userPrompt)), nil)
 		}
+		if !dryRun {
+			run.Status = "running"
+			if attempts, err := e.st.CopyTrade().SignalAttempts(e.traderID, signalID); err != nil {
+				return nil, run, t, err
+			} else {
+				run.Attempt = len(attempts) + 1
+			}
+			if err := e.st.CopyTrade().CreateAIRun(run); err != nil {
+				return nil, run, t, err
+			}
+			if err := e.st.CopyTrade().UpdateSignal(signalID, map[string]interface{}{"status": "interpreting", "ai_run_id": run.ID, "next_retry_at": nil}); err != nil {
+				return nil, run, t, err
+			}
+		}
 		raw, callErr = e.llm.CallWithRequest(&mcp.Request{Messages: messages})
 	}
 	t.llmMs = time.Since(llmStart).Milliseconds()
@@ -876,11 +927,13 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	run.FinishedAt = time.Now().UTC()
 	run.DurationMs = t.llmMs
 	run.RawResponse = raw
+	run.Status = "completed"
 
 	if callErr != nil {
 		run.Error = callErr.Error()
+		run.Status = "failed"
 		if !dryRun {
-			if dbErr := e.st.CopyTrade().CreateAIRun(run); dbErr != nil {
+			if dbErr := e.st.CopyTrade().FinishAIRun(run); dbErr != nil {
 				return nil, run, t, fmt.Errorf("persist AI run: %w", dbErr)
 			}
 			e.events.Error(traceID, signalID, msg.MessageID, EvAIError, callErr.Error(), nil)
@@ -891,8 +944,9 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	interp, perr := ParseInterpretation(raw)
 	if perr != nil {
 		run.Error = perr.Error()
+		run.Status = "failed"
 		if !dryRun {
-			if dbErr := e.st.CopyTrade().CreateAIRun(run); dbErr != nil {
+			if dbErr := e.st.CopyTrade().FinishAIRun(run); dbErr != nil {
 				return nil, run, t, fmt.Errorf("persist AI run: %w", dbErr)
 			}
 			e.events.Error(traceID, signalID, msg.MessageID, EvAIError, "parse failed: "+perr.Error(), nil)
@@ -903,7 +957,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 		return nil, run, t, fmt.Errorf("interpretation parse failed: %w", perr)
 	}
 	interp = ApplyNotificationPolicy(interp, msg, rules)
-	interp = ApplySourcePolicy(interp, msg, sources, rules.Profile)
+	interp = applySourcePolicyVersion(interp, msg, sources, rules.Profile, rules.Version)
 	interp = ApplyMessageRules(interp, msg, sources, rules)
 	for _, ins := range interp.Flatten() {
 		if ins.ActionEvidence != nil && strings.HasSuffix(ins.ActionEvidence.SourceID, ":image") {
@@ -917,7 +971,7 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	parsedJSON, _ := json.Marshal(interp)
 	run.ParsedJSON = string(parsedJSON)
 	if !dryRun {
-		if dbErr := e.st.CopyTrade().CreateAIRun(run); dbErr != nil {
+		if dbErr := e.st.CopyTrade().FinishAIRun(run); dbErr != nil {
 			return nil, run, t, fmt.Errorf("persist AI run: %w", dbErr)
 		}
 		if known != nil {
@@ -1413,6 +1467,9 @@ func (e *Engine) routeClose(traceID, signalID string, msg *store.DiscordMessage,
 		if ctx.Quantity <= 0 || ctx.OpenedAt == nil {
 			return SkipNone, nil
 		}
+	}
+	if interp.ReduceTPLevel > 0 {
+		return e.exec.ExecuteTPReduction(traceID, signalID, ctx, interp.ReduceTPLevel)
 	}
 	ratio := 100.0
 	if interp.Action == ActionReduce || interp.CloseMode == CloseModePartial {

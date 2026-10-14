@@ -5,6 +5,7 @@ import (
 
 	"nofx/copytrader"
 	"nofx/discord"
+	"nofx/store"
 )
 
 // IsCopyTrading reports whether this trader runs in Discord copy-trading mode.
@@ -15,6 +16,8 @@ func (at *AutoTrader) IsCopyTrading() bool {
 // CopyEngine returns the running copy-trading engine (nil when the trader is
 // stopped or not a copy-trading trader).
 func (at *AutoTrader) CopyEngine() *copytrader.Engine {
+	at.copyLifecycleMu.Lock()
+	defer at.copyLifecycleMu.Unlock()
 	return at.copyEngine
 }
 
@@ -47,18 +50,44 @@ func (at *AutoTrader) runCopyTradingMode() error {
 		Exchange:   at.trader,
 		Source:     poller,
 	})
+	at.copyLifecycleMu.Lock()
 	if err := engine.Start(); err != nil {
+		at.copyLifecycleMu.Unlock()
 		return fmt.Errorf("copy trading engine start failed: %w", err)
 	}
 	at.copyEngine = engine
+	at.startBinanceHistorySync()
+	at.copyLifecycleMu.Unlock()
 
 	at.logInfof("🎯 Copy trading mode active: channel %s, risk mode %s ($%.2f), leverage %d/%dx",
 		cfg.PrimaryChannelID, cfg.RiskMode, cfg.RiskAmountUSD, cfg.MajorLeverage, cfg.AltcoinLeverage)
 
 	// Block until stop (mirrors the scan loop's lifecycle contract).
 	<-at.stopMonitorCh
+	at.copyLifecycleMu.Lock()
 	engine.Stop()
 	at.copyEngine = nil
+	at.copyLifecycleMu.Unlock()
 	at.logInfof("⏹ Copy trading mode stopped")
 	return nil
+}
+
+// Serializes manual review with engine start/stop; a stopped trader remains stopped.
+func (at *AutoTrader) ReviewCopyRecovery(contextID, actor, ticket, reason string) (*store.CopyTradeRecoveryReview, error) {
+	at.copyLifecycleMu.Lock()
+	defer at.copyLifecycleMu.Unlock()
+	if !at.IsCopyTrading() {
+		return nil, fmt.Errorf("not a copy-trading trader")
+	}
+	binding, err := at.store.CopyTrade().TraderExchangeID(at.id)
+	if err != nil {
+		return nil, err
+	}
+	if binding != at.exchangeID {
+		return nil, fmt.Errorf("runtime account binding changed; reload configuration")
+	}
+	if at.copyEngine != nil {
+		return at.copyEngine.RecoveryReview(contextID, actor, ticket, reason)
+	}
+	return copytrader.NewExecutor(at.id, at.trader, at.store, nil).RecoveryReview(contextID, actor, ticket, reason)
 }

@@ -10,7 +10,7 @@ import (
 
 // PromptVersion tags every AI run so output quality can be compared across
 // prompt iterations.
-const PromptVersion = "copytrade-v8"
+const PromptVersion = "copytrade-v9"
 
 // SystemPrompt is the fixed interpretation contract. It deliberately does NOT
 // ask the AI for quantities, leverage or risk decisions — those belong to the
@@ -30,6 +30,8 @@ Reply with EXACTLY ONE JSON object (no markdown fences, no commentary):
   "direction": "LONG | SHORT",
   "close_mode": "FULL | PARTIAL",
   "close_ratio": 50.0,
+  "reduce_tp_level": null,
+  "cancel_pending_entry": false,
   "entry_orders": [{"order_type": "MARKET|LIMIT", "price": {"type": "FIXED|MARKET|RANGE", "price": 0, "range_low": 0, "range_high": 0}}],
   "take_profit_levels": [{"price": {"type": "FIXED", "price": 0}, "ratio": null}],
   "stop_loss_levels": [{"price": {"type": "FIXED|ENTRY|BREAKEVEN|TP_LEVEL", "price": 0}, "conditional": ""}],
@@ -47,6 +49,8 @@ Reply with EXACTLY ONE JSON object (no markdown fences, no commentary):
 Omit fields that do not apply. All confidence values are 0.0-1.0.
 
 ## Multi-instruction messages
+TYLER explicit "我们提前止盈出" / "止盈出场" without a partial/retained proportion, negation or condition means CLOSE FULL of the remaining uniquely linked trade. Mere suggestions (consider/maybe) are not a deterministic full exit.
+"TP1 修改为这里减仓" means REDUCE with reduce_tp_level=1, close_mode=PARTIAL, and no close_ratio. Only explicit numbered TP replacement can use this field. If the same message says "补仓可以撤了", set cancel_pending_entry=true on that SAME instruction. This requests cancellation then execution of the unfilled TP allocation; do not emit a second generic REDUCE. "TP1 成交后" is a prerequisite; "TP1修改为这里减仓后再拿" is NOT a prerequisite. Every instruction must cover its complete source clause; do not silently discard another action or condition.
 When ONE message instructs actions on SEVERAL trades (e.g. "SEI - SL to breakeven / SUI - SL to breakeven / BTC - letting it run"), put one object PER action (including multiple actions on the same trade, e.g. REDUCE + UPDATE_SL) into "instructions". Each element carries the same per-trade fields as the top level: action, symbol, direction, close_mode, close_ratio, entry_orders, take_profit_levels, stop_loss_levels, trade_reference, confidence, reasoning. Rules:
 - Only emit an instruction for a trade with an actual action (open/close/reduce/SL move/TP change/cancel). "Letting it run" / "holding" / "still in profit" gets NO instruction.
 - If nothing in the message is actionable, use classification IGNORE and leave "instructions" empty.

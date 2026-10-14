@@ -32,6 +32,12 @@ func ValidateInterpretation(si *SourceInterpretation, marketPrice float64) (Skip
 		return SkipNotSignal, fmt.Errorf("unknown classification %q", si.Classification)
 	}
 
+	if si.ReduceTPLevel != 0 && (si.ReduceTPLevel < 1 || si.ReduceTPLevel > MaxTPLevels || si.Action != ActionReduce || si.CloseRatio != nil || si.CloseMode == CloseModeFull) {
+		return SkipAmbiguous, fmt.Errorf("invalid TP replacement: a numbered REDUCE cannot also specify a ratio")
+	}
+	if si.CancelPendingEntry && si.ReduceTPLevel == 0 {
+		return SkipAmbiguous, fmt.Errorf("compound cancellation requires a TP replacement")
+	}
 	switch si.Action {
 	case ActionOpen, ActionAdd:
 		return validateOpen(si, marketPrice)

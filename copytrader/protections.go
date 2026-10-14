@@ -89,7 +89,7 @@ func (x *Executor) refreshTPProgressChecked(traceID string, ctx *store.CopyTrade
 				tp.Status, changed = st, true
 			}
 		}
-		if tp.Filled || tp.FilledQuantity > 0 || tp.PriorFilledQuantity > 0 {
+		if tp.Filled || tp.FilledQuantity > 0 || tp.PriorFilledQuantity > 0 || tp.ReplacementFilled > 0 {
 			hits++
 		}
 	}
@@ -108,7 +108,7 @@ func (x *Executor) refreshTPProgressChecked(traceID string, ctx *store.CopyTrade
 
 func confirmedTPLevel(ctx *store.CopyTradeContext, level int) bool {
 	for _, tp := range readTPPlan(ctx) {
-		if tp.Ordinal == level && (tp.Filled || tp.FilledQuantity > 0 || tp.PriorFilledQuantity > 0) {
+		if tp.Ordinal == level && (tp.Filled || tp.FilledQuantity > 0 || tp.PriorFilledQuantity > 0 || tp.ReplacementFilled > 0) {
 			return true
 		}
 	}
@@ -210,7 +210,7 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 	}
 	total := 0.0
 	for _, tp := range plan {
-		if !tp.Filled {
+		if !tp.Filled && tp.ReplacedBy == "" {
 			total += math.Max(0, tp.Quantity-tp.FilledQuantity)
 		}
 	}
@@ -223,7 +223,7 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 			scale = qty / ctx.TPPositionQuantity
 		}
 		for i := range plan {
-			if !plan[i].Filled {
+			if !plan[i].Filled && plan[i].ReplacedBy == "" {
 				want := math.Max(0, plan[i].Quantity-plan[i].FilledQuantity) * scale
 				if step > 0 && want > 0 {
 					want, _ = types.DecimalFloor(types.SanitizeBaseQuantity(want), step)
@@ -238,7 +238,7 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 	}
 	for i := range plan {
 		tp := &plan[i]
-		if tp.Filled {
+		if tp.Filled || tp.ReplacedBy != "" {
 			continue
 		}
 		remaining := math.Max(0, tp.Quantity-tp.FilledQuantity)

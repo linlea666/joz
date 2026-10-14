@@ -185,3 +185,21 @@ func TestRecoveryEventWindow(t *testing.T) {
 		t.Fatal(fmt.Sprint(rows))
 	}
 }
+
+func TestTriggeredStopDoesNotSubmitReplacementAfterFlat(t *testing.T) {
+	x, v, c := historyFixture(t)
+	if err := x.persistContext(c, map[string]interface{}{"stop_intent_json": "", "stop_order_id": "42"}); err != nil {
+		t.Fatal(err)
+	}
+	v.qty = 0
+	v.result.Status = "FINISHED"
+	v.result.ActualOrderStatus = "FILLED"
+	v.result.ActualOrderID = "43"
+	err := x.setStopProtection("trace", "", c, .5, 95)
+	if !errors.Is(err, ErrProtectionUnconfirmed) || !strings.Contains(err.Error(), "EXIT_OBSERVED") {
+		t.Fatalf("wrong race outcome %v", err)
+	}
+	if v.submits != 0 {
+		t.Fatal("submitted replacement after flat")
+	}
+}

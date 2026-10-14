@@ -13,13 +13,13 @@ type RecognitionStats struct {
 
 func (s *CopyTradeStore) RecognitionStats(traderID string) (*RecognitionStats, error) {
 	var stats RecognitionStats
-	err := s.db.Model(&CopyTradeAIRun{}).Where("trader_id = ?", traderID).
+	err := s.db.Model(&CopyTradeAIRun{}).Where("trader_id = ?", traderID).Where("status NOT IN ?", []string{"running", "interrupted"}).
 		Select("COUNT(*) AS recognition_runs, COALESCE(SUM(CASE WHEN model LIKE 'deterministic:%' THEN 1 ELSE 0 END),0) AS deterministic_runs, COALESCE(SUM(CASE WHEN model LIKE 'deterministic:%' THEN 0 ELSE 1 END),0) AS model_calls").Scan(&stats).Error
 	if err != nil {
 		return nil, err
 	}
 	var first []CopyTradeAIRun
-	if err := s.db.Select("started_at").Where("trader_id = ?", traderID).Order("started_at ASC").Limit(1).Find(&first).Error; err != nil {
+	if err := s.db.Select("started_at").Where("trader_id = ?", traderID).Where("status NOT IN ?", []string{"running", "interrupted"}).Order("started_at ASC").Limit(1).Find(&first).Error; err != nil {
 		return nil, err
 	}
 	if len(first) > 0 {

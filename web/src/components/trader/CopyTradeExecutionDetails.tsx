@@ -125,6 +125,10 @@ export function CopyTradeExecutionDetails({
             <p key={result.index} className="break-all">
               {result.symbol} {result.direction} · {result.action} ·{' '}
               {result.status}
+              {result.reduce_tp_level
+                ? ` · 替代 TP${result.reduce_tp_level} 尚未成交份额`
+                : ''}
+              {result.cancel_pending_entry ? ' · 先撤未成交入场／补仓单' : ''}
               {result.skip_reason ? ` (${result.skip_reason})` : ''}
               {result.context_ids?.length
                 ? ` · ${result.context_ids.join(', ')}`

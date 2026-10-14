@@ -12,16 +12,18 @@ import (
 )
 
 type InstructionResult struct {
-	ActionIDs  []string   `json:"action_ids,omitempty"`
-	ContextIDs []string   `json:"context_ids,omitempty"`
-	OrderIDs   []string   `json:"order_ids,omitempty"`
-	Index      int        `json:"index"`
-	Action     Action     `json:"action"`
-	Symbol     string     `json:"symbol"`
-	Direction  Direction  `json:"direction,omitempty"`
-	Status     string     `json:"status"`
-	SkipReason SkipReason `json:"skip_reason,omitempty"`
-	Detail     string     `json:"detail,omitempty"`
+	ActionIDs          []string   `json:"action_ids,omitempty"`
+	ContextIDs         []string   `json:"context_ids,omitempty"`
+	OrderIDs           []string   `json:"order_ids,omitempty"`
+	ReduceTPLevel      int        `json:"reduce_tp_level,omitempty"`
+	CancelPendingEntry bool       `json:"cancel_pending_entry,omitempty"`
+	Index              int        `json:"index"`
+	Action             Action     `json:"action"`
+	Symbol             string     `json:"symbol"`
+	Direction          Direction  `json:"direction,omitempty"`
+	Status             string     `json:"status"`
+	SkipReason         SkipReason `json:"skip_reason,omitempty"`
+	Detail             string     `json:"detail,omitempty"`
 }
 
 func (e *Engine) messageSources(msg *store.DiscordMessage, profiles ...string) []SourceSegment {
@@ -122,6 +124,11 @@ func (e *Engine) claimInstruction(signalID string, msg *store.DiscordMessage, in
 		if partialAlias && parsed.CloseMode != CloseModePartial {
 			continue
 		}
+		// A rule upgrade or message edit must never repeat a previously submitted
+		// reduction merely because its new TP-allocation metadata is different.
+		if ins.Action == ActionReduce && (ins.ReduceTPLevel > 0 || parsed.ReduceTPLevel > 0) && old.Status != "preflight_rejected" && old.Status != "rejected" {
+			return old, false, nil
+		}
 		if instructionSemantic(&parsed) != semantic {
 			continue
 		}
@@ -157,7 +164,7 @@ func (e *Engine) deferInterpretationRetry(sig *store.CopyTradeSignal, msg *store
 	if ttl <= 0 || IsExpired(ref, next, ttl) {
 		return false
 	}
-	e.updateSignal(sig.ID, map[string]interface{}{"status": "retry_wait", "retry_count": sig.RetryCount + 1, "next_retry_at": next, "error_message": err.Error()})
+	e.updateSignal(sig.ID, map[string]interface{}{"status": "retry_wait", "retry_count": sig.RetryCount + 1, "next_retry_at": next, "retry_wait_started_at": time.Now().UTC(), "error_message": err.Error()})
 	e.events.Warn(sig.ID, sig.ID, msg.MessageID, EvAIError, fmt.Sprintf("temporary model failure; deferred attempt %d/2 at %s (no execution actions)", sig.RetryCount+1, next.Format(time.RFC3339)), nil)
 	return true
 }

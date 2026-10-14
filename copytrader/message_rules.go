@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const MessageRulesVersion = 3
+const MessageRulesVersion = 4
 
 type MessageRules struct {
 	ParseImages          bool     `json:"parse_images"`
@@ -88,6 +88,11 @@ func ApplyMessageRules(interp *SourceInterpretation, msg *store.DiscordMessage, 
 		return applyPresetPolicy(nil, msg, sources, rules)
 	}
 	for _, ins := range interp.Flatten() {
+		if rules.Version < 4 && (ins.ReduceTPLevel != 0 || ins.CancelPendingEntry) {
+			ins.Classification = ClassificationUnsupported
+			ins.Reasoning = "numbered TP replacement requires frozen management rules v4"
+			continue
+		}
 		if ins.Action == ActionClose && ins.CloseMode == CloseModePartial {
 			ins.Action = ActionReduce
 		}
@@ -103,14 +108,20 @@ func ApplyMessageRules(interp *SourceInterpretation, msg *store.DiscordMessage, 
 				}
 			}
 		}
+		if rules.Version >= 4 && scope != "" {
+			scope = managementScopeV4(scope, ins)
+		}
 		if scope == "" {
-			if ins.Action == ActionReduce {
+			if ins.Action == ActionReduce && ins.ReduceTPLevel == 0 {
 				applyReductionRatio(ins, scope, sources, rules.ReduceRatio)
 			}
 			continue
 		}
-		if ins.Action == ActionReduce {
+		if ins.Action == ActionReduce && ins.ReduceTPLevel == 0 {
 			applyReductionRatio(ins, scope, sources, rules.ReduceRatio)
+			if rules.Version >= 4 {
+				applyRetainedRatioV4(ins, scope)
+			}
 		}
 
 		if ins.Action == ActionClose && scope != "" {
@@ -125,6 +136,9 @@ func ApplyMessageRules(interp *SourceInterpretation, msg *store.DiscordMessage, 
 
 		if ins.Action == ActionReduce || ins.Action == ActionClose || ins.Action == ActionUpdateSL {
 			level, ambiguous := requiredTPFill(scope)
+			if rules.Version >= 4 {
+				level, ambiguous = requiredTPFillV4(scope)
+			}
 			if ambiguous || strings.Contains(scope, "倉位重") || strings.Contains(scope, "仓位重") {
 				ins.Classification = ClassificationNeedsContext
 			}

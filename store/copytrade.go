@@ -79,6 +79,9 @@ func (CopyTradeContext) TableName() string { return "copytrade_trade_contexts" }
 
 // CopyTradeAIRun records one LLM interpretation call end to end.
 type CopyTradeAIRun struct {
+	SignalID          string `gorm:"default:'';index" json:"signal_id,omitempty"`
+	Status            string `gorm:"default:''" json:"status,omitempty"`
+	Attempt           int    `gorm:"default:0" json:"attempt,omitempty"`
 	ID                int64  `gorm:"primaryKey;autoIncrement" json:"id"`
 	TraderID          string `gorm:"column:trader_id;not null;index" json:"trader_id"`
 	ChannelID         string `gorm:"column:channel_id;not null" json:"channel_id"`
@@ -119,10 +122,13 @@ const (
 
 // CopyTradeSignal is the per-trader record of one interpreted message.
 type CopyTradeSignal struct {
-	SourceEventID    string `json:"source_event_id,omitempty"`
-	DeliveryID       int64  `json:"delivery_id,omitempty"`
-	LogicalChannelID string `json:"logical_channel_id,omitempty"`
-	QueueMs          int64  `json:"queue_ms"`
+	RetryWaitStartedAt *time.Time `json:"-"`
+	RetryWaitMs        *int64     `json:"retry_wait_ms,omitempty"`
+	EndToEndMs         *int64     `json:"end_to_end_ms,omitempty"`
+	SourceEventID      string     `json:"source_event_id,omitempty"`
+	DeliveryID         int64      `json:"delivery_id,omitempty"`
+	LogicalChannelID   string     `json:"logical_channel_id,omitempty"`
+	QueueMs            int64      `json:"queue_ms"`
 
 	ID                string `gorm:"primaryKey" json:"id"`
 	TraderID          string `gorm:"column:trader_id;not null;index:idx_cts_trader_time,priority:1" json:"trader_id"`
@@ -281,7 +287,7 @@ func NewCopyTradeStore(db *gorm.DB) *CopyTradeStore {
 
 func (s *CopyTradeStore) initTables() error {
 	return s.db.AutoMigrate(
-		&CopyTradeContext{},
+		&CopyTradeContext{}, &CopyTradeRecoveryReview{},
 		&CopyTradeOwnership{}, &CopyTradeAccountFence{},
 		&CopyTradeAIRun{},
 		&CopyTradeSignal{},
@@ -428,7 +434,7 @@ func (s *CopyTradeStore) GetAIStats(since time.Time) ([]*AIStat, error) {
 			AVG(duration_ms) as avg_ms,
 			MIN(duration_ms) as min_ms,
 			MAX(duration_ms) as max_ms`).
-		Where("started_at >= ?", since).
+		Where("started_at >= ?", since).Where("status NOT IN ?", []string{"running", "interrupted"}).
 		Group("model, provider").
 		Order("avg_ms ASC").
 		Scan(&stats).Error
@@ -488,6 +494,16 @@ func (s *CopyTradeStore) CreateSignal(sig *CopyTradeSignal) error {
 
 // UpdateSignal applies partial updates to a signal.
 func (s *CopyTradeStore) UpdateSignal(id string, updates map[string]interface{}) error {
+	if status, ok := updates["status"].(string); ok && (status == SignalStatusExecuted || status == SignalStatusFailed || status == SignalStatusSkipped) {
+		var sig CopyTradeSignal
+		if err := s.db.Select("received_at").First(&sig, "id = ?", id).Error; err != nil {
+			return err
+		}
+		if !sig.ReceivedAt.IsZero() {
+			updates["end_to_end_ms"] = max(int64(0), time.Since(sig.ReceivedAt).Milliseconds())
+		}
+	}
+
 	return s.db.Model(&CopyTradeSignal{}).Where("id = ?", id).Updates(updates).Error
 }
 
@@ -665,4 +681,60 @@ func (s *CopyTradeStore) GetContextSignalsForSources(traderID string, channels [
 	var rows []*CopyTradeSignal
 	err := s.db.Where("trader_id = ? AND channel_id IN ? AND message_timestamp >= ? AND classification != ''", traderID, channels, since.UTC()).Order("message_timestamp DESC").Limit(limit).Find(&rows).Error
 	return rows, err
+}
+
+// FinishAIRun preserves the durable attempt identity created before a call.
+func (s *CopyTradeStore) FinishAIRun(run *CopyTradeAIRun) error {
+	if run.ID == 0 {
+		return s.db.Create(run).Error
+	}
+	// A completed old goroutine cannot overwrite the interrupted record of a
+	// previous engine lifecycle. Never upsert a disappeared historical attempt.
+	r := s.db.Model(&CopyTradeAIRun{}).Where("id = ? AND status <> ?", run.ID, "interrupted").Select("*").Updates(run)
+	if r.Error != nil {
+		return r.Error
+	}
+	if r.RowsAffected != 1 {
+		return fmt.Errorf("attempt interrupted or removed")
+	}
+	return nil
+}
+func (s *CopyTradeStore) InterruptAIRuns(traderID string) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
+		if err := tx.Model(&CopyTradeAIRun{}).Where("trader_id = ? AND status = ?", traderID, "running").Updates(map[string]interface{}{"status": "interrupted", "error": "process stopped before attempt completion", "finished_at": now}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&CopyTradeSignal{}).Where("trader_id = ? AND status = ? AND execution_version > 0", traderID, "interpreting").Updates(map[string]interface{}{"status": "retry_wait", "next_retry_at": now, "error_message": "interpretation interrupted; waiting for recovery"}).Error
+	})
+}
+func (s *CopyTradeStore) SignalAttempts(traderID, signalID string) ([]CopyTradeAIRun, error) {
+	var rows []CopyTradeAIRun
+	err := s.db.Select("id,signal_id,status,attempt,model,provider,started_at,finished_at,duration_ms,error,rules_snapshot_json").Where("trader_id = ? AND signal_id = ?", traderID, signalID).Order("id").Find(&rows).Error
+	return rows, err
+}
+
+// A late callback may close only its own still-running attempt, never the next lifecycle.
+func (s *CopyTradeStore) StopInterpretingSignal(signalID string, runID int64, reason string) error {
+	return s.db.Model(&CopyTradeSignal{}).Where("id = ? AND status = ? AND ai_run_id = ?", signalID, "interpreting", runID).Updates(map[string]interface{}{"status": "skipped", "skip_reason": reason, "next_retry_at": nil}).Error
+}
+
+// Account only for time explicitly spent waiting for an interpretation retry.
+func (s *CopyTradeStore) FinishRetryWait(sig *CopyTradeSignal) error {
+	if sig.RetryWaitStartedAt == nil {
+		return nil
+	}
+	ms := max(int64(0), time.Since(*sig.RetryWaitStartedAt).Milliseconds())
+	r := s.db.Model(&CopyTradeSignal{}).Where("id = ? AND retry_wait_started_at = ?", sig.ID, sig.RetryWaitStartedAt).Updates(map[string]interface{}{"retry_wait_ms": gorm.Expr("COALESCE(retry_wait_ms,0) + ?", ms), "retry_wait_started_at": nil})
+	if r.Error != nil {
+		return r.Error
+	}
+	if r.RowsAffected != 1 {
+		return fmt.Errorf("retry wait state changed")
+	}
+	if sig.RetryWaitMs != nil {
+		ms += *sig.RetryWaitMs
+	}
+	sig.RetryWaitMs, sig.RetryWaitStartedAt = &ms, nil
+	return nil
 }

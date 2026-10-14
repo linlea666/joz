@@ -19,6 +19,13 @@ func normalizedPrice(p PriceSpec) PriceSpec {
 	}
 }
 func instructionSemantic(ins *SourceInterpretation) string {
+	if ins.ReduceTPLevel > 0 {
+		b, _ := json.Marshal(struct {
+			TP     int  `json:"tp"`
+			Cancel bool `json:"cancel"`
+		}{ins.ReduceTPLevel, ins.CancelPendingEntry})
+		return string(b)
+	}
 	if ins.Action != ActionUpdateSL && ins.Action != ActionUpdateTP {
 		return ""
 	}

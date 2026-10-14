@@ -131,7 +131,7 @@ func (s *Store) initTables() error {
 		return fmt.Errorf("failed to create system_config table: %w", err)
 	}
 
-	if err := s.gdb.AutoMigrate(&SystemEvent{}, &LogCleanupTicket{}); err != nil {
+	if err := s.gdb.AutoMigrate(&SystemEvent{}, &LogCleanupTicket{}, &TradeHistorySyncState{}); err != nil {
 		return err
 	}
 

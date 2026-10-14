@@ -18,12 +18,21 @@ const maxBackoff = 5 * time.Minute
 // stop is closed. After each consecutive failure the wait doubles (capped at
 // maxBackoff); the first success resets it to the base interval.
 func Run(stop <-chan struct{}, interval time.Duration, name string, syncFn func() error) {
+	Start(stop, interval, name, false, syncFn)
+}
+func Start(stop <-chan struct{}, interval time.Duration, name string, immediate bool, syncFn func() error) <-chan struct{} {
+	done := make(chan struct{})
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
 	go func() {
+		defer close(done)
 		wait := interval
-		timer := time.NewTimer(wait)
+		first := wait
+		if immediate {
+			first = 0
+		}
+		timer := time.NewTimer(first)
 		defer timer.Stop()
 		for {
 			select {
@@ -31,6 +40,11 @@ func Run(stop <-chan struct{}, interval time.Duration, name string, syncFn func(
 				logger.Infof("⏹ %s order sync stopped", name)
 				return
 			case <-timer.C:
+				select {
+				case <-stop:
+					return
+				default:
+				}
 				if err := syncFn(); err != nil {
 					wait *= 2
 					if wait > maxBackoff {
@@ -45,4 +59,5 @@ func Run(stop <-chan struct{}, interval time.Duration, name string, syncFn func(
 		}
 	}()
 	logger.Infof("🔄 %s order sync started (interval: %v)", name, interval)
+	return done
 }

@@ -1,62 +1,102 @@
 package binance
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+	"math"
 	"nofx/logger"
 	"nofx/market"
 	"nofx/store"
 	"nofx/trader/syncloop"
 	"nofx/trader/types"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-// syncState stores the last sync time (Unix ms) for incremental sync
-var (
-	binanceSyncState      = make(map[string]int64) // exchangeID -> lastSyncTimeMs (Unix ms)
-	binanceSyncStateMutex sync.RWMutex
-)
+// Coalesce concurrent page/background requests for the same physical account.
+type historyFlight struct {
+	done chan struct{}
+	err  error
+}
+
+var historyFlights sync.Map
 
 // SyncOrdersFromBinance syncs Binance Futures trade history to local database
 // Uses COMMISSION detection + fromId for efficient incremental sync
 // Also creates/updates position records to ensure orders/fills/positions data consistency
 func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string, exchangeType string, st *store.Store) error {
+	return t.syncOrdersContext(context.Background(), traderID, exchangeID, exchangeType, st)
+}
+func (t *FuturesTrader) syncOrdersContext(ctx context.Context, traderID, exchangeID, exchangeType string, st *store.Store) (result error) {
+	flight := &historyFlight{done: make(chan struct{})}
+	current, loaded := historyFlights.LoadOrStore(exchangeID, flight)
+	if loaded {
+		f := current.(*historyFlight)
+		select {
+		case <-f.done:
+			return f.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	defer func() { flight.err = result; close(flight.done); historyFlights.Delete(exchangeID) }()
+	return t.syncHistory(ctx, traderID, exchangeID, exchangeType, st)
+}
+func (t *FuturesTrader) syncHistory(ctx context.Context, traderID string, exchangeID string, exchangeType string, st *store.Store) (result error) {
 	if st == nil {
 		return fmt.Errorf("store is nil")
 	}
 
 	orderStore := st.Order()
 
-	// Get last sync time (Unix ms) - first try memory, then database, then default
-	binanceSyncStateMutex.RLock()
-	lastSyncTimeMs, exists := binanceSyncState[exchangeID]
-	binanceSyncStateMutex.RUnlock()
-
-	nowMs := time.Now().UTC().UnixMilli()
-	if !exists {
-		// Try to get last fill time from database (persist across restarts)
-		lastFillTimeMs, err := orderStore.GetLastFillTimeByExchange(exchangeID)
-		if err == nil && lastFillTimeMs > 0 {
-			// If recovered time is in the future, it's clearly wrong - use default
-			if lastFillTimeMs > nowMs {
-				logger.Infof("⚠️ DB sync time %d is in the future (now: %d), using default",
-					lastFillTimeMs, nowMs)
-				lastSyncTimeMs = nowMs - 24*60*60*1000 // 24 hours ago
-			} else {
-				// Add 1 second buffer to avoid re-fetching the same fill
-				lastSyncTimeMs = lastFillTimeMs + 1000
-				logger.Infof("📅 Recovered last sync time from DB: %s (UTC)",
-					time.UnixMilli(lastSyncTimeMs).UTC().Format("2006-01-02 15:04:05"))
-			}
-		} else {
-			// First sync: go back 24 hours
-			lastSyncTimeMs = nowMs - 24*60*60*1000
-			logger.Infof("📅 First sync, starting from 24 hours ago: %s (UTC)",
-				time.UnixMilli(lastSyncTimeMs).UTC().Format("2006-01-02 15:04:05"))
-		}
+	progress, err := orderStore.HistorySyncState(exchangeID)
+	if err != nil {
+		return err
 	}
+	now := time.Now().UTC()
+	nowMs := now.UnixMilli()
+	lastSyncTimeMs := progress.CursorMS
+	if lastSyncTimeMs <= 0 || lastSyncTimeMs > nowMs {
+		last, err := orderStore.GetLastFillTimeByExchange(exchangeID)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		lastSyncTimeMs = nowMs - 24*60*60*1000
+		if last > 0 && last <= nowMs {
+			lastSyncTimeMs = last
+		} // inclusive boundary
+	}
+	progress.CursorMS = lastSyncTimeMs
+	progress.LastAttempt = &now
+	if err = st.GormDB().Clauses(clause.OnConflict{DoNothing: true}).Create(progress).Error; err != nil {
+		return err
+	}
+	if err = st.GormDB().Model(progress).Update("last_attempt", now).Error; err != nil {
+		return err
+	}
+	defer func() {
+		updates := map[string]interface{}{"last_error": ""}
+		if result != nil {
+			// Exchange query errors have already been stripped of signed URLs.
+			detail := []rune(result.Error())
+			if len(detail) > 512 {
+				detail = append(detail[:512], '…')
+			}
+			updates["last_error"] = "成交历史同步失败：" + string(detail)
+			logger.Warnf("Binance history sync failed; account %s: %s", exchangeID, string(detail))
+		} else {
+			updates["last_success"] = time.Now().UTC()
+		}
+		if err := st.GormDB().Model(progress).Updates(updates).Error; err != nil {
+			result = errors.Join(result, err)
+		}
+	}()
 
 	logger.Infof("🔄 Syncing Binance trades from: %s (UTC) [ms: %d, now: %d]",
 		time.UnixMilli(lastSyncTimeMs).UTC().Format("2006-01-02 15:04:05"), lastSyncTimeMs, nowMs)
@@ -64,8 +104,7 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 	// Step 1: Get max trade IDs from local DB for incremental sync
 	maxTradeIDs, err := orderStore.GetMaxTradeIDsByExchange(exchangeID)
 	if err != nil {
-		logger.Infof("  ⚠️ Failed to get max trade IDs: %v, will use time-based query", err)
-		maxTradeIDs = make(map[string]int64)
+		return fmt.Errorf("read history cursor: %w", err)
 	}
 
 	// Step 2: Detect symbols to sync using multiple methods
@@ -74,9 +113,9 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 	lastSyncTime := time.UnixMilli(lastSyncTimeMs) // Convert to time.Time for API calls
 
 	// Method 1: COMMISSION income detection
-	commissionSymbols, err := t.GetCommissionSymbols(lastSyncTime)
+	commissionSymbols, err := t.historyIncomeSymbolsContext(ctx, "COMMISSION", lastSyncTime)
 	if err != nil {
-		logger.Infof("  ⚠️ Failed to get commission symbols: %v", err)
+		return fmt.Errorf("commission symbol query: %w", err)
 	} else {
 		logger.Infof("  📋 COMMISSION symbols found: %d - %v", len(commissionSymbols), commissionSymbols)
 		for _, s := range commissionSymbols {
@@ -85,14 +124,20 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 	}
 
 	// Method 2: Always include active positions (catches trades that COMMISSION missed)
-	positionSymbols := t.getPositionSymbols()
+	positionSymbols, err := t.getPositionSymbolsChecked(ctx)
+	if err != nil {
+		return err
+	}
 	logger.Infof("  📋 Position symbols found: %d - %v", len(positionSymbols), positionSymbols)
 	for _, s := range positionSymbols {
 		symbolMap[s] = true
 	}
 
 	// Method 3: Include symbols from recent fills in DB (in case some were partially synced)
-	recentSymbols, _ := orderStore.GetRecentFillSymbolsByExchange(exchangeID, lastSyncTimeMs)
+	recentSymbols, err := orderStore.GetRecentFillSymbolsByExchange(exchangeID, lastSyncTimeMs)
+	if err != nil {
+		return err
+	}
 	logger.Infof("  📋 Recent fill symbols found: %d - %v", len(recentSymbols), recentSymbols)
 	for _, s := range recentSymbols {
 		symbolMap[s] = true
@@ -102,9 +147,9 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 	// This catches trades that COMMISSION missed (VIP users, BNB fee discount)
 	// IMPORTANT: Must run always, not just when symbolMap is empty,
 	// because a position might be fully closed (no active position) but have PnL
-	pnlSymbols, err := t.GetPnLSymbols(lastSyncTime)
+	pnlSymbols, err := t.historyIncomeSymbolsContext(ctx, "REALIZED_PNL", lastSyncTime)
 	if err != nil {
-		logger.Infof("  ⚠️ Failed to get PnL symbols: %v", err)
+		return fmt.Errorf("PnL symbol query: %w", err)
 	} else {
 		logger.Infof("  📋 REALIZED_PNL symbols found: %d - %v", len(pnlSymbols), pnlSymbols)
 		for _, s := range pnlSymbols {
@@ -121,7 +166,7 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 		logger.Infof("📭 No symbols with new trades to sync")
 		// DON'T update lastSyncTime to current time here!
 		// Keep using the last actual trade time from DB to avoid creating gaps
-		// The lastSyncTimeMs from DB already has +1000ms buffer added
+		// Inclusive boundary is intentional; fill identity handles duplicates.
 		return nil
 	}
 
@@ -135,14 +180,41 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 		var trades []types.TradeRecord
 		var queryErr error
 
-		if lastID, ok := maxTradeIDs[symbol]; ok && lastID > 0 {
-			// Incremental sync: query from last known trade ID
-			trades, queryErr = t.GetTradesForSymbolFromID(symbol, lastID+1, 500)
-		} else {
-			// New symbol or first sync: query by time
-			trades, queryErr = t.GetTradesForSymbol(symbol, lastSyncTime, 500)
+		lastID := maxTradeIDs[symbol]
+		for page := 0; page < 10; page++ {
+			var batch []types.TradeRecord
+			if lastID > 0 {
+				batch, queryErr = t.getTradesFromID(ctx, symbol, lastID+1, 500)
+			} else {
+				batch, queryErr = t.getTradesSince(ctx, symbol, lastSyncTime, 500)
+			}
+			apiCalls++
+			if queryErr != nil {
+				break
+			}
+			previous := lastID
+			for _, tr := range batch {
+				id, e := strconv.ParseInt(tr.TradeID, 10, 64)
+				if e != nil {
+					queryErr = e
+					break
+				}
+				if id > lastID {
+					lastID = id
+				}
+			}
+			trades = append(trades, batch...)
+			if queryErr != nil || len(batch) < 500 {
+				break
+			}
+			if lastID <= previous {
+				queryErr = fmt.Errorf("non advancing history page")
+				break
+			}
+			if page == 9 {
+				failedSymbols = append(failedSymbols, symbol)
+			} // persist partial pages; continue next cycle
 		}
-		apiCalls++
 
 		if queryErr != nil {
 			logger.Infof("  ⚠️ Failed to get trades for %s: %v", symbol, queryErr)
@@ -158,137 +230,109 @@ func (t *FuturesTrader) SyncOrdersFromBinance(traderID string, exchangeID string
 		// No trades returned, but symbols were detected - might be false positive from COMMISSION/PnL detection
 		// Don't update lastSyncTime, keep using DB value
 		if len(failedSymbols) > 0 {
-			logger.Infof("  ⚠️ %d symbols failed: %v", len(failedSymbols), failedSymbols)
+			return fmt.Errorf("history queries incomplete for %v", failedSymbols)
 		}
 		return nil
 	}
 
 	// Sort trades by time ASC (oldest first) for proper position building
 	sort.Slice(allTrades, func(i, j int) bool {
-		return allTrades[i].Time.UnixMilli() < allTrades[j].Time.UnixMilli()
+		if allTrades[i].Time.Equal(allTrades[j].Time) {
+			a, _ := strconv.ParseInt(allTrades[i].TradeID, 10, 64)
+			b, _ := strconv.ParseInt(allTrades[j].TradeID, 10, 64)
+			return a < b
+		}
+		return allTrades[i].Time.Before(allTrades[j].Time)
 	})
 
-	// Process trades one by one
-	positionStore := st.Position()
-	posBuilder := store.NewPositionBuilder(positionStore)
 	syncedCount := 0
-
-	skippedCount := 0
 	for _, trade := range allTrades {
-		// Check if trade already exists
-		existing, err := orderStore.GetOrderByExchangeID(exchangeID, trade.TradeID)
-		if err == nil && existing != nil {
-			skippedCount++
-			continue // Trade already exists, skip
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := t.persistHistoryTrade(st, traderID, exchangeID, exchangeType, trade); err != nil {
+			return err
+		}
+		syncedCount++
+	}
+
+	if len(failedSymbols) > 0 {
+		return fmt.Errorf("history incomplete for %v; cursor retained", failedSymbols)
+	}
+	if len(allTrades) > 0 {
+		latest := allTrades[len(allTrades)-1].Time.UTC().UnixMilli()
+		if err := st.GormDB().Model(progress).Update("cursor_ms", latest).Error; err != nil {
+			return err
+		}
+	}
+	logger.Infof("Binance history sync completed: %d checked fills", syncedCount)
+	return nil
+}
+
+// Existing historical rows remain unchanged. New fill/order/position changes
+// commit atomically so a failed position update cannot be hidden by dedup.
+func (t *FuturesTrader) persistHistoryTrade(st *store.Store, traderID, exchangeID, exchangeType string, trade types.TradeRecord) error {
+	if trade.TradeID == "" || trade.Symbol == "" || trade.Time.IsZero() || (trade.Side != "BUY" && trade.Side != "SELL") || trade.Price <= 0 || trade.Quantity <= 0 {
+		return fmt.Errorf("invalid history fill identity/quantity")
+	}
+	for _, v := range []float64{trade.Price, trade.Quantity, trade.Fee, trade.RealizedPnL} {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("non-finite history fill")
+		}
+	}
+	return st.Transaction(func(tx *gorm.DB) error {
+
+		symbol := market.Normalize(trade.Symbol)
+		var count int64
+		if err := tx.Model(&store.TraderFill{}).Where("exchange_id = ? AND symbol = ? AND exchange_trade_id = ?", exchangeID, symbol, trade.TradeID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return nil
+		}
+		if err := tx.Model(&store.TraderOrder{}).Where("exchange_id = ? AND symbol = ? AND exchange_order_id = ?", exchangeID, symbol, trade.TradeID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return fmt.Errorf("legacy incomplete history row requires review: %s %s", symbol, trade.TradeID)
 		}
 
-		// Normalize symbol
-		symbol := market.Normalize(trade.Symbol)
-
-		// Determine order action based on side and position side
-		orderAction := t.determineOrderAction(trade.Side, trade.PositionSide, trade.RealizedPnL)
-
-		// Determine position side for position builder
-		positionSide := trade.PositionSide
-		if positionSide == "" || positionSide == "BOTH" {
-			// Infer from order action
-			if strings.Contains(orderAction, "long") {
-				positionSide = "LONG"
-			} else {
-				positionSide = "SHORT"
+		action := t.determineOrderAction(trade.Side, trade.PositionSide, trade.RealizedPnL)
+		side := trade.PositionSide
+		if side == "" || side == "BOTH" {
+			side = "SHORT"
+			if strings.Contains(action, "long") {
+				side = "LONG"
 			}
 		}
-
-		// Normalize side
-		side := strings.ToUpper(trade.Side)
-
-		// Create order record - use Unix milliseconds UTC
-		tradeTimeMs := trade.Time.UTC().UnixMilli()
-		orderRecord := &store.TraderOrder{
-			TraderID:        traderID,
-			ExchangeID:      exchangeID,
-			ExchangeType:    exchangeType,
-			ExchangeOrderID: trade.TradeID,
-			Symbol:          symbol,
-			Side:            side,
-			PositionSide:    positionSide,
-			Type:            "MARKET",
-			OrderAction:     orderAction,
-			Quantity:        trade.Quantity,
-			Price:           trade.Price,
-			Status:          "FILLED",
-			FilledQuantity:  trade.Quantity,
-			AvgFillPrice:    trade.Price,
-			Commission:      trade.Fee,
-			FilledAt:        tradeTimeMs,
-			CreatedAt:       tradeTimeMs,
-			UpdatedAt:       tradeTimeMs,
+		at := trade.Time.UTC().UnixMilli()
+		row := &store.TraderOrder{TraderID: traderID, ExchangeID: exchangeID, ExchangeType: exchangeType, ExchangeOrderID: trade.TradeID, Symbol: symbol, Side: strings.ToUpper(trade.Side), PositionSide: side, Type: "MARKET", OrderAction: action, Quantity: trade.Quantity, Price: trade.Price, Status: "FILLED", FilledQuantity: trade.Quantity, AvgFillPrice: trade.Price, Commission: trade.Fee, FilledAt: at, CreatedAt: at, UpdatedAt: at}
+		if err := tx.Create(row).Error; err != nil {
+			return err
 		}
-
-		// Insert order record
-		if err := orderStore.CreateOrder(orderRecord); err != nil {
-			logger.Infof("  ⚠️ Failed to sync trade %s: %v", trade.TradeID, err)
-			continue
+		f := &store.TraderFill{TraderID: traderID, ExchangeID: exchangeID, ExchangeType: exchangeType, OrderID: row.ID, ExchangeOrderID: trade.TradeID, ExchangeTradeID: trade.TradeID, Symbol: symbol, Side: row.Side, Price: trade.Price, Quantity: trade.Quantity, QuoteQuantity: trade.Price * trade.Quantity, Commission: trade.Fee, CommissionAsset: "USDT", RealizedPnL: trade.RealizedPnL, CreatedAt: at}
+		if err := tx.Create(f).Error; err != nil {
+			return err
 		}
-
-		// Create fill record - use Unix milliseconds UTC
-		fillRecord := &store.TraderFill{
-			TraderID:        traderID,
-			ExchangeID:      exchangeID,
-			ExchangeType:    exchangeType,
-			OrderID:         orderRecord.ID,
-			ExchangeOrderID: trade.TradeID,
-			ExchangeTradeID: trade.TradeID,
-			Symbol:          symbol,
-			Side:            side,
-			Price:           trade.Price,
-			Quantity:        trade.Quantity,
-			QuoteQuantity:   trade.Price * trade.Quantity,
-			Commission:      trade.Fee,
-			CommissionAsset: "USDT",
-			RealizedPnL:     trade.RealizedPnL,
-			IsMaker:         false,
-			CreatedAt:       tradeTimeMs,
-		}
-
-		if err := orderStore.CreateFill(fillRecord); err != nil {
-			logger.Infof("  ⚠️ Failed to sync fill for trade %s: %v", trade.TradeID, err)
-		}
-
-		// Create/update position record using PositionBuilder
-		if err := posBuilder.ProcessTrade(
-			traderID, exchangeID, exchangeType,
-			symbol, positionSide, orderAction,
-			trade.Quantity, trade.Price, trade.Fee, trade.RealizedPnL,
-			tradeTimeMs, trade.TradeID,
-		); err != nil {
-			logger.Infof("  ⚠️ Failed to sync position for trade %s: %v", trade.TradeID, err)
-		} else {
-			logger.Infof("  📍 Position updated for trade: %s (action: %s, qty: %.6f)", trade.TradeID, orderAction, trade.Quantity)
-		}
-
-		syncedCount++
-		logger.Infof("  ✅ Synced trade: %s %s %s qty=%.6f price=%.6f pnl=%.2f fee=%.6f action=%s time=%s(UTC)",
-			trade.TradeID, symbol, side, trade.Quantity, trade.Price, trade.RealizedPnL, trade.Fee, orderAction,
-			trade.Time.UTC().Format("01-02 15:04:05"))
+		return store.NewPositionBuilder(store.NewPositionStore(tx)).ProcessTrade(traderID, exchangeID, exchangeType, symbol, side, action, trade.Quantity, trade.Price, trade.Fee, trade.RealizedPnL, at, trade.TradeID)
+	})
+}
+func (t *FuturesTrader) getPositionSymbolsChecked(ctx context.Context) ([]string, error) {
+	positions, err := t.client.NewGetPositionRiskService().Do(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("position discovery failed: %w", &stopHistoryError{cause: err})
 	}
-
-	// Update lastSyncTime to the LATEST trade time (not current time!)
-	// This ensures next sync starts from where we left off, not from "now"
-	// allTrades is already sorted by time ASC, so last element is the latest
-	if len(allTrades) > 0 && len(failedSymbols) == 0 {
-		latestTradeTimeMs := allTrades[len(allTrades)-1].Time.UTC().UnixMilli()
-		binanceSyncStateMutex.Lock()
-		binanceSyncState[exchangeID] = latestTradeTimeMs
-		binanceSyncStateMutex.Unlock()
-		logger.Infof("📅 Updated lastSyncTime to latest trade: %s (UTC)",
-			time.UnixMilli(latestTradeTimeMs).UTC().Format("2006-01-02 15:04:05"))
-	} else if len(failedSymbols) > 0 {
-		logger.Infof("  ⚠️ %d symbols failed, not updating lastSyncTime to retry next time: %v", len(failedSymbols), failedSymbols)
+	var symbols []string
+	for _, p := range positions {
+		qty, err := strconv.ParseFloat(p.PositionAmt, 64)
+		if err != nil {
+			return nil, fmt.Errorf("malformed position amount")
+		}
+		if qty != 0 {
+			symbols = append(symbols, p.Symbol)
+		}
 	}
-
-	logger.Infof("✅ Binance order sync completed: %d new trades synced, %d skipped (already exist)", syncedCount, skippedCount)
-	return nil
+	return symbols, nil
 }
 
 // getPositionSymbols returns list of symbols that have active positions
@@ -311,6 +355,19 @@ func (t *FuturesTrader) getPositionSymbols() []string {
 // determineOrderAction determines the order action based on trade data
 func (t *FuturesTrader) determineOrderAction(side, positionSide string, realizedPnL float64) string {
 	side = strings.ToUpper(side)
+	if strings.EqualFold(positionSide, "LONG") {
+		if side == "SELL" {
+			return "close_long"
+		}
+		return "open_long"
+	}
+	if strings.EqualFold(positionSide, "SHORT") {
+		if side == "BUY" {
+			return "close_short"
+		}
+		return "open_short"
+	}
+
 	positionSide = strings.ToUpper(positionSide)
 
 	// If there's realized PnL, it's likely a close trade
@@ -350,17 +407,15 @@ func (t *FuturesTrader) determineOrderAction(side, positionSide string, realized
 }
 
 // StartOrderSync starts background order sync task for Binance
-func (t *FuturesTrader) StartOrderSync(traderID string, exchangeID string, exchangeType string, st *store.Store, interval time.Duration, stop <-chan struct{}) {
-	// Run first sync immediately
+func (t *FuturesTrader) StartOrderSync(traderID string, exchangeID string, exchangeType string, st *store.Store, interval time.Duration, stop <-chan struct{}) <-chan struct{} {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := syncloop.Start(stop, interval, "Binance", true, func() error { return t.syncOrdersContext(ctx, traderID, exchangeID, exchangeType, st) })
 	go func() {
-		logger.Infof("🔄 Running initial Binance order sync...")
-		if err := t.SyncOrdersFromBinance(traderID, exchangeID, exchangeType, st); err != nil {
-			logger.Infof("⚠️  Initial Binance order sync failed: %v", err)
+		defer cancel()
+		select {
+		case <-stop:
+		case <-done:
 		}
 	}()
-
-	// Then run periodically
-	syncloop.Run(stop, interval, "Binance", func() error {
-		return t.SyncOrdersFromBinance(traderID, exchangeID, exchangeType, st)
-	})
+	return done
 }

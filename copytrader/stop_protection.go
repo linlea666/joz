@@ -139,6 +139,25 @@ func (x *Executor) setStopProtection(traceID, signalID string, ctx *store.CopyTr
 		}
 		return x.persistContext(ctx, map[string]interface{}{"stop_loss_price": price, "requested_stop_loss": requested})
 	}
+	if pending == nil && ctx.StopOrderID != "" && len(candidates) == 0 {
+		if reader, ok := x.ex.(types.StopOrderReader); ok {
+			result, herr := reader.GetStopOrder(ctx.Symbol, ctx.StopOrderID, "")
+			if herr != nil || result == nil || result.OrderID != ctx.StopOrderID || result.Symbol != ctx.Symbol || !stopMatchesSide(result.OpenOrder, ctx.Direction) {
+				return fmt.Errorf("%w: previous stop history unavailable or mismatched", ErrProtectionUnconfirmed)
+			}
+			if !result.Terminal() {
+				return fmt.Errorf("%w: previous stop still active/triggering", ErrProtectionUnconfirmed)
+			}
+		}
+		pos, perr := x.freshPosition(ctx.Symbol, ctx.Direction)
+		if perr != nil {
+			return fmt.Errorf("%w: fresh protection position lookup: %v", ErrProtectionUnconfirmed, perr)
+		}
+		if pos == nil || pos.qty <= 0 {
+			return fmt.Errorf("%w: EXIT_OBSERVED; position exited before protection replacement", ErrProtectionUnconfirmed)
+		}
+		qty = pos.qty
+	}
 	if pending == nil {
 		var old *types.OpenOrder
 		oldPrice, _, _, err := x.normalizeStop(ctx.Symbol, ctx.StopLossPrice)
@@ -238,6 +257,9 @@ func (x *Executor) setStopProtection(traceID, signalID string, ctx *store.CopyTr
 				return fmt.Errorf("%w: rejected stop position check: %v", ErrProtectionUnconfirmed, checkErr)
 			}
 			restore = pos != nil && pos.qty > 0
+			if !restore {
+				return fmt.Errorf("%w: EXIT_OBSERVED after rejected protection: %w", ErrProtectionUnconfirmed, err)
+			}
 		}
 		if rejected && restore && pending.Old != nil {
 			// Restore with its own durable identity, never retry the rejected request.

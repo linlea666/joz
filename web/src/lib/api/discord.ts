@@ -1,5 +1,7 @@
 import type {
   DiscordConfig,
+  RecoveryReviewTicket,
+  HistorySyncState,
   ChannelNotificationConfig,
   ChannelNotificationState,
   EmailDraft,
@@ -27,6 +29,26 @@ async function emailPayload(data: unknown) {
 }
 
 export const discordApi = {
+  async reviewCopyRecovery(
+    id: string,
+    confirm?: { ticket: string; reason: string }
+  ): Promise<RecoveryReviewTicket> {
+    const result = await httpClient.post<{ review: RecoveryReviewTicket }>(
+      `${API_BASE}/copytrade/contexts/${encodeURIComponent(id)}/recovery-review/${confirm ? 'confirm' : 'preview'}`,
+      confirm || {}
+    )
+    if (!result.success || !result.data)
+      throw new Error(result.message || '核对失败')
+    return result.data.review
+  },
+  async getHistorySyncState(traderId: string): Promise<HistorySyncState> {
+    const result = await httpClient.get<HistorySyncState>(
+      `${API_BASE}/copytrade/history-sync?trader_id=${encodeURIComponent(traderId)}`
+    )
+    if (!result.success || !result.data)
+      throw new Error(result.message || '同步状态查询失败')
+    return result.data
+  },
   async getChannelNotifications(): Promise<ChannelNotificationState> {
     const result = await httpClient.get<ChannelNotificationState>(
       `${API_BASE}/discord/channel-notifications`
@@ -253,13 +275,16 @@ export const discordApi = {
     traderId: string,
     id: number
   ): Promise<CopyTradeAIRun> {
-    const result = await httpClient.get<{ run: CopyTradeAIRun }>(
+    const result = await httpClient.get<{
+      run: CopyTradeAIRun
+      attempts?: CopyTradeAIRun[]
+    }>(
       `${API_BASE}/copytrade/ai-run?trader_id=${encodeURIComponent(traderId)}&id=${id}`
     )
     if (!result.success || !result.data?.run) {
       throw new Error(result.message || 'Failed to fetch AI run')
     }
-    return result.data.run
+    return { ...result.data.run, attempts: result.data.attempts }
   },
 
   async generateCopyTradeProfile(

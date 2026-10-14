@@ -180,6 +180,8 @@ export interface CopyTradeOrderLeg {
   last_error?: string
 }
 export interface CopyTradeInstructionResult {
+  reduce_tp_level?: number
+  cancel_pending_entry?: boolean
   action_ids?: string[]
   context_ids?: string[]
   order_ids?: string[]
@@ -229,11 +231,14 @@ export interface CopyTradeSignal {
   llm_request_ms: number
   risk_calc_ms: number
   exchange_submit_ms: number
+  end_to_end_ms?: number | null
+  retry_wait_ms?: number | null
   total_ms: number
   created_at: string
 }
 
 export interface CopyTradeContext {
+  stop_intent_json?: string
   execution_version?: number
   entry_policy?: string
   entry_disabled?: boolean
@@ -348,6 +353,11 @@ export interface CopyTradeReplayCheck {
 }
 
 export interface CopyTradeAIRun {
+  attempts?: CopyTradeAIRun[]
+  status?: string
+  attempt?: number
+  started_at?: string
+  finished_at?: string
   rules_snapshot_json?: string
   id: number
   trader_id: string
@@ -434,4 +444,17 @@ export interface ChannelNotificationState {
       updated_at: string
     }
   }[]
+}
+
+export interface RecoveryReviewTicket {
+  id: string
+  context_id: string
+  evidence_json: string
+  expires_at: string
+  confirmed_at?: string
+}
+export interface HistorySyncState {
+  last_attempt?: string
+  last_success?: string
+  last_error: string
 }

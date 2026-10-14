@@ -501,7 +501,15 @@ func (s *Server) handleGetCopyTradeAIRun(c *gin.Context) {
 		SafeNotFound(c, "AI run")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"run": run})
+	var attempts []store.CopyTradeAIRun
+	if run.SignalID != "" {
+		attempts, err = s.store.CopyTrade().SignalAttempts(traderID, run.SignalID)
+		if err != nil {
+			SafeInternalError(c, "Cannot read attempts", err)
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"run": run, "attempts": attempts})
 }
 
 // handleGenerateCopyTradeProfile drafts channel_notes from stored history.

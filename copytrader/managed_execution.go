@@ -379,7 +379,11 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 			if pos, err := x.freshPosition(ctx.Symbol, ctx.Direction); err == nil && pos != nil && pos.qty > 0 {
 				x.updateContext(ctx, map[string]interface{}{"quantity": pos.qty})
 				if err = x.ensureStopProtection(traceID, "", ctx, pos.qty); err != nil {
-					x.events.Error(traceID, "", "", EvExecutionError, "UNPROTECTED: "+err.Error(), nil)
+					if errors.Is(err, ErrProtectionUnconfirmed) {
+						x.events.Warn(traceID, "", "", EvReconcile, "PROTECTION_PENDING: "+err.Error(), nil)
+					} else {
+						x.events.Error(traceID, "", "", EvExecutionError, "UNPROTECTED: "+err.Error(), nil)
+					}
 				}
 			}
 		}
@@ -624,8 +628,10 @@ func (x *Executor) enforceManagedRisk(traceID string, ctx *store.CopyTradeContex
 
 // managedExitIntent freezes the original close amount, including across restart.
 type managedExitIntent struct {
-	OrderID string `json:"order_id"`
-	Full    bool   `json:"full"`
+	SignalID string `json:"signal_id,omitempty"`
+	TPLevel  int    `json:"tp_level,omitempty"`
+	OrderID  string `json:"order_id"`
+	Full     bool   `json:"full"`
 }
 
 func (x *Executor) executeManagedClose(traceID, signalID string, ctx *store.CopyTradeContext, ratio float64) (SkipReason, error) {
@@ -699,6 +705,10 @@ func (x *Executor) reconcileManagedClose(traceID string, ctx *store.CopyTradeCon
 	if err := json.Unmarshal([]byte(ctx.ClosePendingJSON), &intent); err != nil {
 		return err
 	}
+	if intent.TPLevel > 0 && intent.OrderID == "" {
+		_, err := x.ExecuteTPReduction(traceID, intent.SignalID, ctx, intent.TPLevel)
+		return err
+	}
 	orders, err := x.st.CopyTrade().GetOrdersForContext(x.traderID, ctx.ID)
 	if err != nil {
 		return err
@@ -722,6 +732,11 @@ func (x *Executor) reconcileManagedClose(traceID string, ctx *store.CopyTradeCon
 		}
 	} else if !orderTerminal(row.Status) {
 		if err = x.queryManaged(row); err != nil {
+			return err
+		}
+	}
+	if intent.TPLevel > 0 {
+		if err := x.recordTPReplacementFill(ctx, intent, row); err != nil {
 			return err
 		}
 	}
@@ -819,7 +834,11 @@ func (e *Engine) recoverPendingActions(ctx *store.CopyTradeContext) {
 						ratio = *ins.CloseRatio
 					}
 				}
-				_, err = e.exec.ExecuteClose(trace, a.SignalID, ctx, ratio)
+				if ins.ReduceTPLevel > 0 {
+					_, err = e.exec.ExecuteTPReduction(trace, a.SignalID, ctx, ins.ReduceTPLevel)
+				} else {
+					_, err = e.exec.ExecuteClose(trace, a.SignalID, ctx, ratio)
+				}
 			}
 		case ActionCancel:
 			if TradeState(ctx.State).IsTerminal() && !ctx.EntryWorking {

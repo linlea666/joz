@@ -1,3 +1,5 @@
+import { RecoveryReview } from './RecoveryReview'
+import { CopyTradeTiming } from './CopyTradeTiming'
 import { copyTradeOutcome } from './copyTradeOutcome'
 import { CopyTradeRulesSnapshot } from './CopyTradeRulesSnapshot'
 import { CopyTradeReplayChecks } from './CopyTradeReplayChecks'
@@ -7,6 +9,7 @@ import { toast } from 'sonner'
 import { api } from '../../lib/api'
 import type {
   CopyTradeEvent,
+  HistorySyncState,
   CopyTradeSignal,
   CopyTradeContext,
   CopyTradeAIStat,
@@ -88,6 +91,29 @@ export function CopyTradeLogModal({
   language,
   onClose,
 }: CopyTradeLogModalProps) {
+  const [historySync, setHistorySync] = useState<HistorySyncState | null>(null)
+  const [syncError, setSyncError] = useState('')
+  useEffect(() => {
+    let active = true
+    const refresh = () =>
+      api
+        .getHistorySyncState(traderId)
+        .then((s) => {
+          if (active) {
+            setHistorySync(s)
+            setSyncError('')
+          }
+        })
+        .catch(() => {
+          if (active) setSyncError('同步状态读取失败')
+        })
+    void refresh()
+    const timer = setInterval(refresh, 10000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [traderId])
   const [tab, setTab] = useState<LogTab>('events')
   const [isLoading, setIsLoading] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
@@ -109,6 +135,23 @@ export function CopyTradeLogModal({
   const [signalEvents, setSignalEvents] = useState<
     Record<string, CopyTradeEvent[] | 'loading' | 'error'>
   >({})
+
+  useEffect(() => {
+    const sig = signals.find((s) => s.id === openSignalId)
+    if (!sig?.ai_run_id) return
+    let active = true
+    api
+      .getCopyTradeAIRun(traderId, sig.ai_run_id)
+      .then((run) => {
+        if (active) setSignalRuns((prev) => ({ ...prev, [sig.id]: run }))
+      })
+      .catch(() => {
+        if (active) setSignalRuns((prev) => ({ ...prev, [sig.id]: 'missing' }))
+      })
+    return () => {
+      active = false
+    }
+  }, [signals, openSignalId, traderId])
 
   const load = useCallback(async () => {
     setIsLoading(true)
@@ -164,20 +207,15 @@ export function CopyTradeLogModal({
     const traces = [sig.id]
     if (sig.trade_state && sig.trade_context_id)
       traces.push(`reconcile-${sig.trade_context_id}`)
-    const [run, execution] = await Promise.allSettled([
-      sig.ai_run_id
-        ? api.getCopyTradeAIRun(traderId, sig.ai_run_id)
-        : Promise.resolve(null),
+    if (!sig.ai_run_id)
+      setSignalRuns((prev) => ({ ...prev, [sig.id]: 'missing' }))
+    const [execution] = await Promise.allSettled([
       Promise.all(
         traces.map((trace) =>
           api.getCopyTradeEvents(traderId, 100, 0, undefined, undefined, trace)
         )
       ),
     ])
-    setSignalRuns((prev) => ({
-      ...prev,
-      [sig.id]: run.status === 'fulfilled' && run.value ? run.value : 'missing',
-    }))
     setSignalEvents((prev) => ({
       ...prev,
       [sig.id]:
@@ -465,7 +503,7 @@ export function CopyTradeLogModal({
                           {sig.llm_request_ms > 0 ? sig.llm_request_ms : '-'}
                         </td>
                         <td className="py-2 text-right font-mono">
-                          {sig.total_ms > 0 ? sig.total_ms : '-'}
+                          {sig.end_to_end_ms ?? '未知'}
                         </td>
                         <td className="py-2 text-right">
                           <button
@@ -505,16 +543,20 @@ export function CopyTradeLogModal({
                             )}
                             {(() => {
                               const run = signalRuns[sig.id]
-                              if (!run || typeof run !== 'object') return null
+                              if (!run || typeof run !== 'object')
+                                return <CopyTradeTiming signal={sig} />
                               return (
-                                <AIInteractionView
-                                  language={language}
-                                  systemPrompt={run.system_prompt}
-                                  userPrompt={run.input_prompt}
-                                  rawResponse={run.raw_response}
-                                  parsedJSON={run.parsed_json}
-                                  imageCount={run.image_count}
-                                />
+                                <>
+                                  <CopyTradeTiming signal={sig} run={run} />
+                                  <AIInteractionView
+                                    language={language}
+                                    systemPrompt={run.system_prompt}
+                                    userPrompt={run.input_prompt}
+                                    rawResponse={run.raw_response}
+                                    parsedJSON={run.parsed_json}
+                                    imageCount={run.image_count}
+                                  />
+                                </>
                               )
                             })()}
                           </td>
@@ -527,6 +569,16 @@ export function CopyTradeLogModal({
             ))}
 
           {/* Active trade contexts */}
+          {tab === 'contexts' && (
+            <p className="text-xs mb-3">
+              成交历史同步：
+              {syncError ||
+                (historySync?.last_success
+                  ? new Date(historySync.last_success).toLocaleString()
+                  : '尚无成功记录')}{' '}
+              {historySync?.last_error}（历史记录不代表实时仓位）
+            </p>
+          )}
           {tab === 'contexts' &&
             (contexts.length === 0 ? (
               <EmptyHint text={t('copytrade.noContexts', language)} />
@@ -569,7 +621,17 @@ export function CopyTradeLogModal({
                           {ctx.direction}
                         </span>
                       </td>
-                      <td className="py-2 pr-2">{ctx.state}</td>
+                      <td className="py-2 pr-2">
+                        {ctx.state}
+                        {ctx.stop_intent_json && (
+                          <RecoveryReview
+                            contextId={ctx.id}
+                            onComplete={() => {
+                              void load()
+                            }}
+                          />
+                        )}
+                      </td>
                       <td className="py-2 pr-2 text-right font-mono">
                         {ctx.avg_fill_price || ctx.planned_entry_price || '-'}
                       </td>

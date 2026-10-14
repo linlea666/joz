@@ -46,7 +46,7 @@ func hasCurrentManagementWording(text string) bool {
 // negations, conditions and reference-source gates are still enforced separately.
 var sourceFullProfitExit = regexp.MustCompile(`止盈\s*(?:全部|所有)\s*[倉仓]位`)
 
-func hasFullCloseIntent(text string) bool {
+func hasLegacyFullCloseIntent(text string) bool {
 	return (sourceFullProfitExit.MatchString(text) && !retainedPosition.MatchString(text)) || sourceCloseIntent.MatchString(text)
 }
 
@@ -200,7 +200,7 @@ func MediaSources(msg *store.DiscordMessage, segments []SourceSegment) []SourceM
 // InterpretKnownSource fixes only opted-in TYLER management phrases. Entry
 // parameters remain the interpreter's job; all resulting actions still pass
 // the normal correlation, TTL and risk gates.
-func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, profile string) *SourceInterpretation {
+func interpretKnownSourceLegacy(msg *store.DiscordMessage, segments []SourceSegment, profile string) *SourceInterpretation {
 	if profile != "tyler_v1" {
 		return interpretPresetSource(msg, segments, profile)
 	}
@@ -250,7 +250,7 @@ func InterpretKnownSource(msg *store.DiscordMessage, segments []SourceSegment, p
 	makeAction := func(a Action) *SourceInterpretation {
 		return &SourceInterpretation{Classification: ClassificationSignal, Action: a, Symbol: sym, ActionEvidence: &ActionEvidence{SourceID: actionSourceID, Text: actionEvidence}, RequiresAddFill: sourceAddCondition.MatchString(body), Reasoning: "TYLER explicit management policy"}
 	}
-	full := hasFullCloseIntent(body) || strings.Contains(body, "提前平倉") || strings.Contains(body, "提前平仓") || strings.Contains(body, "提前止損離場") || strings.Contains(body, "提前止损离场") || strings.Contains(body, "這單就不拿") || strings.Contains(body, "这单就不拿")
+	full := hasLegacyFullCloseIntent(body) || strings.Contains(body, "提前平倉") || strings.Contains(body, "提前平仓") || strings.Contains(body, "提前止損離場") || strings.Contains(body, "提前止损离场") || strings.Contains(body, "這單就不拿") || strings.Contains(body, "这单就不拿")
 	reduce := strings.Contains(body, "減倉") || strings.Contains(body, "减仓") || strings.Contains(body, "可以先跑") || regexp.MustCompile(`(?i)(提前|可做|可以作|自行.*作)\s*TP\s*\d`).MatchString(body) || regexp.MustCompile(`(?:平倉|平仓)\s*[0-9]+(?:\.[0-9]+)?\s*[%％]`).MatchString(body)
 	// A fraction after "close / 平仓" is a partial exit, never a full close.
 	if full && !sourceClosedStatus.MatchString(body) {
@@ -345,7 +345,10 @@ func tylerCurrentSource(segments []SourceSegment, fallback string) (string, stri
 }
 
 func ApplySourcePolicy(interp *SourceInterpretation, msg *store.DiscordMessage, segments []SourceSegment, profile string) *SourceInterpretation {
-	if known := InterpretKnownSource(msg, segments, profile); known != nil {
+	return applySourcePolicyVersion(interp, msg, segments, profile, MessageRulesVersion)
+}
+func applySourcePolicyVersion(interp *SourceInterpretation, msg *store.DiscordMessage, segments []SourceSegment, profile string, version int) *SourceInterpretation {
+	if known := interpretKnownVersion(msg, segments, profile, version); known != nil {
 		return known
 	}
 	for _, ins := range interp.Flatten() {
@@ -463,6 +466,17 @@ func segmentCarriesAction(ins *SourceInterpretation, text string) bool {
 			}
 		}
 	}
+	if ins.ReduceTPLevel != 0 {
+		m := replaceTPV4.FindStringSubmatch(text)
+		if len(m) != 2 || m[1] != fmt.Sprint(ins.ReduceTPLevel) || ins.Action != ActionReduce || ins.CloseRatio != nil {
+			return false
+		}
+		if ins.CancelPendingEntry && !cancelAddV4.MatchString(text) {
+			return false
+		}
+	} else if ins.CancelPendingEntry {
+		return false
+	}
 	switch ins.Action {
 	case ActionOpen, ActionAdd:
 		if terminalStatusBlocksOpen(text) {
@@ -470,10 +484,22 @@ func segmentCarriesAction(ins *SourceInterpretation, text string) bool {
 		}
 		return !sourceCancel.MatchString(text) && (sourceOpen.MatchString(text) || (ins.Action == ActionAdd && sourceAdd.MatchString(text)))
 	case ActionCancel:
-		return sourceCancel.MatchString(text) && !hasFullCloseIntent(text)
+		return (sourceCancel.MatchString(text) || cancelAddV4.MatchString(text)) && !hasFullCloseIntent(text)
 	case ActionClose:
+		if profitExitV4.MatchString(text) {
+			ratio, explicit, err := explicitReductionRatio(text)
+			if err != nil || retainedPosition.MatchString(text) || (explicit && ratio < 100) {
+				return false
+			}
+		}
 		return hasFullCloseIntent(text) || regexp.MustCompile(`(?i)(\b(?:close|closing|exit|out|cut it)\b|[這这][單单]就不拿)`).MatchString(text)
 	case ActionReduce:
+		if profitExitV4.MatchString(text) && !retainedPosition.MatchString(text) {
+			_, explicit, err := explicitReductionRatio(text)
+			if !explicit || err != nil {
+				return false
+			}
+		}
 		if sourceReduce.MatchString(text) {
 			return true
 		}
@@ -628,10 +654,11 @@ func ValidateActionEvidenceDetailed(ins *SourceInterpretation, segments []Source
 	if len(ins.EligibilityConditions) > 0 {
 		return SkipNeedsContext, "eligibility condition is not verified", nil
 	}
-	if sourceAddCondition.MatchString(scope) && !ins.RequiresAddFill {
+	gateScope := managementScopeV4(scope, ins)
+	if sourceAddCondition.MatchString(gateScope) && !ins.RequiresAddFill {
 		return SkipNeedsContext, "requires a confirmed add fill for this trade", nil
 	}
-	if sourceConditional.MatchString(scope) && !ins.RequiresAddFill && len(ins.ConditionalRules) == 0 && ins.RequiresTPFill == 0 {
+	if sourceConditional.MatchString(gateScope) && !ins.RequiresAddFill && len(ins.ConditionalRules) == 0 && ins.RequiresTPFill == 0 {
 		return SkipNeedsContext, "conditional eligibility is not verified", nil
 	}
 	if sourceActionNegation.MatchString(scope) {

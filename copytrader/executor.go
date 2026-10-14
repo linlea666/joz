@@ -17,6 +17,8 @@ import (
 
 // TPPlanEntry is one planned take-profit order (persisted on the context).
 type TPPlanEntry struct {
+	ReplacedBy          string   `json:"replaced_by,omitempty"`
+	ReplacementFilled   float64  `json:"replacement_filled,omitempty"`
 	DesiredQuantity     *float64 `json:"desired_quantity,omitempty"`
 	Ordinal             int      `json:"ordinal,omitempty"`
 	Price               float64  `json:"price"`

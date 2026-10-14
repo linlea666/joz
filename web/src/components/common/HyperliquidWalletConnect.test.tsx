@@ -25,6 +25,7 @@ vi.mock('../../lib/api', () => ({
     updateExchangeConfigsEncrypted: mocks.updateExchangeConfigsEncrypted,
     getHyperliquidAgent: mocks.getHyperliquidAgent,
     getCopyTradeEvents: vi.fn().mockResolvedValue([]),
+    getHistorySyncState: vi.fn().mockResolvedValue({}),
   },
 }))
 
