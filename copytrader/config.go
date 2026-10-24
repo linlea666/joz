@@ -240,6 +240,13 @@ func (c *CopyTradingConfig) ValidateExchange(exchangeType string) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
+	// Copy trading needs precise exit/stop recovery that is only implemented
+	// and exercised for these venues; others would run without it.
+	switch strings.ToLower(strings.TrimSpace(exchangeType)) {
+	case "binance", "okx":
+	default:
+		return fmt.Errorf("跟单仅支持 Binance 与 OKX，交易所 %q 缺少可靠的平仓/止损恢复能力 (copy trading supports Binance and OKX only; exchange %q lacks reliable exit/stop recovery)", exchangeType, exchangeType)
+	}
 	if (sharedRiskEntryPolicy(c.EntryPolicy) || c.MarketDualPriceMode == DualPriceSplit) && strings.ToLower(exchangeType) != "binance" {
 		return fmt.Errorf("shared-risk entry currently supports Binance only")
 	}

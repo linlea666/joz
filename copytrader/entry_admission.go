@@ -13,6 +13,12 @@ var errEntryRevoked = errors.New("unsubmitted entry no longer authorized")
 // Called only for a PLANNED entry, before SUBMITTING is written. Queries,
 // reductions, protection and unknown submissions retain their recovery paths.
 func (e *Engine) admitEntrySubmit(order *store.CopyTradeOrder) error {
+	// Emergency pause blocks new exposure everywhere, including legs that
+	// recovery would otherwise submit: they stay PLANNED until resumed (and
+	// still expire by their own signal TTL / entry deadline).
+	if e.cfg != nil && e.cfg.Paused {
+		return fmt.Errorf("%w: %s", errEntryDeferred, SkipPaused)
+	}
 	sig, err := e.st.CopyTrade().GetSignal(order.SignalID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errEntryDeferred, err)

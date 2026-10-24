@@ -160,11 +160,13 @@ func TestFlatRecoveryLogsBoundedAndPositionReturns(t *testing.T) {
 	if c.State != string(StateClosed) || c.StopIntentJSON != "" {
 		t.Fatalf("not closed: %+v", c)
 	}
+	// A venue with fresh position reads never resurrects a closed trade: a
+	// position that appears later may belong to a manual or other trade.
 	v.qty = .5
 	e.recheckClosedTrades()
 	current, err := x.st.CopyTrade().GetContext(c.ID)
-	if err != nil || current.State == string(StateClosed) {
-		t.Fatalf("returning position abandoned: %v %+v", err, current)
+	if err != nil || current.State != string(StateClosed) {
+		t.Fatalf("closed trade resurrected on a managed venue: %v %+v", err, current)
 	}
 }
 func ptrConfig(c CopyTradingConfig) *CopyTradingConfig { return &c }

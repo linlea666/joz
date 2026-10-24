@@ -744,6 +744,11 @@ func (e *Engine) processInstruction(traceID, signalID string, msg *store.Discord
 		updates["status"] = "done"
 		updates["phase"] = "admission_revoked"
 	}
+	if errors.Is(execErr, errExitNotSubmitted) {
+		// Proven not sent: recovery may retry it (legacy exit ledger is INTENT).
+		updates["status"] = "executing"
+		updates["phase"] = "exit_retry"
+	}
 	if err := e.st.CopyTrade().UpdateAction(action.ID, updates); err != nil {
 		return SkipNone, "", err
 	}

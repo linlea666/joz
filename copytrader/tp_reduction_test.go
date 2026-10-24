@@ -1,6 +1,7 @@
 package copytrader
 
 import (
+	"encoding/json"
 	"math"
 	"nofx/trader/types"
 	"testing"
@@ -114,5 +115,40 @@ func TestTPReplacementCountsCancellationFill(t *testing.T) {
 	}
 	if exits != 1 {
 		t.Fatalf("exits %d", exits)
+	}
+}
+
+// A TP level the exchange rejected (e.g. outside the price band) never reached
+// the book; reducing at that level must still exit its share at market.
+func TestTPReductionOfRejectedLevelReducesAtMarket(t *testing.T) {
+	x, v, st := managedExecutor(t)
+	ctx, err := x.ExecuteOpen("trace", "open", splitPlan())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := readTPPlan(ctx)
+	first := plan[0]
+	delete(v.orders, first.ClientID)
+	plan[0].OrderID, plan[0].Status = "", "REJECTED"
+	b, _ := json.Marshal(plan)
+	if err = x.persistContext(ctx, map[string]interface{}{"tp_plan_json": string(b)}); err != nil {
+		t.Fatal(err)
+	}
+	before := v.qty
+	if _, err = x.ExecuteTPReduction("trace", "reduce", ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := st.CopyTrade().GetContext(ctx.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh.ClosePendingJSON != "" {
+		if err = NewExecutor(x.traderID, v, st, x.events).reconcileManagedClose("restart", fresh); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, _ := types.DecimalFloor(types.SanitizeBaseQuantity(first.Quantity), v.rules.MarketQuantityStep)
+	if math.Abs(before-v.qty-want) > 1e-8 {
+		t.Fatalf("reduced %.8f want %.8f", before-v.qty, want)
 	}
 }
