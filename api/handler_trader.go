@@ -11,6 +11,7 @@ import (
 	"nofx/discord"
 	"nofx/logger"
 	"nofx/store"
+	traderpkg "nofx/trader"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -769,6 +770,10 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		CopyTradingConfig:    copyTradingConfig,
 	}
 
+	// Serialize with start/stop of the same trader across remove -> reload -> restart.
+	unlockLifecycle := s.traderManager.LockTraderLifecycle(traderID)
+	defer unlockLifecycle()
+
 	// Check if trader was running before update (we'll restart it after)
 	wasRunning := false
 	if existingMemTrader, memErr := s.traderManager.GetTrader(traderID); memErr == nil {
@@ -826,13 +831,12 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		restartRequested, manualRestart = copyTradeRestartState(existingTrader.IsRunning, wasRunning, reloadStatus == "loaded" && getErr == nil)
 	}
 	if manualRestart && getErr == nil {
-		restartRequested = true
-		go func() {
-			logger.Infof("▶️ Restarting trader %s with new config...", traderID)
-			if runErr := reloadedTrader.Run(); runErr != nil {
-				logger.Infof("❌ Trader %s runtime error: %v", traderID, runErr)
-			}
-		}()
+		logger.Infof("▶️ Restarting trader %s with new config...", traderID)
+		if startErr := s.startTraderAsync(userID, traderID, reloadedTrader); startErr == nil || errors.Is(startErr, traderpkg.ErrAlreadyRunning) {
+			restartRequested = true
+		} else {
+			logger.Infof("❌ Trader %s restart failed: %v", traderID, startErr)
+		}
 	}
 	if isCopy {
 		response := gin.H{"trader_id": traderID, "trader_name": req.Name, "ai_model": req.AIModelID, "config_reload_status": reloadStatus, "config_reload_error": reloadError, "restart_requested": restartRequested}
@@ -874,6 +878,9 @@ func (s *Server) handleDeleteTrader(c *gin.Context) {
 		return
 	}
 
+	unlockLifecycle := s.traderManager.LockTraderLifecycle(traderID)
+	defer unlockLifecycle()
+
 	// If trader is running, stop it first
 	if trader, err := s.traderManager.GetTrader(traderID); err == nil {
 		status := trader.GetStatus()
@@ -914,11 +921,16 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 		return
 	}
 
+	// Serialize the whole check -> remove -> reload -> start sequence per
+	// trader so two close start requests cannot each Run an instance (two
+	// copy-trading engines reconciling the same account).
+	unlockLifecycle := s.traderManager.LockTraderLifecycle(traderID)
+	defer unlockLifecycle()
+
 	// Check if trader exists in memory and if it's running
 	existingTrader, _ := s.traderManager.GetTrader(traderID)
 	if existingTrader != nil {
-		status := existingTrader.GetStatus()
-		if isRunning, ok := status["is_running"].(bool); ok && isRunning {
+		if existingTrader.IsRunning() {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":     "Trader is already running",
 				"error_key": "trader.start.already_running",
@@ -980,6 +992,17 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 		return
 	}
 
+	// The reload may already have started this instance (the loader resumes
+	// traders whose persisted is_running flag is set). Never Run it twice.
+	if trader.IsRunning() {
+		if err := s.store.Trader().UpdateStatus(userID, traderID, true); err != nil {
+			logger.Infof("⚠️  Failed to update trader status: %v", err)
+		}
+		logger.Infof("✓ Trader %s already started by reload", trader.GetName())
+		c.JSON(http.StatusOK, gin.H{"message": "Trader started"})
+		return
+	}
+
 	// Server-side launch gate: the trader cannot function without a funded AI
 	// wallet and a ready exchange account, so verify both before the run loop
 	// starts. `?force=true` skips the gate for deliberate manual overrides.
@@ -998,13 +1021,21 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 		}
 	}
 
-	// Start trader
-	go func() {
-		logger.Infof("▶️  Starting trader %s (%s)", traderID, trader.GetName())
-		if err := trader.Run(); err != nil {
-			logger.Infof("❌ Trader %s runtime error: %v", trader.GetName(), err)
+	// Start trader. StartAsync claims the run slot synchronously; a startup
+	// failure (invalid config, Discord not ready, Binance one-way position
+	// mode, ...) resets the in-memory flag and the persisted is_running flag.
+	logger.Infof("▶️  Starting trader %s (%s)", traderID, trader.GetName())
+	if startErr := s.startTraderAsync(userID, traderID, trader); startErr != nil {
+		if errors.Is(startErr, traderpkg.ErrAlreadyRunning) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":     "Trader is already running",
+				"error_key": "trader.start.already_running",
+			})
+			return
 		}
-	}()
+		SafeInternalError(c, "Failed to start trader", startErr)
+		return
+	}
 
 	// Update running status in database
 	err = s.store.Trader().UpdateStatus(userID, traderID, true)
@@ -1027,6 +1058,9 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Trader does not exist or no access permission"})
 		return
 	}
+
+	unlockLifecycle := s.traderManager.LockTraderLifecycle(traderID)
+	defer unlockLifecycle()
 
 	trader, err := s.traderManager.GetTrader(traderID)
 	if err != nil {
@@ -1064,4 +1098,18 @@ func copyTradeRestartState(persistedRunning, wasRunning, loaded bool) (requested
 		return true, false
 	}
 	return wasRunning, wasRunning
+}
+
+// startTraderAsync claims the trader's run slot and runs it in the
+// background. If the run later fails (it returns an error only when startup
+// fails), the persisted is_running flag is reset so the UI and the next
+// process restart do not treat the trader as running.
+func (s *Server) startTraderAsync(userID, traderID string, at *traderpkg.AutoTrader) error {
+	return at.StartAsync(func(runErr error) {
+		if runErr == nil {
+			return
+		}
+		logger.Infof("❌ Trader %s runtime error: %v", at.GetName(), runErr)
+		s.traderManager.SyncStoppedStatusAfterRunFailure(s.store, userID, traderID, at)
+	})
 }

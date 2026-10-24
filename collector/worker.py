@@ -70,7 +70,25 @@ class Gateway(discord.Client):
         # A successful SDK Resume replays events; no REST history polling.
 
 
+def permanent_source_error(exc):
+    """403/404 and permission failures do not heal by retrying."""
+    return (isinstance(exc, (discord.Forbidden, discord.NotFound, PermissionError))
+            or getattr(exc, 'status', None) in (403, 404))
+
+
 class Worker:
+    # Transient history-recovery failures (5xx, timeouts): exponential
+    # backoff, unlimited attempts, capped delay.
+    RECOVERY_RETRY_BASE = 30
+    RECOVERY_RETRY_MAX = 600
+    # Transient hydrate failures of the queue head: capped backoff; after
+    # HYDRATE_GIVE_UP seconds the event is skipped and its channel marked gap.
+    HYDRATE_RETRY_BASE = 2
+    HYDRATE_RETRY_MAX = 60
+    HYDRATE_GIVE_UP = 600
+    # Queue head older than this is reported as stuck in status/diagnostics.
+    HEAD_STUCK_ALERT = 60
+
     def __init__(self):
         directory = os.getenv('DISCORD_BUFFER_DIR', '/var/lib/discord-collector')
         os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -110,6 +128,14 @@ class Worker:
         self.notification_supported = False
         self.notification_instance = str(uuid.uuid4())
         self.channel_generations = {}
+        # channel -> (last delay seconds, pending retry task) for transient
+        # history-recovery failures.
+        self.recovery_retry = {}
+        # Transient hydrate failure of the current queue head.
+        self.hydrate_failure = None
+        # (event_id, channel_id, monotonic since) of the current queue head.
+        self.head_event = None
+        self.head_stuck_reported = False
 
     def invalidate_notifications(self):
         self.notification_since.clear()
@@ -266,6 +292,7 @@ class Worker:
                     # first live message. send() also checks again after awaits.
                     await self.send(None)
                 event = self.box.next()
+                self.track_head(event)
                 if not event or not self.writer or not self.configured.is_set():
                     self.wake.clear()
                     try:
@@ -278,7 +305,18 @@ class Worker:
                 event['notification_realtime'] = bool(event.get('notification_realtime') and event.get('notification_instance') == self.notification_instance)
                 if event['notification_realtime']:
                     event['notification_payload'] = event['payload']
-                event['payload'] = await self.hydrate(event)
+                try:
+                    event['payload'] = await self.hydrate(event)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Classified so one unreadable message cannot block the
+                    # whole queue (every channel) indefinitely.
+                    delay = await self.hydrate_failed(event, exc)
+                    if delay:
+                        await asyncio.sleep(delay)
+                    continue
+                self.hydrate_failure = None
                 future = asyncio.get_running_loop().create_future()
                 self.acks[event['event_id']] = future
                 try:
@@ -295,6 +333,88 @@ class Worker:
             except Exception:
                 self.last_error = 'event delivery pending; retrying without dropping receipt'
                 await asyncio.sleep(2)
+
+    def track_head(self, event):
+        if not event:
+            self.head_event = None
+            self.head_stuck_reported = False
+        elif self.head_event is None or self.head_event[0] != event['event_id']:
+            self.head_event = (event['event_id'], event['channel_id'], time.monotonic())
+            self.head_stuck_reported = False
+
+    def head_age(self):
+        return max(0.0, time.monotonic() - self.head_event[2]) if self.head_event else 0.0
+
+    async def hydrate_failed(self, event, exc):
+        """Returns the retry delay, or 0 after the event was skipped with a gap."""
+        now = time.monotonic()
+        failure = self.hydrate_failure
+        if not failure or failure['event_id'] != event['event_id']:
+            failure = self.hydrate_failure = {'event_id': event['event_id'], 'since': now, 'attempts': 0}
+        failure['attempts'] += 1
+        permanent = permanent_source_error(exc)
+        if permanent or now - failure['since'] >= self.HYDRATE_GIVE_UP:
+            self.hydrate_failure = None
+            await self.skip_event_with_gap(event, 'HYDRATE_FORBIDDEN' if permanent else 'HYDRATE_RETRY_EXHAUSTED', exc)
+            return 0
+        self.last_error = 'message hydrate failed; retrying with backoff'
+        self.diagnostics.record('delivery.hydrate_retry', 'warn', channel_id=event['channel_id'], code='HYDRATE_TRANSIENT',
+                                stage='hydrate', exception_type=type(exc).__name__, count=failure['attempts'])
+        return min(self.HYDRATE_RETRY_MAX, self.HYDRATE_RETRY_BASE * 2 ** (failure['attempts'] - 1))
+
+    async def skip_event_with_gap(self, event, code, exc=None):
+        """Drop an undeliverable receipt only together with a durable channel gap.
+
+        The gap keeps the oldest unverified boundary (existing recovery anchor,
+        else the last delivered checkpoint), so the backend blocks new risk on
+        that channel until a later recovery re-reads history from there.
+        """
+        channel = event['channel_id']
+        detail = {'channel_id': channel, 'code': code, 'stage': 'hydrate'}
+        if exc is not None:
+            detail['exception_type'] = type(exc).__name__
+        self.diagnostics.record('delivery.skipped', 'error', **detail)
+        tracked = channel in self.channels
+        if tracked:
+            # Invalidate any in-flight recovery so it cannot report 'ready'
+            # over the skipped receipt.
+            self.channel_generations[channel] = self.channel_generations.get(channel, 0) + 1
+            self.notification_since.pop(channel, None)
+            self.box.begin_recovery(channel)
+            self.box.end_recovery(channel, False)
+            self.channel_states[channel] = ('gap', 'message hydrate failed; source review required')
+        # Gap is durable before the receipt is removed: a crash in between
+        # only replays the event.
+        self.box.ack(event['event_id'])
+        self.last_error = 'event skipped after hydrate failure; channel marked gap'
+        self.wake.set()
+        if tracked:
+            with suppress(ConnectionError, OSError):
+                await self.channel_status(channel, 'gap', 'message hydrate failed; source review required')
+
+    def schedule_recovery_retry(self, channel, generation, client):
+        previous = self.recovery_retry.get(channel)
+        delay = self.RECOVERY_RETRY_BASE if previous is None else min(self.RECOVERY_RETRY_MAX, previous[0] * 2)
+        if previous and not previous[1].done() and previous[1] is not asyncio.current_task():
+            previous[1].cancel()
+        task = asyncio.create_task(self.retry_recovery_after(channel, generation, client, delay))
+        self.recovery_retry[channel] = (delay, task)
+        self.diagnostics.record('channel.recovery_retry', 'warn', channel_id=channel, code='RECOVERY_RETRY_SCHEDULED',
+                                duration_ms=int(delay * 1000))
+
+    def reset_recovery_retry(self, channel):
+        previous = self.recovery_retry.pop(channel, None)
+        if previous and not previous[1].done() and previous[1] is not asyncio.current_task():
+            previous[1].cancel()
+
+    async def retry_recovery_after(self, channel, generation, client, delay):
+        await asyncio.sleep(delay)
+        # Any READY, reconfiguration or newer recovery supersedes this retry.
+        if (self.halted or channel not in self.channels or self.client is not client
+                or self.channel_generations.get(channel, 0) != generation
+                or self.channel_states.get(channel, ('',))[0] != 'gap'):
+            return
+        self.schedule_recovery({channel})
 
     def schedule_recovery(self, channels=None):
         # Incremental subscriptions cannot put healthy trading channels behind
@@ -376,6 +496,8 @@ class Worker:
                 if not self.box.checkpoint(channel):
                     self.box.advance(channel, '0', baseline_at)
                 self.box.end_recovery(channel, complete)
+                # Read succeeded: a pending transient-failure backoff is moot.
+                self.reset_recovery_retry(channel)
                 if complete:
                     self.notification_since[channel] = time.time()
                 await self.channel_status(channel, 'ready' if complete else 'gap',
@@ -386,8 +508,15 @@ class Worker:
                 if not current():
                     continue
                 self.box.end_recovery(channel, False)
-                status = getattr(exc, 'status', None)
-                await self.channel_status(channel, 'forbidden' if status in (403, 404) or isinstance(exc, PermissionError) else 'gap',
+                forbidden = permanent_source_error(exc)
+                if forbidden:
+                    self.reset_recovery_retry(channel)
+                else:
+                    # Transient (5xx, timeout, network): retry with capped
+                    # exponential backoff instead of waiting for the next
+                    # configuration save / trader restart / Gateway Resume.
+                    self.schedule_recovery_retry(channel, generation, client)
+                await self.channel_status(channel, 'forbidden' if forbidden else 'gap',
                                           'source recovery incomplete')
 
         if not self.halted and self.state not in {'reconnecting', 'connection_failed', 'auth_invalid', 'disabled'}:
@@ -544,16 +673,34 @@ class Worker:
                 logging.warning("diagnostic delivery pending; retained for retry")
                 await asyncio.sleep(2)
 
+    def status_payload(self):
+        age = self.head_age()
+        stuck = bool(self.head_event and age >= self.HEAD_STUCK_ALERT)
+        data = {'state': self.state, 'last_error': self.last_error,
+                'applied_version': self.version, 'backlog': self.box.count(),
+                'error_detail':self.error_detail, 'diagnostic_failures':self.diagnostics.failures,
+                'head_event_age_seconds': round(age, 1), 'delivery_stuck': stuck}
+        if self.head_event:
+            data['head_event_channel_id'] = self.head_event[1]
+        if stuck:
+            # Surface through the existing last_error field so current
+            # backends show it without a schema change.
+            data['last_error'] = f'event queue head stuck for {int(age)}s (channel {self.head_event[1]})' + (f'; {self.last_error}' if self.last_error else '')
+            if not self.head_stuck_reported:
+                self.head_stuck_reported = True
+                self.diagnostics.record('delivery.stuck', 'error', channel_id=self.head_event[1],
+                                        code='HEAD_EVENT_STUCK', duration_ms=int(age * 1000))
+        if self.last_heartbeat:
+            data['last_heartbeat'] = self.last_heartbeat
+        return data
+
     async def status_loop(self):
         while True:
             with suppress(ConnectionError, OSError):
-                data = {'state': self.state, 'last_error': self.last_error,
-                        'applied_version': self.version, 'backlog': self.box.count(),
-                        'error_detail':self.error_detail, 'diagnostic_failures':self.diagnostics.failures}
-                if self.last_heartbeat:
-                    data['last_heartbeat'] = self.last_heartbeat
+                data = self.status_payload()
                 await self.send({'type': 'status', 'data': data})
-                write_status(bool(self.writer and self.configured.is_set()), self.state, bool(self.token))
+                write_status(bool(self.writer and self.configured.is_set()), self.state, bool(self.token),
+                             data['head_event_age_seconds'], data['delivery_stuck'])
             await asyncio.sleep(5)
 
     async def connect_backend(self):
