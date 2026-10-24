@@ -176,8 +176,16 @@ func (e *Engine) HandleMessage(msg *store.DiscordMessage, isEdit bool) error {
 		return nil
 	}
 
-	// Author filter (rule layer, zero cost).
-	if !e.messageRules(msg).AllowsAuthor(msg) {
+	// Author filter (rule layer, zero cost). The message is consumed without a
+	// signal; the event makes a misconfigured filter visible in the log center.
+	if rules := e.messageRules(msg); !rules.AllowsAuthor(msg) {
+		e.events.Info(msg.MessageID, "", msg.MessageID, EvSourceAuthorFiltered,
+			fmt.Sprintf("author %q (id %s) not in author filter; message ignored", msg.AuthorName, msg.AuthorID),
+			map[string]interface{}{
+				"author_id": msg.AuthorID, "author_name": msg.AuthorName, "message_id": msg.MessageID,
+				"channel_id": msg.ChannelID, "revision": msg.Revision,
+				"allowed_author_ids": rules.AuthorIDs, "allowed_author_names": rules.AuthorNames,
+			})
 		return nil
 	}
 	// Nothing to interpret at all.
@@ -230,7 +238,8 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 	// Receive latency is measured from the revision the pipeline is reacting
 	// to: for edits that is EditedAt, not the original post time (an old
 	// message edited days later would otherwise record a multi-day latency
-	// and poison the latency stats). Mirrors the TTL gate's refTime rule.
+	// and poison the latency stats). Management TTL uses the same reference;
+	// OPEN/ADD TTL is anchored to the original post (processInstruction).
 	latencyRef := msg.MessageTimestamp
 	if msg.EditedAt != nil && msg.EditedAt.After(latencyRef) {
 		latencyRef = *msg.EditedAt
@@ -301,9 +310,12 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 		skip(SkipExpired, "expired before interpretation (both opening and management TTL); source retained for context")
 		return
 	}
-	if existing != nil && existing.Status == "retry_wait" && IsExpired(latencyRef, time.Now().UTC(), e.interpretationRetryTTL(msg, signalID)) {
-		skip(SkipExpired, "deferred interpretation expired before retry")
-		return
+	if existing != nil && existing.Status == "retry_wait" {
+		retryRef, retryTTL := e.interpretationRetryWindow(msg, signalID)
+		if IsExpired(retryRef, time.Now().UTC(), retryTTL) {
+			skip(SkipExpired, "deferred interpretation expired before retry")
+			return
+		}
 	}
 	var interp *SourceInterpretation
 	var run *store.CopyTradeAIRun
@@ -521,25 +533,30 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 // or an error.
 func (e *Engine) processInstruction(traceID, signalID string, msg *store.DiscordMessage, interp *SourceInterpretation) (SkipReason, string, error) {
 	if interp.IsActionable() {
-		// TTL gate (per action class). Edits carry lifecycle updates; measure
-		// freshness from the edit, not the original post.
+		// TTL gate (per action class). Management edits carry lifecycle
+		// updates, so their freshness is measured from the edit. New risk
+		// (OPEN/ADD) is measured from the original post, the same reference
+		// CheckExecution uses: editing an old card must not make it a fresh
+		// entry signal.
 		ttl := time.Duration(e.cfg.MgmtSignalTTLSeconds) * time.Second
+		refTime, refLabel := msg.MessageTimestamp, "signal"
 		if interp.Action == ActionOpen || interp.Action == ActionAdd {
 			ttl = time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second
-		}
-		refTime := msg.MessageTimestamp
-		if msg.EditedAt != nil && msg.EditedAt.After(refTime) {
+			if msg.EditedAt != nil && msg.EditedAt.After(refTime) {
+				refLabel = "original post"
+			}
+		} else if msg.EditedAt != nil && msg.EditedAt.After(refTime) {
 			refTime = *msg.EditedAt
 		}
 		if IsExpired(refTime, time.Now().UTC(), ttl) {
-			return SkipExpired, fmt.Sprintf("signal age %v exceeds TTL %v", time.Since(refTime).Round(time.Second), ttl), nil
+			return SkipExpired, fmt.Sprintf("%s age %v exceeds TTL %v", refLabel, time.Since(refTime).Round(time.Second), ttl), nil
 		}
 
 	}
 
 	if interp.IsActionable() && e.source != nil {
 		if err := e.source.CheckExecution(e.traderID, msg, interp.Action == ActionOpen || interp.Action == ActionAdd); err != nil {
-			return SkipReason(err.Error()), err.Error(), nil
+			return SkipReason(discord.ExecutionGateCode(err)), err.Error(), nil
 		}
 	}
 	rules, ruleErr := e.rulesForSignal(signalID)
@@ -1353,12 +1370,10 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 	if e.cfg.RiskMode == RiskModeByLoss {
 		plan.RiskBudget = e.cfg.RiskAmountUSD
 	}
-	refTime := msg.MessageTimestamp
-	if msg.EditedAt != nil && msg.EditedAt.After(refTime) {
-		refTime = *msg.EditedAt
-	}
+	// Entry freshness is anchored to the original post (see processInstruction):
+	// a later edit of the card never extends how long its entry may fill.
 	if e.cfg.OpenSignalTTLSeconds > 0 {
-		plan.SignalExpiresAt = refTime.Add(time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second)
+		plan.SignalExpiresAt = msg.MessageTimestamp.Add(time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second)
 	}
 	plan.SplitReference = shape.SplitReference
 	plan.EntryDecisionJSON, _ = json.Marshal(shape)
@@ -1379,7 +1394,8 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 
 	if e.source != nil {
 		if err := e.source.CheckExecution(e.traderID, msg, true); err != nil {
-			return SkipReason(err.Error()), nil
+			e.events.Info(traceID, signalID, msg.MessageID, EvSignalSkipped, "execution gate refused entry: "+err.Error(), nil)
+			return SkipReason(discord.ExecutionGateCode(err)), nil
 		}
 	}
 	if rules.SourceMode == "chroma" {

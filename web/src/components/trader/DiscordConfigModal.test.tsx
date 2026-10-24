@@ -15,6 +15,7 @@ vi.mock('../../lib/api', () => ({
     getDiscordEmail: vi.fn(),
     updateDiscordConfig: vi.fn(),
     deleteDiscordToken: vi.fn(),
+    testDiscordChannel: vi.fn(),
   },
 }))
 vi.mock('sonner', () => ({
@@ -102,4 +103,31 @@ it('requires explicit live selection and displays gap separately from connection
       expect.objectContaining({ run_mode: 'live' })
     )
   )
+})
+it('shows the author id next to the author name in the channel preview', async () => {
+  vi.mocked(api.testDiscordChannel).mockResolvedValue({
+    ok: true,
+    messages: [
+      {
+        message_id: '1',
+        author_id: '987654321',
+        author_name: 'Tyler',
+        content: 'BTC long',
+        timestamp: '',
+        has_embeds: false,
+        attachments: 0,
+        edited: false,
+      },
+    ],
+  })
+  render(<DiscordConfigModal language="zh" onClose={() => {}} />)
+  const input = await screen.findByPlaceholderText('1385639865194315949')
+  fireEvent.change(input, { target: { value: '200' } })
+  const button = input.parentElement?.querySelector('button')
+  expect(button).toBeTruthy()
+  fireEvent.click(button!)
+  expect(
+    await screen.findByText('[Tyler · 987654321] BTC long')
+  ).toBeInTheDocument()
+  expect(api.testDiscordChannel).toHaveBeenCalledWith('200')
 })

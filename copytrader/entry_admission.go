@@ -3,6 +3,7 @@ package copytrader
 import (
 	"errors"
 	"fmt"
+	"nofx/discord"
 	"nofx/store"
 )
 
@@ -27,8 +28,8 @@ func (e *Engine) admitEntrySubmit(order *store.CopyTradeOrder) error {
 		return fmt.Errorf("%w: immutable receipt missing", errEntryRevoked)
 	}
 	if err = e.source.CheckExecution(e.traderID, msg, true); err != nil {
-		switch err.Error() {
-		case "SOURCE_NOT_READY", "SOURCE_GAP_OR_PERMISSION":
+		switch discord.ExecutionGateCode(err) {
+		case discord.GateSourceNotReady, discord.GateSourceGapOrPermission:
 			return fmt.Errorf("%w: %v", errEntryDeferred, err)
 		default:
 			return fmt.Errorf("%w: %v", errEntryRevoked, err)

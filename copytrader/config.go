@@ -311,9 +311,40 @@ func (c *CopyTradingConfig) ListenChannels() []string {
 
 // A wording-only change does not revoke an in-flight interpretation. Execution
 // and source settings do, while the old message keeps its interpretation rules.
+//
+// The key hashes the configuration's meaning, not its spelling: values the
+// runtime treats identically (an omitted field versus its explicit default)
+// produce the same key, so re-saving a config with defaults filled in (for
+// example when only the trader name or AI model changed) does not revoke the
+// route. A config already written in normalized form keeps its previous key.
 func (c *CopyTradingConfig) ExecutionKey() string {
-	v := *c
-	v.ChannelNotes = ""
+	v := c.executionKeyView()
 	b, _ := json.Marshal(v)
 	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// executionKeyView returns the normalized copy hashed by ExecutionKey.
+func (c *CopyTradingConfig) executionKeyView() CopyTradingConfig {
+	v := *c
+	// Prompt wording only; never changes execution.
+	v.ChannelNotes = ""
+	// Reserved and rejected by Validate; never wired into execution.
+	v.ReasoningEffort = ""
+	if v.EntryPolicy == "" {
+		v.EntryPolicy = EntryPolicyLegacy
+	}
+	if v.InterpretationProfile == "" {
+		v.InterpretationProfile = "default"
+	}
+	if v.MarketDualPriceMode == "" {
+		v.MarketDualPriceMode = DualPriceLegacy
+	}
+	if v.SourceMode == "" {
+		v.SourceMode = "channel"
+	}
+	ratio := c.ReduceRatio()
+	v.DefaultReduceRatio = &ratio
+	// The channels actually listened to: empty means [primary_channel_id].
+	v.SourceChannelIDs = c.ListenChannels()
+	return v
 }
