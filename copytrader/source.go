@@ -19,6 +19,10 @@ type SourceSegment struct {
 	MessageID string `json:"message_id,omitempty"`
 	Image     bool   `json:"image,omitempty"`
 	Reason    string `json:"reason,omitempty"`
+	// GateScope narrows the condition/negation gates for a jonzi native card to
+	// its English status line(s) and Trade details block. The author's free-text
+	// reasoning and the translated position-sizing text are not instructions.
+	GateScope string `json:"-"`
 }
 
 type SourceMedia struct{ URL, SourceID, Role string }
@@ -59,12 +63,36 @@ var sourceClosedStatus = regexp.MustCompile(`(?i)(交易已平[倉仓]|已平[�
 var sourceExplicitOpen = regexp.MustCompile(`(?i)(進場\s*(?:[:：]|市價|市价|限價|限价)|进场\s*(?:[:：]|市價|市价|限價|限价)|\bopen(?:\s+(?:long|short))?\b|buy\s+now|sell\s+now|做多|做空|開多|开多|開空|开空|開倉(?:\s+|[:：]|$)|开仓(?:\s+|[:：]|$)|\benter(?:ing)?\b)`)
 var sourceReduce = regexp.MustCompile(`(?i)(止盈|減倉|减仓|減半|减半|減掉|减掉|(?:平倉|平仓)\s*[0-9]+(?:\.[0-9]+)?\s*[%％]|可以先跑|提前.*TP|\breduce\b|\btrim\b|take profit|(?:獲利|获利).*(?:了結|了结|出場|出场|平倉|平仓|take|book|realiz))`)
 var sourceConditional = regexp.MustCompile(`(?i)(如果|若是|只有|only if|\bif\b)`)
+
+// Common compounds that merely contain a negation character ("日线级别",
+// "区别", "特别"). Go's RE2 has no look-behind, so these are neutralized before
+// the negation/condition cues are matched. The first character is kept and the
+// second replaced by a space so no new adjacency can form a different cue.
+var cueCompounds = strings.NewReplacer(
+	"级别", "级 ", "級別", "級 ", "区别", "区 ", "區別", "區 ", "分别", "分 ", "分別", "分 ",
+	"特别", "特 ", "特別", "特 ", "类别", "类 ", "類別", "類 ", "个别", "个 ", "個別", "個 ",
+	"识别", "识 ", "識別", "識 ", "告别", "告 ", "差别", "差 ", "性别", "性 ",
+)
+
+func matchesSourceCue(cue *regexp.Regexp, text string) bool {
+	return cue.MatchString(cueCompounds.Replace(text))
+}
+
 var sourceQuoteStart = regexp.MustCompile(`(?im)^[ \t]*(?:引用信息|引用訊息|引用消息|quoted message|quote)[ \t]*[:：][ \t]*`)
 var sourceReplyStart = regexp.MustCompile(`(?im)^[ \t]*(?:💬[ \t]*)?(?:回复|回覆|reply)[ \t]*[:：][ \t]*`)
 var sourceBreakeven = regexp.MustCompile(`(?i)(成本.*[損损]|[損损].*成本|保本|上成本|移[至到]成本|拉[到至]成本)`)
 
 func BuildSourceSegments(msg *store.DiscordMessage, profile string) []SourceSegment {
 	segments := buildBodySourceSegments(msg.Content, profile)
+	if profile == "jonzi_v1" {
+		for i := range segments {
+			if segments[i].ID == "body" {
+				if card := parseJonziCard(segments[i].Text); card.IsCard {
+					segments[i].GateScope = card.GateText
+				}
+			}
+		}
+	}
 	for i, embed := range discord.ParseStoredEmbeds(msg.EmbedsJSON) {
 		segment := SourceSegment{ID: fmt.Sprintf("embed:%d", i), Role: "current", Text: discord.FlattenEmbeds([]discord.Embed{embed}), Timestamp: embed.Timestamp}
 		if embed.Author != nil {
@@ -78,6 +106,11 @@ func BuildSourceSegments(msg *store.DiscordMessage, profile string) []SourceSegm
 			segment.Role, segment.Reason = "reference", "older card in a reply"
 		} else if old && (splitQuotedSources(profile) || embed.Author != nil) && (sourceProfit.MatchString(msg.Content) || sourceManagement.MatchString(msg.Content)) && !sourceOpen.MatchString(msg.Content) {
 			segment.Role, segment.Reason = "reference", "attributed older card accompanying a current message"
+		} else if err == nil && splitQuotedSources(profile) && ts.Before(msg.MessageTimestamp) && parseJonziCard(segment.Text).IsCard {
+			// A jonzi card is native only as message content; an embedded copy
+			// that predates the message is a forward/quote, whatever the
+			// accompanying commentary says (e.g. "not the place for longs").
+			segment.Role, segment.Reason = "reference", "earlier jonzi card embedded in a later message"
 		}
 		segments = append(segments, segment)
 	}
@@ -211,7 +244,7 @@ func interpretKnownSourceLegacy(msg *store.DiscordMessage, segments []SourceSegm
 	if body == "" || sourceOpen.MatchString(sourceCancel.ReplaceAllString(body, "")) {
 		return nil
 	}
-	if sourceNegation.MatchString(body) && !strings.Contains(body, "如果還繼續持有") {
+	if matchesSourceCue(sourceNegation, body) && !strings.Contains(body, "如果還繼續持有") {
 		return nil
 	}
 	if matches := sourceSymbol.FindAllStringSubmatch(body, -1); len(matches) > 1 {
@@ -634,6 +667,9 @@ func ValidateActionEvidenceDetailed(ins *SourceInterpretation, segments []Source
 		if scope == "" {
 			return SkipSourceEvidence, "current evidence symbol or block does not match the parsed symbol", nil
 		}
+		if s.GateScope != "" {
+			scope = s.GateScope
+		}
 	}
 	opening := ins.Action == ActionOpen || ins.Action == ActionAdd
 	if opening && terminalStatusBlocksOpen(scope) {
@@ -645,6 +681,9 @@ func ValidateActionEvidenceDetailed(ins *SourceInterpretation, segments []Source
 		for _, segment := range segments {
 			if segment.Role == "current" && !segment.Image {
 				text := evidenceScopeForSymbol(segment.Text, ins.Symbol)
+				if segment.GateScope != "" && text != "" {
+					text = segment.GateScope
+				}
 				if terminalStatusBlocksOpen(text) {
 					return SkipSourceEvidence, "current status indicates a closed trade; no explicit new entry instruction", nil
 				}
@@ -658,13 +697,13 @@ func ValidateActionEvidenceDetailed(ins *SourceInterpretation, segments []Source
 	if sourceAddCondition.MatchString(gateScope) && !ins.RequiresAddFill {
 		return SkipNeedsContext, "requires a confirmed add fill for this trade", nil
 	}
-	if sourceConditional.MatchString(gateScope) && !ins.RequiresAddFill && len(ins.ConditionalRules) == 0 && ins.RequiresTPFill == 0 {
+	if matchesSourceCue(sourceConditional, gateScope) && !ins.RequiresAddFill && len(ins.ConditionalRules) == 0 && ins.RequiresTPFill == 0 {
 		return SkipNeedsContext, "conditional eligibility is not verified", nil
 	}
-	if sourceActionNegation.MatchString(scope) {
+	if matchesSourceCue(sourceActionNegation, scope) {
 		return SkipSourceEvidence, "current evidence negates the parsed action", nil
 	}
-	if !segmentCarriesAction(ins, scope) || (opening && sourceNegation.MatchString(scope)) {
+	if !segmentCarriesAction(ins, scope) || (opening && matchesSourceCue(sourceNegation, scope)) {
 		if opening {
 			return SkipSourceEvidence, "current evidence lacks an unambiguous open/add instruction", nil
 		}

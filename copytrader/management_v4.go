@@ -33,7 +33,7 @@ func interpretKnownVersion(msg *store.DiscordMessage, sources []SourceSegment, p
 	}
 	// Only a complete, single-target instruction is a fast path. Unknown
 	// clauses stay with the model and still undergo the common source gates.
-	if sourceNegation.MatchString(body) || sourceConditional.MatchString(body) || sourceOpen.MatchString(body) || discretionaryV4.MatchString(body) {
+	if matchesSourceCue(sourceNegation, body) || matchesSourceCue(sourceConditional, body) || sourceOpen.MatchString(body) || discretionaryV4.MatchString(body) {
 		return nil
 	}
 	symbols := map[string]bool{}
