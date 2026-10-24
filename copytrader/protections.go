@@ -2,9 +2,14 @@ package copytrader
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"nofx/store"
 	"nofx/trader/types"
@@ -236,6 +241,21 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 			return err
 		}
 	}
+	// The mark/last price is read at most once per pass and only when the
+	// venue publishes PERCENT_PRICE multipliers. Failures never block a TP.
+	reference, referenceRead := 0.0, false
+	tpPriceAllowed := func(price float64) bool {
+		if rules == nil {
+			return true
+		}
+		if !referenceRead && (rules.PercentPriceUp > 0 || rules.PercentPriceDown > 0) {
+			referenceRead = true
+			if p, err := x.ex.GetMarketPrice(ctx.Symbol); err == nil && finite(p) && p > 0 {
+				reference = p
+			}
+		}
+		return rules.LimitPriceAllowed(closingSide(ctx.Direction), price, reference)
+	}
 	for i := range plan {
 		tp := &plan[i]
 		if tp.Filled || tp.ReplacedBy != "" {
@@ -305,29 +325,56 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 			continue
 		}
 		if hasManaged {
-			role := fmt.Sprintf("TP_%d_%d", tp.Ordinal, tp.Generation)
 			orderSignalID := signalID
 			if orderSignalID == "" {
 				orderSignalID = ctx.EntrySignalID
 			}
-			row := x.newManagedOrder(ctx, orderSignalID, role, "LIMIT", tp.Price, want)
+			var row *store.CopyTradeOrder
 			if tp.ClientID != "" {
 				rows, err := x.st.CopyTrade().GetOrdersForContext(x.traderID, ctx.ID)
 				if err != nil {
 					return err
 				}
-				var found bool
 				for _, r := range rows {
 					if r.ClientID == tp.ClientID {
 						row = r
-						found = true
 						break
 					}
 				}
-				if !found {
+				if row == nil {
 					return fmt.Errorf("TP order ledger missing")
 				}
-			} else {
+				// A TP that cannot be confirmed or was refused must never block
+				// the stop, other levels, exits or finalization.
+				if row.Status != "PLANNED" {
+					resubmit, err := x.settleUnplacedTP(traceID, signalID, ctx, plan, tp, row)
+					if err != nil {
+						return err
+					}
+					if !resubmit {
+						continue
+					}
+					if tp.ClientID != "" {
+						// Confirmed by query: record what was observed.
+						tp.OrderID, tp.Status = row.OrderID, row.Status
+						tp.FilledQuantity = row.ExecutedQty
+						tp.Filled = row.Status == "FILLED"
+						if err := x.saveTPPlan(ctx, plan); err != nil {
+							return err
+						}
+						continue
+					}
+				}
+			}
+			if tp.ClientID == "" {
+				if tpDeferredByVenue(ctx, tp) {
+					continue
+				}
+				if !tpPriceAllowed(tp.Price) {
+					x.warnTPOnce(traceID, signalID, ctx, tp, "price_band", fmt.Sprintf("TP%d @ %.8g 超出交易所限价范围（参考价 %.8g），待价格接近后补挂", tp.Ordinal, tp.Price, reference), map[string]interface{}{"reference_price": reference, "percent_price_up": rules.PercentPriceUp, "percent_price_down": rules.PercentPriceDown, "min_price": rules.MinPrice, "max_price": rules.MaxPrice})
+					continue
+				}
+				row = x.newManagedOrder(ctx, orderSignalID, fmt.Sprintf("TP_%d_%d", tp.Ordinal, tp.Generation), "LIMIT", tp.Price, want)
 				// Store the intent and the TP link atomically to cover a crash between them.
 				tp.ClientID = row.ClientID
 				tp.Quantity = want
@@ -339,6 +386,20 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 				ctx.Version++
 			}
 			if err := x.submitManaged(row, rules, true); err != nil {
+				switch row.Status {
+				case "REJECTED":
+					if row.LastError == "" {
+						row.LastError = err.Error()
+					}
+					if _, serr := x.settleUnplacedTP(traceID, signalID, ctx, plan, tp, row); serr != nil {
+						return serr
+					}
+					continue
+				case "UNKNOWN":
+					// Recovered by client ID on a later pass (see settleUnplacedTP).
+					x.warnTPOnce(traceID, signalID, ctx, tp, fmt.Sprintf("unknown/%d", tp.Generation), fmt.Sprintf("TP%d submission outcome unknown; reconciling by client ID: %v", tp.Ordinal, err), nil)
+					continue
+				}
 				return err
 			}
 			tp.OrderID, tp.Status = row.OrderID, row.Status
@@ -364,6 +425,116 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 		}
 	}
 	return x.persistContext(ctx, map[string]interface{}{"tp_position_quantity": qty})
+}
+
+const (
+	// tpUnknownGrace: an UNKNOWN TP whose client ID is still not found this
+	// long after the uncertain submission was recorded never landed.
+	tpUnknownGrace = stopNotFoundGrace
+	// tpRejectedRetry throttles resubmission of a level whose request proved
+	// not executed but may succeed later: a venue price-band rejection
+	// (-4016/-4024/-4131, bound not published in exchangeInfo), a rate limit /
+	// clock / credential refusal, or a local pre-send failure.
+	tpRejectedRetry = 5 * time.Minute
+)
+
+var (
+	// Per-process de-duplication of TP warnings and price-band retry timers.
+	// Losing them on restart only repeats one warning or one attempt.
+	tpWarned        sync.Map
+	tpRetryAt       sync.Map
+	rejectionCodeRE = regexp.MustCompile(`code=(-?\d+)`)
+)
+
+func tpKey(ctx *store.CopyTradeContext, tp *TPPlanEntry) string {
+	return fmt.Sprintf("%s/%d", ctx.ID, tp.Ordinal)
+}
+
+func (x *Executor) warnTPOnce(traceID, signalID string, ctx *store.CopyTradeContext, tp *TPPlanEntry, kind, msg string, details map[string]interface{}) {
+	if _, seen := tpWarned.LoadOrStore(tpKey(ctx, tp)+"/"+kind, true); seen {
+		return
+	}
+	if details == nil {
+		details = map[string]interface{}{}
+	}
+	details["context_id"], details["tp_level"], details["client_id"] = ctx.ID, tp.Ordinal, tp.ClientID
+	x.events.Warn(traceID, signalID, "", EvExecutionError, fmt.Sprintf("%s %s", ctx.Symbol, msg), details)
+}
+
+func tpDeferredByVenue(ctx *store.CopyTradeContext, tp *TPPlanEntry) bool {
+	v, ok := tpRetryAt.Load(tpKey(ctx, tp))
+	return ok && stopClock().Before(v.(time.Time))
+}
+
+func venueRejectionCode(lastError string) int64 {
+	m := rejectionCodeRE.FindStringSubmatch(lastError)
+	if m == nil {
+		return 0
+	}
+	code, _ := strconv.ParseInt(m[1], 10, 64)
+	return code
+}
+
+// replanTP retires the current identity (its ledger row stays as evidence)
+// and makes the level submittable again under a new generation/client ID.
+func (x *Executor) replanTP(ctx *store.CopyTradeContext, plan []TPPlanEntry, tp *TPPlanEntry) error {
+	tp.PriorFilledQuantity += tp.FilledQuantity
+	tp.FilledQuantity = 0
+	tp.OrderID, tp.ClientID = "", ""
+	tp.Generation++
+	tp.Status = "PLANNED"
+	return x.saveTPPlan(ctx, plan)
+}
+
+// settleUnplacedTP resolves a TP whose ledger row is not known to be live.
+// It returns resubmit=true when the caller should continue with tp: either
+// tp.ClientID is still set (row confirmed by query; record it) or the level
+// was re-planned (tp.ClientID == "") and may be submitted now. Only durable
+// store failures are returned as errors; venue uncertainty skips this level.
+func (x *Executor) settleUnplacedTP(traceID, signalID string, ctx *store.CopyTradeContext, plan []TPPlanEntry, tp *TPPlanEntry, row *store.CopyTradeOrder) (bool, error) {
+	switch row.Status {
+	case "PLANNED":
+		return true, nil // intent stored, never sent: submit as before
+	case "ABANDONED":
+		return true, x.replanTP(ctx, plan, tp)
+	case "REJECTED":
+		code := venueRejectionCode(row.LastError)
+		switch {
+		case code == -4016 || code == -4024 || code == -4131:
+			tpRetryAt.Store(tpKey(ctx, tp), stopClock().Add(tpRejectedRetry))
+			x.warnTPOnce(traceID, signalID, ctx, tp, fmt.Sprintf("rejected/%d", code), fmt.Sprintf("TP%d @ %.8g 超出交易所限价范围（code %d），待价格接近后补挂", tp.Ordinal, tp.Price, code), map[string]interface{}{"error_code": code})
+			return false, x.replanTP(ctx, plan, tp)
+		case code == -1003 || code == -1021 || code == -1022 || code == -2015 || strings.Contains(row.LastError, types.ErrManagedOrderNotSent.Error()):
+			tpRetryAt.Store(tpKey(ctx, tp), stopClock().Add(tpRejectedRetry))
+			x.warnTPOnce(traceID, signalID, ctx, tp, fmt.Sprintf("rejected/%d", code), fmt.Sprintf("TP%d not executed (code %d); will retry: %s", tp.Ordinal, code, row.LastError), map[string]interface{}{"error_code": code})
+			return false, x.replanTP(ctx, plan, tp)
+		}
+		x.warnTPOnce(traceID, signalID, ctx, tp, fmt.Sprintf("rejected/%d/%d", code, tp.Generation), fmt.Sprintf("TP%d @ %.8g rejected by exchange (code %d); level skipped: %s", tp.Ordinal, tp.Price, code, row.LastError), map[string]interface{}{"error_code": code})
+		if tp.Status != "REJECTED" {
+			tp.Status = "REJECTED"
+			return false, x.saveTPPlan(ctx, plan)
+		}
+		return false, nil
+	case "UNKNOWN", "SUBMITTING":
+		err := x.queryManaged(row)
+		if err == nil {
+			if row.Status == "UNKNOWN" || row.Status == "SUBMITTING" {
+				return false, nil
+			}
+			return true, nil
+		}
+		if errors.Is(err, types.ErrManagedOrderNotFound) && !row.UpdatedAt.IsZero() && stopClock().Sub(row.UpdatedAt) >= tpUnknownGrace {
+			if uerr := x.st.CopyTrade().UpdateOrder(row.ID, map[string]interface{}{"status": "ABANDONED", "last_error": fmt.Sprintf("not found by client ID %s after %s; never landed", tpUnknownGrace, row.ClientID)}); uerr != nil {
+				return false, uerr
+			}
+			row.Status = "ABANDONED"
+			x.events.Warn(traceID, signalID, "", EvExecutionError, fmt.Sprintf("%s TP%d submission never reached the exchange (client ID %s not found); resubmitting", ctx.Symbol, tp.Ordinal, row.ClientID), map[string]interface{}{"context_id": ctx.ID, "tp_level": tp.Ordinal, "client_id": row.ClientID})
+			return true, x.replanTP(ctx, plan, tp)
+		}
+		x.warnTPOnce(traceID, signalID, ctx, tp, fmt.Sprintf("unknown/%d", tp.Generation), fmt.Sprintf("TP%d outcome unconfirmed; level skipped this pass: %v", tp.Ordinal, err), nil)
+		return false, nil
+	}
+	return true, nil
 }
 
 func (x *Executor) freshPosition(symbol, direction string) (*positionInfo, error) {

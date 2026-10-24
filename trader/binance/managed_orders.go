@@ -46,6 +46,9 @@ func (t *FuturesTrader) MarketRules(symbol string) (*types.ManagedMarketRules, e
 				r.MaxPrice = managedNumber(f["maxPrice"])
 			case "MIN_NOTIONAL":
 				r.MinNotional = managedNumber(f["notional"])
+			case "PERCENT_PRICE":
+				r.PercentPriceUp = managedNumber(f["multiplierUp"])
+				r.PercentPriceDown = managedNumber(f["multiplierDown"])
 			}
 		}
 		if r.Status != "TRADING" || (r.ContractType != "PERPETUAL" && r.ContractType != "TRADIFI_PERPETUAL") || r.QuoteAsset != "USDT" || r.QuantityStep <= 0 || r.PriceTick <= 0 {
@@ -59,6 +62,21 @@ func (t *FuturesTrader) MarketRules(symbol string) (*types.ManagedMarketRules, e
 }
 
 func (t *FuturesTrader) SubmitManagedOrder(req *types.ManagedOrderRequest) (*types.ManagedOrderResult, error) {
+	svc, err := t.prepareManagedOrder(req)
+	if err != nil {
+		// Local validation failed: the request never reached Binance.
+		return nil, types.NotSent(err)
+	}
+	// In hedge mode side+positionSide encode a close; reduceOnly is prohibited.
+	o, err := svc.Do(context.Background())
+	if err != nil {
+		return nil, classifyManagedRejection(err)
+	}
+	t.InvalidatePositionCache()
+	return &types.ManagedOrderResult{OrderID: strconv.FormatInt(o.OrderID, 10), ClientID: o.ClientOrderID, Symbol: o.Symbol, Type: string(o.Type), Side: string(o.Side), PositionSide: string(o.PositionSide), Status: string(o.Status), Quantity: managedNumber(o.OrigQuantity), ExecutedQty: managedNumber(o.ExecutedQuantity), AvgPrice: managedNumber(o.AvgPrice), Price: managedNumber(o.Price)}, nil
+}
+
+func (t *FuturesTrader) prepareManagedOrder(req *types.ManagedOrderRequest) (*futures.CreateOrderService, error) {
 	if req == nil || req.Rules == nil || req.Rules.Symbol != req.Symbol || req.Rules.Status != "TRADING" {
 		return nil, fmt.Errorf("verified market rules required")
 	}
@@ -94,13 +112,7 @@ func (t *FuturesTrader) SubmitManagedOrder(req *types.ManagedOrderRequest) (*typ
 	if !market {
 		svc.TimeInForce(futures.TimeInForceTypeGTC).Price(strconv.FormatFloat(price, 'f', -1, 64))
 	}
-	// In hedge mode side+positionSide encode a close; reduceOnly is prohibited.
-	o, err := svc.Do(context.Background())
-	if err != nil {
-		return nil, classifyManagedRejection(err)
-	}
-	t.InvalidatePositionCache()
-	return &types.ManagedOrderResult{OrderID: strconv.FormatInt(o.OrderID, 10), ClientID: o.ClientOrderID, Symbol: o.Symbol, Type: string(o.Type), Side: string(o.Side), PositionSide: string(o.PositionSide), Status: string(o.Status), Quantity: managedNumber(o.OrigQuantity), ExecutedQty: managedNumber(o.ExecutedQuantity), AvgPrice: managedNumber(o.AvgPrice), Price: managedNumber(o.Price)}, nil
+	return svc, nil
 }
 
 func (t *FuturesTrader) GetManagedOrder(symbol, orderID, clientID string) (*types.ManagedOrderResult, error) {
@@ -153,12 +165,38 @@ func (t *FuturesTrader) GetFreshPositions() ([]map[string]interface{}, error) {
 	return t.GetPositions()
 }
 
+// definiteRejectionCodes are Binance responses that prove the request did not
+// create an order. Codes absent here (-1007 backend timeout, 5xx bodies,
+// transport errors) remain "outcome unknown" and must be reconciled by
+// client ID. retryable marks transient causes where resubmitting the same
+// intent later is safe and expected to succeed.
+var definiteRejectionCodes = map[int64]bool{
+	// Request validation / parameter errors.
+	-1100: false, -1102: false, -1111: false, -1116: false, -1117: false, -1121: false,
+	-2019: false, -2020: false, -2021: false, -2022: false, -2027: false,
+	-4003: false, -4004: false, -4005: false, -4014: false, -4023: false, -4164: false, -4509: false,
+	// Position side does not match the account position mode.
+	-4061: false,
+	// A closePosition stop/TP in this direction already exists.
+	-4130: false,
+	// Maximum number of stop/conditional orders reached.
+	-4045: false,
+	// Limit price above the mark-price cap / below the floor.
+	-4016: false, -4024: false,
+	// Counterparty best price outside PERCENT_PRICE protection.
+	-4131: false,
+	// Transient or account-level request refusals: never reached the engine.
+	-1003: true, // too many requests / IP banned (HTTP 429/418 body)
+	-1021: true, // timestamp outside recvWindow
+	-1022: true, // invalid signature
+	-2015: true, // invalid API key, IP or permissions
+}
+
 func classifyManagedRejection(err error) error {
 	var apiErr *common.APIError
-	if errors.As(err, &apiErr) {
-		switch apiErr.Code {
-		case -1100, -1102, -1111, -1116, -1117, -1121, -2019, -2020, -2021, -2022, -2027, -4003, -4004, -4005, -4014, -4023, -4164, -4509:
-			return &types.ManagedRejection{Code: apiErr.Code, Cause: err}
+	if errors.As(err, &apiErr) && apiErr.Code != 0 {
+		if retryable, ok := definiteRejectionCodes[apiErr.Code]; ok {
+			return &types.ManagedRejection{Code: apiErr.Code, Cause: err, Retryable: retryable}
 		}
 	}
 	return err
