@@ -58,15 +58,36 @@ type UpdateTraderRequest struct {
 	IsCrossMargin       *bool   `json:"is_cross_margin"`
 	ShowInCompetition   *bool   `json:"show_in_competition"`
 	// The following fields are kept for backward compatibility, new version uses strategy config
-	BTCETHLeverage       int    `json:"btc_eth_leverage"`
-	AltcoinLeverage      int    `json:"altcoin_leverage"`
-	TradingSymbols       string `json:"trading_symbols"`
-	CustomPrompt         string `json:"custom_prompt"`
-	OverrideBasePrompt   bool   `json:"override_base_prompt"`
-	SystemPromptTemplate string `json:"system_prompt_template"`
+	BTCETHLeverage  int `json:"btc_eth_leverage"`
+	AltcoinLeverage int `json:"altcoin_leverage"`
+	// Pointer fields: absent (nil) keeps the stored value, an explicit value
+	// (including "" / false) replaces it. A partial edit request must never
+	// silently wipe the AI-scan prompt, symbol list or coin-pool flags.
+	TradingSymbols       *string `json:"trading_symbols"`
+	CustomPrompt         *string `json:"custom_prompt"`
+	OverrideBasePrompt   *bool   `json:"override_base_prompt"`
+	UseAI500             *bool   `json:"use_ai500"`
+	UseOITop             *bool   `json:"use_oi_top"`
+	SystemPromptTemplate string  `json:"system_prompt_template"`
 
 	// Copy trading (Discord channel following)
 	CopyTradingConfig string `json:"copy_trading_config"`
+}
+
+// stringOr returns *p when the request supplied the field, otherwise keep.
+func stringOr(p *string, keep string) string {
+	if p == nil {
+		return keep
+	}
+	return *p
+}
+
+// boolOr returns *p when the request supplied the field, otherwise keep.
+func boolOr(p *bool, keep bool) bool {
+	if p == nil {
+		return keep
+	}
+	return *p
 }
 
 func formatTraderCreationError(reason, nextStep string) string {
@@ -653,6 +674,26 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		return
 	}
 
+	tradingSymbols := stringOr(req.TradingSymbols, existingTrader.TradingSymbols)
+	if req.TradingSymbols != nil && *req.TradingSymbols != "" {
+		for _, symbol := range strings.Split(*req.TradingSymbols, ",") {
+			symbol = strings.TrimSpace(symbol)
+			if !isSupportedTraderSymbol(symbol) {
+				SafeBadRequestWithDetails(c, fmt.Sprintf("The trading pair %s has an invalid format; only USDT perpetuals or Hyperliquid XYZ USDC instruments (SYMBOL-USDC) are currently supported", symbol), "trader.update.invalid_symbol", mapStringPairs("symbol", symbol))
+				return
+			}
+		}
+	}
+
+	// Switching to another AI model gets the same checks as creation: an
+	// unknown, disabled or credential-less model would only fail later at
+	// runtime reload, after the old engine was already removed.
+	if req.AIModelID != existingTrader.AIModelID {
+		if !s.validateTraderModelForUpdate(c, userID, req.AIModelID) {
+			return
+		}
+	}
+
 	// Set default values
 	isCrossMargin := existingTrader.IsCrossMargin // Keep original value
 	if req.IsCrossMargin != nil {
@@ -757,9 +798,11 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 		InitialBalance:       initialBalance,
 		BTCETHLeverage:       btcEthLeverage,
 		AltcoinLeverage:      altcoinLeverage,
-		TradingSymbols:       req.TradingSymbols,
-		CustomPrompt:         req.CustomPrompt,
-		OverrideBasePrompt:   req.OverrideBasePrompt,
+		TradingSymbols:       tradingSymbols,
+		UseAI500:             boolOr(req.UseAI500, existingTrader.UseAI500),
+		UseOITop:             boolOr(req.UseOITop, existingTrader.UseOITop),
+		CustomPrompt:         stringOr(req.CustomPrompt, existingTrader.CustomPrompt),
+		OverrideBasePrompt:   boolOr(req.OverrideBasePrompt, existingTrader.OverrideBasePrompt),
 		SystemPromptTemplate: systemPromptTemplate,
 		IsCrossMargin:        isCrossMargin,
 		ShowInCompetition:    showInCompetition,
@@ -840,11 +883,10 @@ func (s *Server) handleUpdateTrader(c *gin.Context) {
 	}
 	if isCopy {
 		response := gin.H{"trader_id": traderID, "trader_name": req.Name, "ai_model": req.AIModelID, "config_reload_status": reloadStatus, "config_reload_error": reloadError, "restart_requested": restartRequested}
-		sourceApplied := false
-		if source := discord.Global(); source != nil {
-			sourceApplied = source.RouteApplied(traderID)
-		}
-		response["source_applied"] = sourceApplied
+		// The restart runs asynchronously, so the Discord route is not yet
+		// re-applied when this response is written; reporting RouteApplied here
+		// would almost always say false. A stopped trader has no route to apply.
+		// Callers poll GET /api/status?trader_id=... (source_applied) instead.
 		// An asynchronous Run request is not evidence that the engine is running.
 		// Existing status endpoints report its eventual state.
 		if !restartRequested {
@@ -1086,6 +1128,29 @@ func (s *Server) handleStopTrader(c *gin.Context) {
 
 	logger.Infof("⏹  Trader %s stopped", trader.GetName())
 	c.JSON(http.StatusOK, gin.H{"message": "Trader stopped"})
+}
+
+// validateTraderModelForUpdate mirrors the creation-time model checks. It
+// writes the error response and returns false when the model cannot be used.
+func (s *Server) validateTraderModelForUpdate(c *gin.Context, userID, modelID string) bool {
+	model, err := s.store.AIModel().Get(userID, modelID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			SafeBadRequestWithDetails(c, "The AI model you selected was not found. Please go to \"Settings > Model Config\" to add and enable it, then save again.", "trader.update.model_not_found", nil)
+			return false
+		}
+		SafeError(c, http.StatusInternalServerError, "Unable to read your AI model configuration for now. Please retry later.", err)
+		return false
+	}
+	if !model.Enabled {
+		SafeBadRequestWithDetails(c, fmt.Sprintf("AI model \"%s\" is not enabled yet. Please go to \"Settings > Model Config\" to enable it, then save again.", model.Name), "trader.update.model_disabled", mapStringPairs("model_name", model.Name))
+		return false
+	}
+	if model.APIKey == "" {
+		SafeBadRequestWithDetails(c, fmt.Sprintf("AI model \"%s\" is missing an API Key or payment credentials. Please complete them in \"Settings > Model Config\", then save again.", model.Name), "trader.update.model_missing_credentials", mapStringPairs("model_name", model.Name))
+		return false
+	}
+	return true
 }
 
 // The loader owns persisted restart requests; the handler only restores a

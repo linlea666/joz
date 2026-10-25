@@ -194,6 +194,25 @@ func (s *Server) handleTestDiscordConnection(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "username": name, "user_id": user.ID})
 }
 
+// channelPreviewMaxRunes bounds each message in a channel preview.
+const channelPreviewMaxRunes = 200
+
+// truncateRunes keeps at most max characters (not bytes), so multi-byte text
+// such as Chinese is never cut in the middle of a character.
+func truncateRunes(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	count := 0
+	for i := range s {
+		if count == max {
+			return s[:i] + "…"
+		}
+		count++
+	}
+	return s
+}
+
 // handleTestDiscordChannel fetches a channel preview (latest messages) so the
 // user can verify the channel ID before binding a trader to it.
 func (s *Server) handleTestDiscordChannel(c *gin.Context) {
@@ -222,10 +241,7 @@ func (s *Server) handleTestDiscordChannel(c *gin.Context) {
 	}
 	preview := make([]gin.H, 0, len(msgs))
 	for _, m := range msgs {
-		content := m.Content
-		if len(content) > 200 {
-			content = content[:200] + "…"
-		}
+		content := truncateRunes(m.Content, channelPreviewMaxRunes)
 		authorName := m.Author.GlobalName
 		if authorName == "" {
 			authorName = m.Author.Username

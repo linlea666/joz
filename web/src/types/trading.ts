@@ -6,6 +6,8 @@ export interface SystemStatus {
   start_time: string
   runtime_minutes: number
   call_count: number | null
+  /** Copy trading only: the Discord source route is applied for this trader. */
+  source_applied?: boolean
   interpretation_model?: string
   recognition_stats_scope?: 'retained_live_ai_runs'
   recognition_stats_error?: string
