@@ -1,12 +1,11 @@
-// Package discord implements the copy-trading signal source: a rate-limited
-// REST client for the Discord API and a polling manager that persists raw
-// messages (including edits) into the durable store queue.
-//
-// Access uses a personal account token over REST polling by explicit product
-// decision (the followed channels cannot invite bots). The client is designed
-// to be maximally conservative: one global serial request queue, strict
-// rate-limit header compliance, exponential backoff on 429 and jittered
-// polling intervals.
+// Package discord implements the copy-trading signal source. A separate
+// collector process owns the Discord Gateway connection (personal account,
+// by explicit product decision: the followed channels cannot invite bots) and
+// streams MESSAGE_CREATE/UPDATE/DELETE events over a local Unix socket.
+// SourceManager commits each event, the hydrated message and its per-trader
+// deliveries in one transaction before acknowledging it, then dispatches the
+// deliveries to the copy-trading engines. Authenticated Discord requests are
+// made only by the collector; Client here is an RPC facade over that socket.
 package discord
 
 import "time"

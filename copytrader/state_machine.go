@@ -20,16 +20,29 @@ const (
 )
 
 // stateTransitions is the single source of truth for allowed transitions.
+// Executor.persistContext (and so markContext) audits every state write
+// against it (an error event, the write still persists); rewriting the
+// current state is always allowed.
 var stateTransitions = map[TradeState][]TradeState{
-	StateNew:          {StateEntryPending, StateOpen, StateInvalid, StateCancelled, StateExpired},
-	StateEntryPending: {StateOpen, StateCancelled, StateExpired, StateInvalid},
+	StateNew: {StateEntryPending, StateOpen, StateInvalid, StateCancelled, StateExpired},
+	// CLOSE_PENDING / CLOSED: a close routed to an entry that already carries
+	// fills (routeClose cancels the remainder, then exits) before settlement
+	// promoted the context to OPEN.
+	StateEntryPending: {StateOpen, StateCancelled, StateExpired, StateInvalid, StateClosePending, StateClosed},
 	StateOpen:         {StateBreakeven, StateClosePending, StateClosed},
 	StateBreakeven:    {StateClosePending, StateClosed},
-	StateClosePending: {StateClosed, StateOpen, StateBreakeven}, // back-transitions cover partial close reconcile
-	StateClosed:       {},
-	StateCancelled:    {},
-	StateInvalid:      {},
-	StateExpired:      {},
+	// Back-transitions: partial close / TP reduction settled, and exit intents
+	// abandoned, superseded or rolled back return to OPEN or BREAKEVEN.
+	StateClosePending: {StateClosed, StateOpen, StateBreakeven},
+	// Terminal. A stale event must never reopen a trade. The one sanctioned
+	// exception, recheckClosedTrades reverting a RECONCILE_CLOSED verdict made
+	// on stale data, is admitted explicitly by isSpuriousCloseRecovery.
+	StateClosed: {},
+	// CANCELLED -> EXPIRED: an entry cancelled because it timed out is
+	// relabelled EXPIRED by reconcileLegacyEntry once no fill is confirmed.
+	StateCancelled: {StateExpired},
+	StateInvalid:   {},
+	StateExpired:   {},
 }
 
 // CanTransition reports whether from → to is a legal lifecycle transition.
@@ -40,6 +53,16 @@ func CanTransition(from, to TradeState) bool {
 		}
 	}
 	return false
+}
+
+// lastActionSpuriousCloseRecovered marks the recheckClosedTrades update that
+// reverts a RECONCILE_CLOSED verdict once the position provably reappears.
+const lastActionSpuriousCloseRecovered = "RECOVERED_SPURIOUS_CLOSE"
+
+// isSpuriousCloseRecovery admits CLOSED -> OPEN only for that recovery path
+// (guarded by resurrectionRefusal); every other reopen stays illegal.
+func isSpuriousCloseRecovery(from, to TradeState, updates map[string]interface{}) bool {
+	return from == StateClosed && to == StateOpen && updates["last_action"] == lastActionSpuriousCloseRecovered
 }
 
 // Transition validates and returns the new state, or an error describing the

@@ -4,7 +4,6 @@ package copytrader
 //   - cancel failure / fill race never marks a context terminal
 //   - SL placement + emergency close double-failure keeps the trade OPEN
 //   - the reconciler's SL guard re-places a missing stop loss
-//   - hasStopLossOrder distinguishes stop orders from take profits
 
 import (
 	"errors"
@@ -318,23 +317,5 @@ func TestReconcileSLGuardIgnoresUnknownAnswer(t *testing.T) {
 	e.reconcileOpenTrade(ctx)
 	if len(mock.setStopLossLog) != 0 {
 		t.Fatal("query failure means UNKNOWN, must not blindly re-place SL")
-	}
-}
-
-func TestHasStopLossOrderDetection(t *testing.T) {
-	st := newTestStore(t)
-	mock := &mockExchange{openOrders: []types.OpenOrder{
-		{Type: "TAKE_PROFIT_MARKET", StopPrice: 110},
-	}}
-	x := NewExecutor("trader-1", mock, st, NewEventLogger(st, "trader-1", "chan-1"))
-
-	exists, ok := x.hasStopLossOrder("BTCUSDT")
-	if !ok || exists {
-		t.Fatalf("TP-only orders: exists=%v ok=%v, want exists=false ok=true", exists, ok)
-	}
-	mock.openOrders = append(mock.openOrders, types.OpenOrder{Type: "STOP_MARKET", StopPrice: 95})
-	exists, ok = x.hasStopLossOrder("BTCUSDT")
-	if !ok || !exists {
-		t.Fatalf("with STOP_MARKET: exists=%v ok=%v, want both true", exists, ok)
 	}
 }

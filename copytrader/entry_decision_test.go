@@ -300,7 +300,7 @@ func TestMarketReferenceLimitLifecycleVisibility(t *testing.T) {
 			ctx.CreatedAt = time.Now().Add(-241 * time.Minute)
 			deadline := time.Now().Add(-time.Minute)
 			ctx.EntryDeadline = &deadline
-			e.reconcileEntryPending(ctx)
+			e.reconcileLegacyEntry("reconcile-"+ctx.ID, ctx)
 			views, err := e.st.CopyTrade().SignalViews(e.traderID, sigs)
 			if err != nil || len(views) != 1 || views[0].TradeState != tc.wantState || views[0].Status != store.SignalStatusExecuted {
 				t.Fatalf("lifecycle view: %+v %v", views, err)

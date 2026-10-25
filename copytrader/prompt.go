@@ -103,7 +103,6 @@ type PromptInput struct {
 	MessageRules MessageRules
 	// Current message
 	Message               *store.DiscordMessage
-	EmbedsText            string // flattened embeds
 	IsEdit                bool
 	ImageCount            int
 	ChannelNotes          string
@@ -142,7 +141,11 @@ func BuildUserPrompt(in PromptInput) string {
 	for _, source := range sources {
 		fmt.Fprintf(&b, "--- source_id=%s role=%s timestamp=%s author=%s reason=%s ---\n%s\n--- end source ---\n", source.ID, source.Role, source.Timestamp, source.Author, source.Reason, source.Text)
 	}
-	fmt.Fprintf(&b, "effective_message_rules: %s\n", in.MessageRules.Snapshot())
+	// Operator notes are rendered once under "# Channel profile" below; keep
+	// them out of the rules JSON so the prompt does not repeat them.
+	promptRules := in.MessageRules
+	promptRules.Notes = ""
+	fmt.Fprintf(&b, "effective_message_rules: %s\n", promptRules.Snapshot())
 	b.WriteString("Explicit author meaning takes precedence. For an ambiguous 市价 A—B entry, use market_dual_price_mode: legacy=original interpretation, range=one RANGE entry, market_then_limit=MARKET reference A plus LIMIT B, reject=AMBIGUOUS. Never discard an entry leg. Author position percentages and leverage describe their sizing, not eligibility. Retain genuine conditions (heavy position, added position, after TP fill) on every applicable child action. Operator notes cannot override risk or source authority.\n")
 	fmt.Fprintf(&b, "interpretation_profile: %s\n", in.InterpretationProfile)
 	if preset, ok := LookupInterpretationPreset(in.InterpretationProfile); ok {

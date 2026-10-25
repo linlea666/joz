@@ -169,7 +169,7 @@ type entryDecision struct {
 // A zero threshold is handled separately and never gains any tolerance.
 const entryThresholdEpsilon = 1e-9
 
-// DecideEntryType applies the DIRECTION-AWARE price-deviation policy.
+// decideEntry applies the DIRECTION-AWARE price-deviation policy.
 //
 // "Favorable" means the live market is at or better than the author's
 // reference (long: market <= ref, short: market >= ref) — the follower's
@@ -188,11 +188,6 @@ const entryThresholdEpsilon = 1e-9
 //   - thresholdPct <= 0 disables the adverse tolerance entirely: only
 //     favorable prices enter at market, everything unfavorable rests as a
 //     limit at the reference.
-func DecideEntryType(direction Direction, spec PriceSpec, marketPrice, thresholdPct float64, limitToMarketWithin bool) (EntryPlanType, float64, error) {
-	d, err := decideEntry(direction, spec, marketPrice, thresholdPct, limitToMarketWithin)
-	return d.OrderType, d.EntryPrice, err
-}
-
 func decideEntry(direction Direction, spec PriceSpec, marketPrice, thresholdPct float64, limitToMarketWithin bool) (entryDecision, error) {
 	d := entryDecision{
 		Direction: direction, SourcePriceSpec: spec, MarketPrice: marketPrice,

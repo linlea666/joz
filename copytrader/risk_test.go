@@ -180,3 +180,9 @@ func TestSanityCheckPrice(t *testing.T) {
 		t.Errorf("unexpected rejection for normal price: %v", err)
 	}
 }
+
+// DecideEntryType is the tuple form of decideEntry used by the table tests.
+func DecideEntryType(direction Direction, spec PriceSpec, marketPrice, thresholdPct float64, limitToMarketWithin bool) (EntryPlanType, float64, error) {
+	d, err := decideEntry(direction, spec, marketPrice, thresholdPct, limitToMarketWithin)
+	return d.OrderType, d.EntryPrice, err
+}

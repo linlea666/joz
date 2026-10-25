@@ -65,3 +65,55 @@ func TestAuthorFilteredMessageLogsEventWithoutSignal(t *testing.T) {
 		}
 	}
 }
+
+// A delivery whose frozen rule snapshot cannot be decoded is rejected: it must
+// not run with empty rules (which would bypass the author filter), it creates
+// no signal, and it leaves an error event naming the reason.
+func TestCorruptRulesSnapshotRejectsMessage(t *testing.T) {
+	f := marketReferenceFixtures(t)[0]
+	e, x, llm, msg := fixtureEngine(t, f, 1)
+	e.cfg.SourceAuthorIDs = []string{"allowed-author"}
+	msg.AuthorID, msg.AuthorName = "other-author", "Someone Else"
+	msg.DeliveryID = 9
+	msg.RulesSnapshot = `{"source_author_ids":`
+	if _, err := e.messageRules(msg); err == nil {
+		t.Fatal("corrupt snapshot decoded without error")
+	}
+	if err := e.HandleMessage(msg, false); err != nil {
+		t.Fatalf("rejected message must be consumed, not retried: %v", err)
+	}
+	if llm.calls != 0 || x.marketEntries != 0 || len(x.limitEntries) != 0 {
+		t.Fatalf("corrupt snapshot reached interpretation/execution: calls=%d market=%d", llm.calls, x.marketEntries)
+	}
+	sigs, err := e.st.CopyTrade().GetRecentSignals(e.traderID, time.Time{}, time.Time{}, 10)
+	if err != nil || len(sigs) != 0 {
+		t.Fatalf("corrupt snapshot created signals: %v %v", sigs, err)
+	}
+	events, err := e.st.CopyTrade().GetEventsByTrace(e.traderID, msg.MessageID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, ev := range events {
+		if ev.Event == EvSourceAuthorFiltered {
+			t.Fatal("corrupt snapshot must be rejected before the author filter")
+		}
+		if ev.Event == EvSourceRulesInvalid {
+			found = ev.Level == "error" && ev.SignalID == ""
+		}
+	}
+	if !found {
+		t.Fatalf("no %s error event: %+v", EvSourceRulesInvalid, events)
+	}
+
+	// A valid snapshot is still honored (author filter frozen on the delivery).
+	msg2 := *msg
+	msg2.MessageID = msg.MessageID + "-valid"
+	msg2.RulesSnapshot = e.cfg.MessageRules().Snapshot()
+	if err := e.HandleMessage(&msg2, false); err != nil {
+		t.Fatal(err)
+	}
+	if llm.calls != 0 {
+		t.Fatalf("frozen author filter bypassed, calls=%d", llm.calls)
+	}
+}

@@ -575,7 +575,7 @@ func (m *SourceManager) dispatch(s *sourceSubscription) {
 			for _, state := range states {
 				if state.ChannelID == ch {
 					found = true
-					if state.State == "recovering" || state.State == "baseline" {
+					if state.State == "recovering" {
 						ready = false
 					}
 				}
@@ -782,6 +782,9 @@ func (m *SourceManager) Ingest(ev GatewayEvent) error {
 	}
 	recipients := []store.DiscordDelivery{}
 	var routes []Route
+	// Collector events always carry a frozen config version (serve rejects
+	// events without one); the live-subscription fallback serves in-process
+	// callers such as tests.
 	if ev.ConfigVersion != "" {
 		raw, err := m.st.DiscordMessage().SourceConfig(ev.ConfigVersion)
 		if err != nil {

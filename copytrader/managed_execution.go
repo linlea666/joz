@@ -14,9 +14,21 @@ import (
 	"nofx/trader/types"
 )
 
-// Serialize copy-trade admission across engines sharing the same account.
-// Ownership is additionally verified in durable contexts and fresh positions.
-var managedAdmission sync.Mutex
+// managedAdmission serializes copy-trade admission per exchange account
+// (exchange_id -> *sync.Mutex): engines sharing one account still admit one
+// OPEN at a time, while different accounts no longer wait on each other's
+// exchange round-trips. The in-process lock is only the first line: durable
+// ownership (CopyTradeOwnership primary key on exchange_id/symbol/direction,
+// claimed in the context-creating transaction) plus the per-account fence row
+// (CopyTradeAccountFence, locked in that transaction) keep admission exclusive across
+// processes, and fresh positions/open orders are re-checked under the lock.
+var managedAdmission sync.Map
+
+// admissionLock returns the admission mutex of one exchange account.
+func admissionLock(exchangeID string) *sync.Mutex {
+	mu, _ := managedAdmission.LoadOrStore(exchangeID, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
 
 // managedNotFoundGrace is how long an order row without a venue order ID may
 // stay SUBMITTING/UNKNOWN while the venue reports it as not found, before the

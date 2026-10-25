@@ -11,7 +11,6 @@ var profitExitV4 = regexp.MustCompile(`止盈\s*(?:出[場场局]?|[離离][場�
 var cancelAddV4 = regexp.MustCompile(`[補补][倉仓](?:[單单])?\s*(?:可以|可|先|都)?\s*撤(?:掉|了)?`)
 var replaceTPV4 = regexp.MustCompile(`(?i)TP\s*([1-9][0-9]*)\s*(?:修改|改|改成|改[為为])(?:[為为成])?\s*(?:[這这][裡里裏]|此[處处]|[現现]在)\s*(?:減倉|减仓|止盈)`)
 var tpAfterV4 = regexp.MustCompile(`(?i)TP\s*([1-9][0-9]*)\s*(?:(?:已)?(?:成交|到[達达]|完成|觸發|触发|止盈)\s*)?[後后]`)
-var retainedV4 = regexp.MustCompile(`(?:留|保留|剩)[下著着餘余]?\s*([0-9]+(?:\.[0-9]+)?)\s*[%％]`)
 var discretionaryV4 = regexp.MustCompile(`(?i)考[慮虑]|或[許许]|也[許许]|maybe|consider`)
 
 func hasFullCloseIntent(text string) bool {

@@ -179,7 +179,19 @@ func (e *Engine) HandleMessage(msg *store.DiscordMessage, isEdit bool) error {
 
 	// Author filter (rule layer, zero cost). The message is consumed without a
 	// signal; the event makes a misconfigured filter visible in the log center.
-	if rules := e.messageRules(msg); !rules.AllowsAuthor(msg) {
+	rules, rulesErr := e.messageRules(msg)
+	if rulesErr != nil {
+		// Reject rather than retry: a corrupt frozen snapshot never heals, and
+		// running with empty rules would bypass the author filter.
+		e.events.Error(msg.MessageID, "", msg.MessageID, EvSourceRulesInvalid,
+			fmt.Sprintf("message rejected: %v", rulesErr),
+			map[string]interface{}{
+				"message_id": msg.MessageID, "channel_id": msg.ChannelID, "revision": msg.Revision,
+				"delivery_id": msg.DeliveryID, "reason": rulesErr.Error(),
+			})
+		return nil
+	}
+	if !rules.AllowsAuthor(msg) {
 		e.events.Info(msg.MessageID, "", msg.MessageID, EvSourceAuthorFiltered,
 			fmt.Sprintf("author %q (id %s) not in author filter; message ignored", msg.AuthorName, msg.AuthorID),
 			map[string]interface{}{
@@ -246,10 +258,14 @@ func (e *Engine) processMessage(msg *store.DiscordMessage, isEdit bool) (pipelin
 		latencyRef = *msg.EditedAt
 	}
 
+	msgRules, rulesErr := e.messageRules(msg)
+	if rulesErr != nil {
+		return rulesErr
+	}
 	sig := &store.CopyTradeSignal{
 		ID:                signalID,
 		ExecutionVersion:  1,
-		RulesSnapshotJSON: e.messageRules(msg).Snapshot(),
+		RulesSnapshotJSON: msgRules.Snapshot(),
 		SourceEventID:     msg.SourceEventID, DeliveryID: msg.DeliveryID, LogicalChannelID: e.cfg.PrimaryChannelID, QueueMs: time.Since(msg.ReceivedAt).Milliseconds(),
 		TraderID:         e.traderID,
 		ChannelID:        msg.ChannelID,
@@ -871,7 +887,6 @@ func (e *Engine) interpret(traceID, signalID string, msg *store.DiscordMessage, 
 	promptStart := time.Now()
 	userPrompt := BuildUserPrompt(PromptInput{
 		Message:      msg,
-		EmbedsText:   discord.FlattenEmbeds(discord.ParseStoredEmbeds(msg.EmbedsJSON)),
 		IsEdit:       isEdit,
 		ImageCount:   imageCount,
 		ChannelNotes: rules.Notes,
