@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"nofx/mcp"
 )
@@ -119,7 +120,12 @@ func (c *ClaudeClient) BuildRequestBodyFromRequest(req *mcp.Request) map[string]
 	}
 
 	// ── 2. Convert messages to Anthropic format ───────────────────────────────
-	anthropicMsgs := ConvertMessagesToAnthropic(convMsgs)
+	anthropicMsgs, warnings := convertMessagesToAnthropic(convMsgs)
+	for _, w := range warnings {
+		if c.Log != nil {
+			c.Log.Warnf("⚠️  [MCP] Claude request: %s", w)
+		}
+	}
 
 	// ── 3. Convert tool definitions (parameters → input_schema) ──────────────
 	var anthropicTools []map[string]any
@@ -163,7 +169,15 @@ func (c *ClaudeClient) BuildRequestBodyFromRequest(req *mcp.Request) map[string]
 // ConvertMessagesToAnthropic translates from the OpenAI-shaped mcp.Message
 // slice to Anthropic's messages array.
 func ConvertMessagesToAnthropic(msgs []mcp.Message) []map[string]any {
+	out, _ := convertMessagesToAnthropic(msgs)
+	return out
+}
+
+// convertMessagesToAnthropic is ConvertMessagesToAnthropic plus the list of
+// content parts that could not be represented (for logging by the caller).
+func convertMessagesToAnthropic(msgs []mcp.Message) ([]map[string]any, []string) {
 	var out []map[string]any
+	var warnings []string
 
 	for i := 0; i < len(msgs); {
 		msg := msgs[i]
@@ -208,6 +222,28 @@ func ConvertMessagesToAnthropic(msgs []mcp.Message) []map[string]any {
 				"content": blocks,
 			})
 
+		// ── Multimodal message (text + images) → content block array ─────────
+		// ContentParts takes priority over Content (see mcp.Message). Sending
+		// only msg.Content here dropped both the prompt text and the images
+		// and Anthropic rejected the request ("user messages must have
+		// non-empty content").
+		case len(msg.ContentParts) > 0:
+			blocks, partWarnings := convertContentPartsToAnthropic(msg.ContentParts, msg.Content)
+			warnings = append(warnings, partWarnings...)
+			if len(blocks) > 0 {
+				out = append(out, map[string]any{
+					"role":    msg.Role,
+					"content": blocks,
+				})
+			} else {
+				// Every part was empty text: behave exactly like a plain message.
+				out = append(out, map[string]any{
+					"role":    msg.Role,
+					"content": msg.Content,
+				})
+			}
+			i++
+
 		// ── Regular user / assistant text message ─────────────────────────────
 		default:
 			out = append(out, map[string]any{
@@ -218,7 +254,102 @@ func ConvertMessagesToAnthropic(msgs []mcp.Message) []map[string]any {
 		}
 	}
 
-	return out
+	return out, warnings
+}
+
+// anthropicImageMediaTypes are the base64 image media types the Messages API
+// accepts.
+var anthropicImageMediaTypes = map[string]bool{
+	"image/jpeg": true,
+	"image/png":  true,
+	"image/gif":  true,
+	"image/webp": true,
+}
+
+// convertContentPartsToAnthropic maps OpenAI-style content parts to Anthropic
+// content blocks. Empty text parts are dropped (the API rejects empty text
+// blocks). An image that cannot be represented is replaced by an explicit text
+// note, so the model is told an image existed but was not visible and the
+// message never silently loses its image or becomes empty. When the parts carry
+// no text at all, a non-empty fallback Content is used as the leading text.
+func convertContentPartsToAnthropic(parts []mcp.ContentPart, fallback string) ([]map[string]any, []string) {
+	var blocks []map[string]any
+	var warnings []string
+	hasText := false
+	for idx, p := range parts {
+		switch p.Type {
+		case "text":
+			if strings.TrimSpace(p.Text) == "" {
+				continue
+			}
+			hasText = true
+			blocks = append(blocks, map[string]any{"type": "text", "text": p.Text})
+		case "image_url":
+			url := ""
+			if p.ImageURL != nil {
+				url = strings.TrimSpace(p.ImageURL.URL)
+			}
+			source, err := anthropicImageSource(url)
+			if err != nil {
+				warnings = append(warnings, fmt.Sprintf("content part %d: image omitted: %v", idx, err))
+				hasText = true
+				blocks = append(blocks, map[string]any{"type": "text", "text": "[image omitted: " + err.Error() + "]"})
+				continue
+			}
+			blocks = append(blocks, map[string]any{"type": "image", "source": source})
+		default:
+			if strings.TrimSpace(p.Text) != "" {
+				hasText = true
+				blocks = append(blocks, map[string]any{"type": "text", "text": p.Text})
+				continue
+			}
+			warnings = append(warnings, fmt.Sprintf("content part %d: unsupported type %q omitted", idx, p.Type))
+			hasText = true
+			blocks = append(blocks, map[string]any{"type": "text", "text": fmt.Sprintf("[content omitted: unsupported part type %q]", p.Type)})
+		}
+	}
+	if !hasText && strings.TrimSpace(fallback) != "" {
+		blocks = append([]map[string]any{{"type": "text", "text": fallback}}, blocks...)
+	}
+	return blocks, warnings
+}
+
+// anthropicImageSource converts a data URL or http(s) URL into an Anthropic
+// image source object.
+func anthropicImageSource(url string) (map[string]any, error) {
+	lower := strings.ToLower(url)
+	switch {
+	case strings.HasPrefix(lower, "data:"):
+		comma := strings.IndexByte(url, ',')
+		if comma < 0 {
+			return nil, fmt.Errorf("malformed data URL")
+		}
+		header, data := url[len("data:"):comma], strings.TrimSpace(url[comma+1:])
+		params := strings.Split(header, ";")
+		mediaType := strings.ToLower(strings.TrimSpace(params[0]))
+		isBase64 := false
+		for _, param := range params[1:] {
+			if strings.EqualFold(strings.TrimSpace(param), "base64") {
+				isBase64 = true
+			}
+		}
+		if !isBase64 {
+			return nil, fmt.Errorf("data URL is not base64 encoded")
+		}
+		if !anthropicImageMediaTypes[mediaType] {
+			return nil, fmt.Errorf("unsupported image media type %q", mediaType)
+		}
+		if data == "" {
+			return nil, fmt.Errorf("empty image data")
+		}
+		return map[string]any{"type": "base64", "media_type": mediaType, "data": data}, nil
+	case strings.HasPrefix(lower, "https://"), strings.HasPrefix(lower, "http://"):
+		return map[string]any{"type": "url", "url": url}, nil
+	case url == "":
+		return nil, fmt.Errorf("missing image URL")
+	default:
+		return nil, fmt.Errorf("unsupported image URL scheme")
+	}
 }
 
 // ── Response parsers ──────────────────────────────────────────────────────────

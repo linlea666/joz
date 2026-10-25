@@ -276,8 +276,10 @@ func TestNotificationCloseUsesTrackedOrdersAndPersistsUnknownOutcome(t *testing.
 			}
 			sig, _ := st.CopyTrade().LatestSignal("trader-1", end.MessageID, 0)
 			if queryDown {
-				if sig.Status != "execution_wait" || sig.NextRetryAt == nil || v.qty <= 0 {
-					t.Fatalf("unknown outcome treated as flat: %+v qty %g", sig, v.qty)
+				// The known position is closed even though the entry-order query
+				// is down; the trade itself waits for the entry outcome.
+				if sig.Status != "execution_wait" || sig.NextRetryAt == nil || v.qty != 0 {
+					t.Fatalf("known position not closed while entry outcome unknown: %+v qty %g", sig, v.qty)
 				}
 				actions, _ := st.CopyTrade().GetActionsForMessage("trader-1", end.MessageID)
 				if len(actions) != 1 || actions[0].Status != "uncertain" {

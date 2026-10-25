@@ -239,7 +239,7 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 	}
 
 	// Update each exchange's configuration and track traders that need reload
-	tradersToReload := make(map[string]bool)
+	tradersToReload := make(map[string]*store.Trader)
 	for exchangeID, exchangeData := range req.Exchanges {
 		existing, err := s.store.Exchange().GetByID(userID, exchangeID)
 		if err != nil {
@@ -324,7 +324,7 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 		// Find traders using this exchange BEFORE updating
 		traders, _ := s.store.Trader().ListByExchangeID(userID, exchangeID)
 		for _, t := range traders {
-			tradersToReload[t.ID] = true
+			tradersToReload[t.ID] = t
 		}
 
 		err = s.store.Exchange().Update(userID, exchangeID, true, exchangeData.APIKey, exchangeData.SecretKey, exchangeData.Passphrase, exchangeData.Testnet, effectiveHyperliquidWalletAddr, effectiveHyperliquidUnifiedAcct, effectiveHyperliquidBuilderApproved, effectiveAsterUser, effectiveAsterSigner, exchangeData.AsterPrivateKey, effectiveLighterWalletAddr, exchangeData.LighterPrivateKey, exchangeData.LighterAPIKeyPrivateKey, exchangeData.LighterAPIKeyIndex)
@@ -337,7 +337,8 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 	s.exchangeAccountStateCache.Invalidate(userID)
 
 	// Remove affected traders from memory BEFORE reloading to pick up new config
-	for traderID := range tradersToReload {
+	for traderID, t := range tradersToReload {
+		prepareCopyTradeReload(t)
 		logger.Infof("🔄 Removing trader %s from memory to reload with new exchange config", traderID)
 		s.traderManager.RemoveTrader(traderID)
 	}

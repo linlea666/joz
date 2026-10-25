@@ -1342,6 +1342,16 @@ export const translations = {
       filledQuantity: 'Filled / planned quantity',
       averageFill: 'Average fill',
       retryWaiting: 'Waiting for model retry',
+      gateReason: {
+        BEFORE_LIVE_BOUNDARY:
+          'Message predates the live boundary: messages posted or received before live mode was enabled are recorded but never executed',
+        BEFORE_TRADER_ACTIVATION:
+          "Card was posted before this trader's current activation: a trader that was stopped and restarted never opens cards published before it started (management of existing trades is unaffected)",
+        BEFORE_EXECUTION_BOUNDARY:
+          'Message predates the execution boundary (legacy record: the live boundary and trader activation were not distinguished)',
+        CONFIG_REVOKED:
+          'Copy-trade configuration changed or route revoked: the message was delivered under an older configuration and will not open a position under the current one',
+      },
       dupProtection: 'Duplicate Open Protection',
       paused: 'Paused (block new opens)',
       on: 'ON',
@@ -2739,6 +2749,16 @@ export const translations = {
       filledQuantity: '成交 / 计划数量',
       averageFill: '成交均价',
       retryWaiting: '等待模型重试',
+      gateReason: {
+        BEFORE_LIVE_BOUNDARY:
+          '消息早于实盘生效时间：开启实盘之前发布或收到的消息只记录、不执行',
+        BEFORE_TRADER_ACTIVATION:
+          '卡片发布早于交易员本次启用时间：停止后重新启动的交易员不会对启动前发布的卡片开仓（已有交易的管理指令不受影响）',
+        BEFORE_EXECUTION_BOUNDARY:
+          '消息早于执行边界（旧版记录：当时未区分实盘生效时间与交易员启用时间）',
+        CONFIG_REVOKED:
+          '跟单配置已变更或路由已撤销：该消息按旧配置投递，在当前配置下不会再开仓',
+      },
       dupProtection: '重复开仓保护',
       paused: '暂停（禁止新开仓）',
       on: '开',

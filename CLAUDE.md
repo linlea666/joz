@@ -13,8 +13,11 @@ joz 是 NOFX（开源 AI 交易终端）的分支，在原版基础上重点开�
 - 不亲自大段写代码，也不重读整个文件；审查时只看 `git diff`，有疑问再定点读相关函数。
 - 多文件改动先向用户说明方案再动手；涉及实盘行为的改动（下单、止损、仓位、对账），先给用户看结论再合入。
 
-### 子代理（general-purpose，按任务定强度）
-**effort high**：约束多、出错会直接影响资金或数据的部分
+### 子代理（general-purpose，一律 `model: opus`、`effort: medium`）
+- 所有子代理统一用 Opus、中等强度；不再按任务提高强度。
+- 主会话用高强度负责规划和审查，下列“资金/数据关键”部分的 diff 由主会话从严审查（逐行看风控、下单、止损、对账逻辑，必要时要求补测试）来弥补子代理强度。
+
+**资金/数据关键**：约束多、出错会直接影响资金或数据的部分
 - 跟单核心：`copytrader/` 里的解析与规则（`parser.go`、`message_rules.go`、`presets.go`、`preset_policy.go`）、入场与仓位（`entry_*.go`、`risk.go`、`reduction_ratio.go`、`tp_*.go`）、止损与保护（`stop_*.go`、`protections.go`）、执行与对账（`executor.go`、`managed_execution.go`、`management_v4.go`、`reconcile.go`、`state_machine.go`、`recovery_*.go`、`replay*.go`）
 - 交易执行：`trader/` 下各交易所适配和 `auto_trader_*.go`（订单、风控、网格、仓位重建、同步）
 - 决策引擎与风险钳制：`kernel/`
@@ -23,9 +26,9 @@ joz 是 NOFX（开源 AI 交易终端）的分支，在原版基础上重点开�
 - 安全：`crypto/`、`auth/`、`security/`、`wallet/`
 - 回归样本：`testdata/` 里的真实频道样本和回归用例（只能加，不改已有期望，除非用户确认）
 
-**effort medium**：页面和周边
+**一般**：页面和周边
 - 前端 `web/src/`（页面、组件、i18n 文案、hooks）
-- `api/` 里只做参数透传、展示的 handler（涉及下单或配置写入的按 high）
+- `api/` 里只做参数透传、展示的 handler（涉及下单或配置写入的按“资金/数据关键”审查）
 - 通知文案（`notify/`、`telegram/` 的消息模板）、测试样板、`docs/` 文档、部署脚本说明
 
 ### 给子代理的任务怎么写

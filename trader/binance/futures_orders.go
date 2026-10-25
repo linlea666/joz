@@ -832,13 +832,15 @@ func (t *FuturesTrader) SetManagedStopLoss(symbol string, positionSide string, q
 		posSide = futures.PositionSideTypeShort
 	}
 
+	// Failures before the algo request is sent prove no order exists for
+	// clientID; callers must not treat them as an unknown submission.
 	rules, err := t.MarketRules(symbol)
 	if err != nil {
-		return fmt.Errorf("failed to load market rules for stop-loss: %w", err)
+		return types.NotSent(fmt.Errorf("failed to load market rules for stop-loss: %w", err))
 	}
 	normalizedPrice, err := rules.NormalizePrice(stopPrice)
 	if err != nil {
-		return fmt.Errorf("invalid stop-loss price %.12g: %w", stopPrice, err)
+		return types.NotSent(fmt.Errorf("invalid stop-loss price %.12g: %w", stopPrice, err))
 	}
 
 	// Use new Algo Order API. Binance validates triggerPrice against the

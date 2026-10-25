@@ -1,6 +1,28 @@
 import type { CopyTradeSignal } from '../../types'
 import { t, type Language } from '../../i18n/translations'
 
+// Source execution-gate codes (discord CheckExecution). BEFORE_EXECUTION_BOUNDARY
+// is the legacy code still present in older history.
+const EXECUTION_GATE_CODES = [
+  'BEFORE_LIVE_BOUNDARY',
+  'BEFORE_TRADER_ACTIVATION',
+  'BEFORE_EXECUTION_BOUNDARY',
+  'CONFIG_REVOKED',
+] as const
+
+// Explains why the source gate refused execution, from a skip reason or a
+// recorded error/detail (for example an ENTRY_ADMISSION_REVOKED detail).
+export function executionGateExplanation(
+  text: string | undefined,
+  language: Language
+): string | undefined {
+  if (!text) return undefined
+  const code = EXECUTION_GATE_CODES.find((c) =>
+    new RegExp(`\\b${c}\\b`).test(text)
+  )
+  return code ? t(`copytrade.gateReason.${code}`, language) : undefined
+}
+
 // A signal's raw status means processing, not exchange fill. Use only recorded
 // order evidence and current linked recovery state, never current config.
 export function copyTradeOutcome(
@@ -54,6 +76,13 @@ export function copyTradeOutcome(
     return zh
       ? '合约状态查询失败，未提交'
       : 'Contract check unavailable; not submitted'
+  if (signal.status === 'skipped') {
+    const gate = executionGateExplanation(
+      `${signal.skip_reason || ''} ${errors}`,
+      language
+    )
+    if (gate) return gate
+  }
   if (signal.status === 'execution_wait')
     return zh ? '等待核对' : 'Awaiting reconciliation'
   if (signal.status === 'retry_wait')

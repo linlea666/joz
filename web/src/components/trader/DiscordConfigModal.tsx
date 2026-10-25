@@ -118,7 +118,7 @@ export function DiscordConfigModal({
         setChannelPreview(
           res.messages.map(
             (m) =>
-              `[${m.author_name}] ${m.content || (m.has_embeds ? '(embed)' : m.attachments > 0 ? '(image)' : '(empty)')}`
+              `[${m.author_name}${m.author_id ? ` · ${m.author_id}` : ''}] ${m.content || (m.has_embeds ? '(embed)' : m.attachments > 0 ? '(image)' : '(empty)')}`
           )
         )
         toast.success(t('discord.channelOk', language))

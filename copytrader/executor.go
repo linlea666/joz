@@ -396,19 +396,116 @@ func (x *Executor) placeTPLadder(traceID, signalID string, plan *OpenPlan, fille
 // ExecuteClose closes a trade (full or partial). Idempotent: closing an
 // already-flat position is a NOOP.
 func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeContext, closeRatio float64) (SkipReason, error) {
+	_, managed := x.ex.(types.ManagedOrderTrader)
+	var intent *store.CopyTradeOrder
+	if !managed && signalID != "" {
+		row, skip, err := x.legacyExitIntent(ctx, signalID)
+		if err != nil || skip != SkipNone {
+			return skip, err
+		}
+		intent = row
+	}
 	if err := x.closeEntryEligibility(traceID, ctx, "EXIT_REQUESTED"); err != nil {
-		return SkipNone, err
+		if !errors.Is(err, errEntryCancelUnconfirmed) {
+			if !managed {
+				return SkipNone, fmt.Errorf("%w: %v", errExitNotSubmitted, err)
+			}
+			return SkipNone, err
+		}
+		// entry_disabled is already durable; a stuck entry cancel must not keep
+		// the known position from being closed.
+		x.events.Warn(traceID, signalID, "", EvExecutionError, "entry cancellation unconfirmed; entry eligibility closed, continuing exit: "+err.Error(), map[string]interface{}{"context_id": ctx.ID})
 	}
 	x.refreshTPProgress(traceID, ctx)
-	if _, ok := x.ex.(types.ManagedOrderTrader); ok {
+	if managed {
 		return x.executeManagedClose(traceID, signalID, ctx, closeRatio)
 	}
+	return x.executeLegacyClose(traceID, signalID, ctx, closeRatio, intent)
+}
+
+// errExitNotSubmitted: a legacy-venue exit failed BEFORE any close order was
+// sent (position lookup, entry cancel, intent persistence). Such an exit is
+// safe to retry; anything that may have reached the venue is not.
+var errExitNotSubmitted = errors.New("exit not submitted")
+
+// Legacy exit ledger statuses. They are deliberately outside the managed
+// order status set (no ownership/cleanup query treats them as live orders).
+const (
+	legacyExitIntent     = "INTENT"      // recorded, nothing sent
+	legacyExitSending    = "SENDING"     // about to send: outcome unknown after a crash
+	legacyExitSent       = "SENT"        // venue accepted the close
+	legacyExitSendFailed = "SEND_FAILED" // send returned an error: outcome unknown
+	legacyExitNotNeeded  = "NOT_NEEDED"  // already flat / nothing to send
+)
+
+// legacyExitIntent records (or reuses) the durable per-signal exit marker on
+// venues without client-ID recovery, so recovery can prove "never sent".
+func (x *Executor) legacyExitIntent(ctx *store.CopyTradeContext, signalID string) (*store.CopyTradeOrder, SkipReason, error) {
+	rows, err := x.exitRows(ctx, signalID)
+	if err != nil {
+		return nil, SkipNone, fmt.Errorf("%w: %v", errExitNotSubmitted, err)
+	}
+	for _, r := range rows {
+		switch r.Status {
+		case legacyExitIntent:
+			return r, SkipNone, nil
+		case legacyExitSent, legacyExitNotNeeded:
+			return nil, SkipDuplicate, nil
+		default:
+			return nil, SkipWaitingReconciliation, fmt.Errorf("previous close for this signal has unknown outcome (%s); not resending, manual review required", r.Status)
+		}
+	}
+	row := x.newExitOrder(ctx, signalID, 0, 0, 0)
+	row.Status = legacyExitIntent
+	if err = x.st.CopyTrade().CreateOrder(row); err != nil {
+		return nil, SkipNone, fmt.Errorf("%w: record exit intent: %v", errExitNotSubmitted, err)
+	}
+	return row, SkipNone, nil
+}
+
+// legacyExitRetryable reports whether recovery may resend a legacy exit:
+// only when its durable intent exists and was never moved past INTENT.
+func (x *Executor) legacyExitRetryable(ctx *store.CopyTradeContext, signalID string) bool {
+	rows, err := x.exitRows(ctx, signalID)
+	if err != nil || len(rows) == 0 {
+		return false
+	}
+	for _, r := range rows {
+		if r.Status != legacyExitIntent {
+			return false
+		}
+	}
+	return true
+}
+
+func (x *Executor) markLegacyExit(row *store.CopyTradeOrder, status string, updates map[string]interface{}) error {
+	if row == nil {
+		return nil
+	}
+	if updates == nil {
+		updates = map[string]interface{}{}
+	}
+	updates["status"] = status
+	if err := x.st.CopyTrade().UpdateOrder(row.ID, updates); err != nil {
+		return err
+	}
+	row.Status = status
+	return nil
+}
+
+// executeLegacyClose closes on venues without managed orders. Full closes send
+// the close FIRST and remove the remaining SL/TP only after a fresh read shows
+// the position flat, so a failed close never leaves the position unprotected.
+func (x *Executor) executeLegacyClose(traceID, signalID string, ctx *store.CopyTradeContext, closeRatio float64, intent *store.CopyTradeOrder) (SkipReason, error) {
 	pos, err := x.freshPosition(ctx.Symbol, ctx.Direction)
 	if err != nil {
-		return SkipNone, fmt.Errorf("position lookup failed: %w", err)
+		return SkipNone, fmt.Errorf("%w: position lookup failed: %v", errExitNotSubmitted, err)
 	}
 	if pos == nil || pos.qty <= 0 {
 		// Nothing on the exchange: reconcile the context.
+		if err := x.markLegacyExit(intent, legacyExitNotNeeded, nil); err != nil {
+			return SkipNone, fmt.Errorf("%w: %v", errExitNotSubmitted, err)
+		}
 		x.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
 		if err := x.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "CLOSE(noop)"}); err != nil {
 			return SkipNone, err
@@ -428,6 +525,9 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 			}
 		}
 		if closeQty <= 0 {
+			if err := x.markLegacyExit(intent, legacyExitNotNeeded, nil); err != nil {
+				return SkipNone, fmt.Errorf("%w: %v", errExitNotSubmitted, err)
+			}
 			x.events.Info(traceID, signalID, "", EvSignalSkipped,
 				fmt.Sprintf("partial close skipped: %.0f%% of %.8g rounds to zero", closeRatio, pos.qty), nil)
 			return SkipAlreadyFlat, nil
@@ -437,11 +537,10 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 		}
 	}
 
-	if full {
-		// Cancel protection orders first so reduce-only orders don't fight the close.
-		x.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
+	// From here on the close may reach the venue: never resend automatically.
+	if err := x.markLegacyExit(intent, legacyExitSending, map[string]interface{}{"quantity": closeQty, "price": pos.entryPrice}); err != nil {
+		return SkipNone, fmt.Errorf("%w: record exit submission: %v", errExitNotSubmitted, err)
 	}
-
 	start := time.Now()
 	if ctx.Direction == string(DirectionLong) {
 		_, err = x.ex.CloseLong(ctx.Symbol, closeQty)
@@ -449,14 +548,28 @@ func (x *Executor) ExecuteClose(traceID, signalID string, ctx *store.CopyTradeCo
 		_, err = x.ex.CloseShort(ctx.Symbol, closeQty)
 	}
 	if err != nil {
+		_ = x.markLegacyExit(intent, legacyExitSendFailed, map[string]interface{}{"last_error": err.Error()})
 		x.events.Error(traceID, signalID, "", EvExecutionError, fmt.Sprintf("close failed: %v", err), nil)
 		return SkipNone, fmt.Errorf("close failed: %w", err)
+	}
+	if err := x.markLegacyExit(intent, legacyExitSent, nil); err != nil {
+		x.events.Warn(traceID, signalID, "", EvExecutionError, "close sent but its ledger update failed: "+err.Error(), nil)
 	}
 	x.events.Success(traceID, signalID, "", EvCloseSubmitted,
 		fmt.Sprintf("close %s %.8g/%.8g (%.0f%%)", ctx.Symbol, closeQty, pos.qty, math.Min(closeRatio, 100)),
 		time.Since(start).Milliseconds(), nil)
 
 	if full {
+		// Only a confirmed flat position releases its stop loss and TPs.
+		fresh, ferr := x.freshPosition(ctx.Symbol, ctx.Direction)
+		if ferr != nil || (fresh != nil && fresh.qty > 0) {
+			if err := x.markContext(ctx, StateClosePending, map[string]interface{}{"last_action": "CLOSE_SUBMITTED"}); err != nil {
+				return SkipNone, err
+			}
+			x.events.Info(traceID, signalID, "", EvReconcile, fmt.Sprintf("close sent for %s; protections stay until the position is confirmed flat", ctx.Symbol), nil)
+			return SkipNone, nil
+		}
+		x.cancelTradeOrdersQuiet(ctx.Symbol, ctx.Direction)
 		if err := x.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "CLOSE"}); err != nil {
 			return SkipNone, err
 		}
@@ -483,17 +596,20 @@ func (x *Executor) ExecuteUpdateSL(traceID, signalID string, ctx *store.CopyTrad
 // Resolve entry-relative stops after cancellation settles any racing fills.
 func (x *Executor) ExecuteUpdateSLSpec(traceID, signalID string, ctx *store.CopyTradeContext, spec PriceSpec) (SkipReason, error) {
 	if err := x.closeEntryEligibility(traceID, ctx, "STOP_UPDATE"); err != nil {
-		return SkipNone, err
+		if !errors.Is(err, errEntryCancelUnconfirmed) {
+			return SkipNone, err
+		}
+		// entry_disabled is durable; protect the known position regardless.
+		x.events.Warn(traceID, signalID, "", EvExecutionError, "entry cancellation unconfirmed; entry eligibility closed, continuing stop update: "+err.Error(), map[string]interface{}{"context_id": ctx.ID})
 	}
 	pos, err := x.freshPosition(ctx.Symbol, ctx.Direction)
 	if err != nil {
 		return SkipNone, fmt.Errorf("position lookup failed: %w", err)
 	}
 	if pos == nil || pos.qty <= 0 {
-		if err := x.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "UPDATE_SL(skipped)"}); err != nil {
-			return SkipNone, err
-		}
-		x.events.Info(traceID, signalID, "", EvSignalSkipped, "UPDATE_SL skipped: no live position (SKIPPED_NO_POSITION)", nil)
+		// One flat read is not proof of a close: the reconciler closes the
+		// trade (and cleans its orders) only after two consecutive misses.
+		x.events.Info(traceID, signalID, "", EvSignalSkipped, "UPDATE_SL skipped: no live position on this read (SKIPPED_NO_POSITION); trade closure is left to reconciliation", nil)
 		return SkipNoPosition, nil
 	}
 	entry := ctx.AvgFillPrice

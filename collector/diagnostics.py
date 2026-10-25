@@ -44,7 +44,8 @@ class Diagnostics:
     def append(self, event, level, context):
         # Callers supply codes/locations only, never exception text or payloads.
         allowed = {'code','stage','exception_type','close_code','file','function','line',
-                   'last_heartbeat','channel_id','state','previous_state','config_version','repeat_count','generation'}
+                   'last_heartbeat','channel_id','state','previous_state','config_version','repeat_count','generation',
+                   'count','duration_ms'}
         context = {k:v for k,v in context.items() if k in allowed and isinstance(v,(str,int,bool,float))}
         context = {k:(v[:256] if isinstance(v,str) else v) for k,v in context.items()}
         row = {'event_id':str(uuid.uuid4()),'component':'collector','event':event,

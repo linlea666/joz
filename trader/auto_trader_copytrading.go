@@ -1,6 +1,8 @@
 package trader
 
 import (
+	"context"
+	"errors"
 	"fmt"
 
 	"nofx/copytrader"
@@ -21,6 +23,40 @@ func (at *AutoTrader) CopyEngine() *copytrader.Engine {
 	return at.copyEngine
 }
 
+// dualSidePositionChecker is implemented by exchange adapters that can report
+// whether the account is in hedge (dual-side) position mode. Copy-trading
+// orders always carry positionSide=LONG/SHORT, so on such exchanges a one-way
+// account would reject every order.
+type dualSidePositionChecker interface {
+	IsDualSidePosition(ctx context.Context) (bool, error)
+}
+
+// ErrCopyTradingOneWayPositionMode is returned when a Binance account is in
+// one-way position mode and therefore cannot run copy trading.
+var ErrCopyTradingOneWayPositionMode = errors.New(
+	"Binance 账户是单向持仓模式，跟单需要双向持仓；请在 Binance 设置中切换（需先平仓并撤单）/ " +
+		"Binance account is in one-way position mode; copy trading requires hedge (dual-side) mode. " +
+		"Switch it in Binance settings (close all positions and cancel open orders first)")
+
+// verifyCopyTradingPositionMode refuses to start when the exchange can report
+// its position mode and it is not hedge mode, or when the query fails (fail
+// closed: starting blind would get every order rejected with -4061).
+func (at *AutoTrader) verifyCopyTradingPositionMode() error {
+	checker, ok := at.trader.(dualSidePositionChecker)
+	if !ok {
+		return nil
+	}
+	dual, err := checker.IsDualSidePosition(context.Background())
+	if err != nil {
+		return fmt.Errorf("无法确认 Binance 持仓模式，拒绝启动跟单（请检查 API Key 权限与网络后重试）/ "+
+			"cannot verify Binance position mode, refusing to start copy trading: %w", err)
+	}
+	if !dual {
+		return ErrCopyTradingOneWayPositionMode
+	}
+	return nil
+}
+
 // runCopyTradingMode replaces the market-scan loop for copy-trading traders:
 // it starts the copytrader engine (poller subscription + reconcile loop) and
 // blocks until Stop() is called. No scan cycles, no kernel decisions.
@@ -31,6 +67,10 @@ func (at *AutoTrader) runCopyTradingMode() error {
 	}
 	if err := cfg.ValidateExchange(at.config.Exchange); err != nil {
 		return fmt.Errorf("copy trading config validation failed: %w", err)
+	}
+
+	if err := at.verifyCopyTradingPositionMode(); err != nil {
+		return err
 	}
 
 	poller := discord.Global()

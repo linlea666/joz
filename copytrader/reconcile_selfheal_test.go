@@ -91,14 +91,15 @@ func TestRecheckExpiresAfterConfirmedClose(t *testing.T) {
 	}
 }
 
-func TestReconcileAdoptsGrownPosition(t *testing.T) {
+// A larger exchange position is not adopted: the extra size may belong to a
+// manual trade or another trader, so only a warning is recorded and the stop
+// stays sized for the tracked quantity.
+func TestReconcileDoesNotAdoptGrownPosition(t *testing.T) {
 	st := newTestStore(t)
 	mock := &mockExchange{
 		positions: []map[string]interface{}{{
 			"symbol": "BTCUSDT", "side": "long", "positionAmt": 0.8, "entryPrice": 100.0,
 		}},
-		// A live stop exists (sized for the old 0.5) so the SL guard stays out
-		// of the way; the growth branch itself must do the resize.
 		openOrders: []types.OpenOrder{{Type: "STOP_MARKET", StopPrice: 95, PositionSide: "LONG", Quantity: 0.5}},
 	}
 	e := newReconcileEngine(st, mock)
@@ -107,16 +108,19 @@ func TestReconcileAdoptsGrownPosition(t *testing.T) {
 	e.reconcileOpenTrade(ctx)
 
 	stored, _ := st.CopyTrade().GetContext(ctx.ID)
-	if stored.Quantity != 0.8 {
-		t.Fatalf("quantity = %v, want 0.8 (exchange size adopted)", stored.Quantity)
+	if stored.Quantity != 0.5 {
+		t.Fatalf("quantity = %v, want 0.5 (growth must not be adopted)", stored.Quantity)
 	}
-	if len(mock.cancelSLLog) == 0 {
-		t.Fatal("old undersized SL must be cancelled before the resize")
+	if stored.LastAction != "POSITION_GROWTH_NOT_ADOPTED" {
+		t.Fatalf("last_action = %q, want POSITION_GROWTH_NOT_ADOPTED", stored.LastAction)
 	}
-	n := len(mock.setStopLossLog)
-	if n == 0 || mock.setStopLossLog[n-1] != 95 || mock.setStopLossQtyLog[n-1] != 0.8 {
-		t.Fatalf("SL must be re-placed @95 for qty 0.8, prices=%v qtys=%v",
-			mock.setStopLossLog, mock.setStopLossQtyLog)
+	if len(mock.cancelSLLog) != 0 {
+		t.Fatal("tracked stop must not be cancelled for unadopted growth")
+	}
+	for _, q := range mock.setStopLossQtyLog {
+		if q == 0.8 {
+			t.Fatalf("stop resized to the grown position: qtys=%v", mock.setStopLossQtyLog)
+		}
 	}
 }
 

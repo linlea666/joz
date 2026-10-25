@@ -7,6 +7,7 @@ import (
 	"nofx/store"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -104,7 +105,7 @@ func TestExecutionBoundaryAndSourceGap(t *testing.T) {
 	}
 	m.cfg, _ = st.DiscordConfig().Get()
 	m.subscriptions["t"] = &sourceSubscription{route: Route{ExecutionKey: "new", Channels: []string{"200"}}}
-	if err := m.CheckExecution("t", msg, true); err == nil || err.Error() != "BEFORE_EXECUTION_BOUNDARY" {
+	if err := m.CheckExecution("t", msg, true); err == nil || ExecutionGateCode(err) != GateBeforeLiveBoundary || !strings.Contains(err.Error(), "live boundary") {
 		t.Fatal(err)
 	}
 	msg.ReceivedAt = time.Now().UTC()
@@ -156,7 +157,7 @@ func TestOldCardNewEditSurvivesRouteReactivationWithoutReopening(t *testing.T) {
 	if err = m.CheckExecution("t", msg, false); err != nil {
 		t.Fatal("management blocked by original timestamp", err)
 	}
-	if err = m.CheckExecution("t", msg, true); err == nil || err.Error() != "BEFORE_EXECUTION_BOUNDARY" {
+	if err = m.CheckExecution("t", msg, true); err == nil || ExecutionGateCode(err) != GateBeforeTraderActivation || !strings.Contains(err.Error(), "trader activation") {
 		t.Fatal("edited historical card allowed to reopen", err)
 	}
 }

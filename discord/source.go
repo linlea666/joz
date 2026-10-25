@@ -681,34 +681,37 @@ func (m *SourceManager) CheckExecution(traderID string, msg *store.DiscordMessag
 	s := m.subscriptions[traderID]
 	m.mu.Unlock()
 	if cfg == nil || !cfg.Enabled || cfg.Token == "" {
-		return fmt.Errorf("SOURCE_DISABLED")
+		return gateError(GateSourceDisabled)
 	}
 	if cfg.RunMode != "live" || cfg.ExecutionSince == nil {
-		return fmt.Errorf("OBSERVE_ONLY")
+		return gateError(GateObserveOnly)
 	}
-	ref := msg.MessageTimestamp
+	ref, refName := msg.MessageTimestamp, "message posted"
 	if !newRisk && msg.EditedAt != nil && msg.EditedAt.After(ref) {
-		ref = *msg.EditedAt
+		ref, refName = *msg.EditedAt, "message edited"
 	}
-	if !msg.ReceivedAt.After(*cfg.ExecutionSince) || ref.Before(*cfg.ExecutionSince) {
-		return fmt.Errorf("BEFORE_EXECUTION_BOUNDARY")
+	if !msg.ReceivedAt.After(*cfg.ExecutionSince) {
+		return boundaryError(GateBeforeLiveBoundary, "message received", msg.ReceivedAt, "live boundary", *cfg.ExecutionSince)
+	}
+	if ref.Before(*cfg.ExecutionSince) {
+		return boundaryError(GateBeforeLiveBoundary, refName, ref, "live boundary", *cfg.ExecutionSince)
 	}
 	if s == nil {
-		return fmt.Errorf("CONFIG_REVOKED")
+		return gateError(GateConfigRevoked)
 	}
 	if newRisk {
 		if msg.MessageTimestamp.Before(s.route.ActivatedAt) {
-			return fmt.Errorf("BEFORE_EXECUTION_BOUNDARY")
+			return boundaryError(GateBeforeTraderActivation, "message posted", msg.MessageTimestamp, "trader activation", s.route.ActivatedAt)
 		}
 		if msg.ExecutionKey != s.route.ExecutionKey {
-			return fmt.Errorf("CONFIG_REVOKED")
+			return gateError(GateConfigRevoked)
 		}
 		status := m.CollectorStatus()
 		if status.State != "connected" || !m.tradingConfigApplied() {
-			return fmt.Errorf("SOURCE_NOT_READY")
+			return gateError(GateSourceNotReady)
 		}
 		if !m.HistoryComplete(traderID) {
-			return fmt.Errorf("SOURCE_GAP_OR_PERMISSION")
+			return gateError(GateSourceGapOrPermission)
 		}
 
 	}

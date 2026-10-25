@@ -32,6 +32,48 @@ type TraderManager struct {
 	loadErrors       map[string]error              // key: trader ID, stores last load error
 	competitionCache *CompetitionCache
 	mu               sync.RWMutex
+
+	// lifecycleLocks serializes start/stop/reload of one trader ID so two
+	// requests can never run two instances (two copy-trading engines) against
+	// the same account. Guarded by lifecycleMu; never held together with mu
+	// in the reverse order (lifecycle lock first, then mu).
+	lifecycleMu    sync.Mutex
+	lifecycleLocks map[string]*sync.Mutex
+}
+
+// LockTraderLifecycle acquires the per-trader lifecycle lock and returns its
+// release function. Hold it across "check running -> remove -> reload -> start"
+// sequences for the same trader ID.
+func (tm *TraderManager) LockTraderLifecycle(traderID string) func() {
+	tm.lifecycleMu.Lock()
+	if tm.lifecycleLocks == nil {
+		tm.lifecycleLocks = make(map[string]*sync.Mutex)
+	}
+	l, ok := tm.lifecycleLocks[traderID]
+	if !ok {
+		l = &sync.Mutex{}
+		tm.lifecycleLocks[traderID] = l
+	}
+	tm.lifecycleMu.Unlock()
+	l.Lock()
+	return l.Unlock
+}
+
+// SyncStoppedStatusAfterRunFailure persists is_running=false after a run of
+// instance at failed, unless a newer instance for the same ID is now running
+// (in which case that instance owns the persisted flag).
+func (tm *TraderManager) SyncStoppedStatusAfterRunFailure(st *store.Store, userID, traderID string, at *trader.AutoTrader) {
+	if st == nil {
+		return
+	}
+	unlock := tm.LockTraderLifecycle(traderID)
+	defer unlock()
+	if cur, err := tm.GetTrader(traderID); err == nil && cur != at && cur.IsRunning() {
+		return
+	}
+	if err := st.Trader().UpdateStatus(userID, traderID, false); err != nil {
+		logger.Warnf("%s failed to persist stopped status after run failure: %v", traderLogTag(traderID, at.GetName()), err)
+	}
 }
 
 // NewTraderManager creates a trader manager
@@ -791,15 +833,20 @@ func (tm *TraderManager) addTraderFromStore(traderCfg *store.Trader, aiModelCfg 
 	// Auto-start if trader was running before shutdown
 	if traderCfg.IsRunning {
 		logger.Infof("%s 🔄 Auto-starting trader (was running before shutdown)...", traderLogTag(traderCfg.ID, traderCfg.Name))
-		go func(trader *trader.AutoTrader, traderName, traderID, userID string) {
-			if err := trader.Run(); err != nil {
-				logger.Warnf("%s trader stopped with error: %v", traderLogTag(traderID, traderName), err)
-				// Update database to reflect stopped state
-				if st != nil {
-					_ = st.Trader().UpdateStatus(userID, traderID, false)
-				}
+		// Claim the run slot synchronously so a caller that inspects the
+		// trader right after loading sees it running and does not Run it again.
+		traderName, traderID, userID := traderCfg.Name, traderCfg.ID, traderCfg.UserID
+		if err := at.StartAsync(func(err error) {
+			if err == nil {
+				return
 			}
-		}(at, traderCfg.Name, traderCfg.ID, traderCfg.UserID)
+			logger.Warnf("%s trader stopped with error: %v", traderLogTag(traderID, traderName), err)
+			// Update database to reflect stopped state. Runs in its own
+			// goroutine (StartAsync callback), so taking tm.mu here is safe.
+			tm.SyncStoppedStatusAfterRunFailure(st, userID, traderID, at)
+		}); err != nil {
+			logger.Warnf("%s auto-start skipped: %v", traderLogTag(traderID, traderName), err)
+		}
 		logger.Infof("%s ✅ Trader auto-started successfully", traderLogTag(traderCfg.ID, traderCfg.Name))
 	}
 

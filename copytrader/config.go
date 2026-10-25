@@ -240,6 +240,13 @@ func (c *CopyTradingConfig) ValidateExchange(exchangeType string) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
+	// Copy trading needs precise exit/stop recovery that is only implemented
+	// and exercised for these venues; others would run without it.
+	switch strings.ToLower(strings.TrimSpace(exchangeType)) {
+	case "binance", "okx":
+	default:
+		return fmt.Errorf("跟单仅支持 Binance 与 OKX，交易所 %q 缺少可靠的平仓/止损恢复能力 (copy trading supports Binance and OKX only; exchange %q lacks reliable exit/stop recovery)", exchangeType, exchangeType)
+	}
 	if (sharedRiskEntryPolicy(c.EntryPolicy) || c.MarketDualPriceMode == DualPriceSplit) && strings.ToLower(exchangeType) != "binance" {
 		return fmt.Errorf("shared-risk entry currently supports Binance only")
 	}
@@ -311,9 +318,40 @@ func (c *CopyTradingConfig) ListenChannels() []string {
 
 // A wording-only change does not revoke an in-flight interpretation. Execution
 // and source settings do, while the old message keeps its interpretation rules.
+//
+// The key hashes the configuration's meaning, not its spelling: values the
+// runtime treats identically (an omitted field versus its explicit default)
+// produce the same key, so re-saving a config with defaults filled in (for
+// example when only the trader name or AI model changed) does not revoke the
+// route. A config already written in normalized form keeps its previous key.
 func (c *CopyTradingConfig) ExecutionKey() string {
-	v := *c
-	v.ChannelNotes = ""
+	v := c.executionKeyView()
 	b, _ := json.Marshal(v)
 	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// executionKeyView returns the normalized copy hashed by ExecutionKey.
+func (c *CopyTradingConfig) executionKeyView() CopyTradingConfig {
+	v := *c
+	// Prompt wording only; never changes execution.
+	v.ChannelNotes = ""
+	// Reserved and rejected by Validate; never wired into execution.
+	v.ReasoningEffort = ""
+	if v.EntryPolicy == "" {
+		v.EntryPolicy = EntryPolicyLegacy
+	}
+	if v.InterpretationProfile == "" {
+		v.InterpretationProfile = "default"
+	}
+	if v.MarketDualPriceMode == "" {
+		v.MarketDualPriceMode = DualPriceLegacy
+	}
+	if v.SourceMode == "" {
+		v.SourceMode = "channel"
+	}
+	ratio := c.ReduceRatio()
+	v.DefaultReduceRatio = &ratio
+	// The channels actually listened to: empty means [primary_channel_id].
+	v.SourceChannelIDs = c.ListenChannels()
+	return v
 }

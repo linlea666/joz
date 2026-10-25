@@ -18,7 +18,32 @@ import (
 // Ownership is additionally verified in durable contexts and fresh positions.
 var managedAdmission sync.Mutex
 
+// managedNotFoundGrace is how long an order row without a venue order ID may
+// stay SUBMITTING/UNKNOWN while the venue reports it as not found, before the
+// submission is treated as never having landed. Measured from the moment the
+// SUBMITTING/UNKNOWN status was recorded (the row's updated_at).
+const managedNotFoundGrace = 60 * time.Second
+
+// maxExitResubmits bounds how many times one exit intent is resubmitted with a
+// fresh client ID after a definite rejection or a confirmed residual position.
+const maxExitResubmits = 3
+
+// exitResidualConfirmAfter: a full close that FILLED while a position is still
+// visible is only resubmitted after the residual was seen on two passes at
+// least this far apart (a single read can be stale).
+var exitResidualConfirmAfter = 10 * time.Second
+
+// errEntryCancelUnconfirmed marks a closeEntryEligibility failure that happened
+// AFTER the durable entry_disabled latch was persisted: only the venue-side
+// cancellation (or its fill settlement) is unconfirmed. Exits and stop moves on
+// the known position may proceed; the latch already prevents replenishment.
+var errEntryCancelUnconfirmed = errors.New("entry cancellation unconfirmed")
+
 type managedEntryPlan struct {
+	// Frozen entry decision, used to re-validate a deferred market first leg.
+	// Absent in plans created before deferred re-validation existed.
+	Decision        *entryDecision           `json:"decision,omitempty"`
+	SplitReference  float64                  `json:"split_reference,omitempty"`
 	Version         int                      `json:"version"`
 	RiskBudget      float64                  `json:"risk_budget"`
 	StopLoss        float64                  `json:"stop_loss"`
@@ -87,31 +112,84 @@ func (x *Executor) queryManaged(row *store.CopyTradeOrder) error {
 	m := x.ex.(types.ManagedOrderTrader)
 	result, err := m.GetManagedOrder(row.Symbol, row.OrderID, row.ClientID)
 	if err != nil {
+		if errors.Is(err, types.ErrManagedOrderNotFound) {
+			abandoned, aerr := x.abandonUnlandedOrder(row, err)
+			if aerr != nil {
+				return aerr
+			}
+			if abandoned {
+				return nil
+			}
+		}
 		return err
 	}
 	return x.recordManagedResult(row, result)
 }
 
+// abandonUnlandedOrder converges an entry or exit row whose submission never
+// reached the venue. Only rows WITHOUT a venue order ID qualify (a known order
+// ID reported as not found is an inconsistency, not an unlanded submit), and
+// only after the venue kept reporting not-found for managedNotFoundGrace since
+// SUBMITTING/UNKNOWN was recorded. TP/SL rows keep their own recovery paths.
+func (x *Executor) abandonUnlandedOrder(row *store.CopyTradeOrder, cause error) (bool, error) {
+	if row.OrderID != "" || (row.Status != "SUBMITTING" && row.Status != "UNKNOWN") {
+		return false, nil
+	}
+	if !strings.HasPrefix(row.Role, "ENTRY_") && !strings.HasPrefix(row.Role, "CLOSE_") {
+		return false, nil
+	}
+	if row.UpdatedAt.IsZero() || time.Since(row.UpdatedAt) < managedNotFoundGrace {
+		return false, nil
+	}
+	reason := fmt.Sprintf("NOT_FOUND_AFTER_GRACE: venue reports client ID %s unknown %s after submission; treated as not landed (%v)", row.ClientID, time.Since(row.UpdatedAt).Truncate(time.Second), cause)
+	if err := x.st.CopyTrade().UpdateOrder(row.ID, map[string]interface{}{"status": "ABANDONED", "last_error": reason}); err != nil {
+		return false, err
+	}
+	row.Status, row.LastError = "ABANDONED", reason
+	trace := row.SignalID
+	if trace == "" {
+		trace = "reconcile-" + row.ContextID
+	}
+	x.events.Warn(trace, row.SignalID, "", EvReconcile, fmt.Sprintf("%s %s %s: %s", row.Symbol, row.Direction, row.Role, reason), map[string]interface{}{"context_id": row.ContextID, "order_leg": row})
+	return true, nil
+}
+
 // A submit is permitted exactly once after its intent was committed. Any
 // ambiguous response is recovered by client ID; never repeat a market order.
 func (x *Executor) submitManaged(row *store.CopyTradeOrder, rules *types.ManagedMarketRules, reduce bool) error {
+	return x.submitManagedChecked(row, rules, reduce, nil)
+}
+
+// submitManagedChecked runs preSubmit (entries only) after source admission
+// passed and immediately before SUBMITTING is written. An errEntryRevoked
+// result abandons the PLANNED row exactly like a revoked admission.
+func (x *Executor) submitManagedChecked(row *store.CopyTradeOrder, rules *types.ManagedMarketRules, reduce bool, preSubmit func(*store.CopyTradeOrder) error) error {
 	if row.Status != "PLANNED" {
 		return x.queryManaged(row)
 	}
-	if !reduce && x.beforeEntrySubmit != nil {
-		if err := x.beforeEntrySubmit(row); err != nil {
-			if errors.Is(err, errEntryRevoked) {
-				if cancelErr := x.cancelManaged(row); cancelErr != nil {
-					return cancelErr
+	if !reduce {
+		var checks []func(*store.CopyTradeOrder) error
+		if x.beforeEntrySubmit != nil {
+			checks = append(checks, x.beforeEntrySubmit)
+		}
+		if preSubmit != nil {
+			checks = append(checks, preSubmit)
+		}
+		for _, check := range checks {
+			if err := check(row); err != nil {
+				if errors.Is(err, errEntryRevoked) {
+					if cancelErr := x.cancelManaged(row); cancelErr != nil {
+						return cancelErr
+					}
 				}
+				return err
 			}
-			return err
 		}
 	}
 	if err := x.st.CopyTrade().UpdateOrder(row.ID, map[string]interface{}{"status": "SUBMITTING"}); err != nil {
 		return err
 	}
-	row.Status = "SUBMITTING"
+	row.Status, row.UpdatedAt = "SUBMITTING", time.Now().UTC()
 	side := openingSide(row.Direction)
 	if reduce {
 		side = closingSide(row.Direction)
@@ -128,7 +206,7 @@ func (x *Executor) submitManaged(row *store.CopyTradeOrder, rules *types.Managed
 		if persistErr := x.st.CopyTrade().UpdateOrder(row.ID, map[string]interface{}{"status": "UNKNOWN", "last_error": err.Error()}); persistErr != nil {
 			return fmt.Errorf("record uncertain submission: %w (exchange: %v)", persistErr, err)
 		}
-		row.Status = "UNKNOWN"
+		row.Status, row.UpdatedAt = "UNKNOWN", time.Now().UTC()
 		if queryErr := x.queryManaged(row); queryErr != nil {
 			return fmt.Errorf("submission uncertain; client ID %s must be reconciled: %w (query: %v)", row.ClientID, err, queryErr)
 		}
@@ -245,7 +323,13 @@ func (x *Executor) executeManagedOpen(traceID, signalID string, plan *OpenPlan) 
 	if split {
 		policy = EntryPolicySplit
 	}
-	state := managedEntryPlan{Version: 1, RiskBudget: plan.RiskBudget, StopLoss: plan.StopLoss, MaxNotional: plan.MaxNotional, MarginBudget: plan.AvailableMargin * .9, SignalExpiresAt: plan.SignalExpiresAt, Rules: *rules}
+	state := managedEntryPlan{Version: 1, RiskBudget: plan.RiskBudget, StopLoss: plan.StopLoss, MaxNotional: plan.MaxNotional, MarginBudget: plan.AvailableMargin * .9, SignalExpiresAt: plan.SignalExpiresAt, Rules: *rules, SplitReference: plan.SplitReference}
+	if len(plan.EntryDecisionJSON) > 0 {
+		var shape resolvedEntryPlan
+		if json.Unmarshal(plan.EntryDecisionJSON, &shape) == nil && shape.Decision.SourcePriceSpec.Type != "" {
+			state.Decision = &shape.Decision
+		}
+	}
 	b, _ := json.Marshal(state)
 	ctx := &store.CopyTradeContext{ID: uuid.NewString(), ExchangeID: plan.ExchangeID, RulesSnapshotJSON: plan.RulesSnapshotJSON, EntrySignalID: signalID, RequestedStopLoss: plan.RequestedStopLoss, TraderID: x.traderID, ChannelID: plan.ChannelID, RootMessageID: plan.RootMsgID, Symbol: plan.Symbol, RawSymbol: plan.RawSymbol, Direction: string(plan.Direction), State: string(StateEntryPending), ExecutionVersion: 1, EntryPolicy: policy, EntryPlanJSON: string(b), PlannedEntryPrice: plan.EntryPrice, StopLossPrice: plan.StopLoss, Leverage: plan.Leverage, TPRecipeJSON: planRecipeJSON(plan), EntryWorking: true}
 	ctx.BreakevenAfterTP, ctx.BreakevenTPLevel = plan.BreakevenTPLevel > 0, plan.BreakevenTPLevel
@@ -274,6 +358,81 @@ func (x *Executor) executeManagedOpen(traceID, signalID string, plan *OpenPlan) 
 		return ctx, err
 	}
 	return ctx, nil
+}
+
+// errEntryRevalidation: a recovered market first leg failed its fresh price
+// checks. Always wrapped together with errEntryRevoked (the row is abandoned).
+var errEntryRevalidation = errors.New("deferred market entry failed re-validation")
+
+func revokeRepriced(format string, args ...interface{}) error {
+	return fmt.Errorf("%w: %w: %s", errEntryRevoked, errEntryRevalidation, fmt.Sprintf(format, args...))
+}
+
+// revalidateDeferredMarket re-applies routeOpen's admission rules to a market
+// first leg that is submitted later than its signal (deferred admission or an
+// interrupted open): stop not already crossed, the frozen entry decision
+// still yields MARKET at the live price, and the quantity re-sized at the
+// live price stays within the original risk/notional/margin budget. A failed
+// price read keeps the leg PLANNED; any failed check abandons it.
+func (x *Executor) revalidateDeferredMarket(ctx *store.CopyTradeContext, plan *managedEntryPlan, row *store.CopyTradeOrder, split bool) error {
+	market, err := x.ex.GetMarketPrice(row.Symbol)
+	if err != nil || market <= 0 || math.IsNaN(market) || math.IsInf(market, 0) {
+		return fmt.Errorf("%w: live price unavailable for deferred market entry (%v)", errEntryDeferred, err)
+	}
+	long := ctx.Direction != string(DirectionShort)
+	stop := plan.StopLoss
+	if stop <= 0 {
+		stop = ctx.StopLossPrice
+	}
+	if stop <= 0 {
+		return revokeRepriced("stop loss unknown")
+	}
+	if (long && market <= stop) || (!long && market >= stop) {
+		return revokeRepriced("market %.8g already through stop loss %.8g", market, stop)
+	}
+	if d := plan.Decision; d != nil && (d.ThresholdApplied == nil || *d.ThresholdApplied) {
+		fresh, derr := decideEntry(Direction(ctx.Direction), d.SourcePriceSpec, market, d.ThresholdPct, d.LimitToMarketWithin)
+		if derr != nil {
+			return revokeRepriced("entry decision at %.8g failed: %v", market, derr)
+		}
+		if fresh.OrderType != EntryPlanMarket {
+			return revokeRepriced("entry decision at %.8g is now %s (%s), not market", market, fresh.OrderType, fresh.Reason)
+		}
+	}
+	if ref := plan.SplitReference; split && ref > 0 && ((long && ref >= market) || (!long && ref <= market)) {
+		return revokeRepriced("second-leg reference %.8g no longer between stop %.8g and market %.8g", ref, stop, market)
+	}
+	qty := row.Quantity
+	if plan.RiskBudget > 0 {
+		budget := plan.RiskBudget
+		if split {
+			budget /= 2 // the first leg carries half of the shared risk
+		}
+		qty = math.Min(qty, budget/math.Abs(market-stop))
+	}
+	if plan.MaxNotional > 0 {
+		qty = math.Min(qty, plan.MaxNotional/market)
+	}
+	if plan.MarginBudget > 0 && ctx.Leverage > 0 {
+		qty = math.Min(qty, plan.MarginBudget*float64(ctx.Leverage)/market)
+	}
+	qty, err = plan.Rules.FloorQuantity(types.SanitizeBaseQuantity(qty), true)
+	if err != nil || qty*market < plan.Rules.MinNotional {
+		return revokeRepriced("quantity re-sized at %.8g is below the exchange minimum (%v)", market, err)
+	}
+	updates := map[string]interface{}{"price": market}
+	if qty+1e-12 < row.Quantity {
+		updates["quantity"] = qty
+	}
+	if err = x.st.CopyTrade().UpdateOrder(row.ID, updates); err != nil {
+		return err
+	}
+	if qty+1e-12 < row.Quantity {
+		x.events.Info("reconcile-"+ctx.ID, row.SignalID, "", EvQuantityPlan, fmt.Sprintf("deferred market entry re-sized at %.8g: %.8g -> %.8g (risk budget preserved)", market, row.Quantity, qty), map[string]interface{}{"context_id": ctx.ID})
+		row.Quantity = qty
+	}
+	row.Price = market
+	return nil
 }
 
 func (x *Executor) entryOrders(ctx *store.CopyTradeContext) ([]*store.CopyTradeOrder, error) {
@@ -314,14 +473,15 @@ func (x *Executor) closeEntryEligibility(traceID string, ctx *store.CopyTradeCon
 		}
 	}
 	if err = x.settleManagedFills(ctx, orders); err != nil {
-		return errors.Join(cancelErr, err)
+		// The latch above is durable; only venue-side settlement is unknown.
+		return fmt.Errorf("%w: %w", errEntryCancelUnconfirmed, errors.Join(cancelErr, err))
 	}
 	if cancelErr != nil {
 		// A failed cancellation must not prevent protection of known fills.
 		if pos, perr := x.freshPosition(ctx.Symbol, ctx.Direction); perr == nil && pos != nil && pos.qty > 0 {
 			cancelErr = errors.Join(cancelErr, x.ensureStopProtection(traceID, "", ctx, pos.qty))
 		}
-		return cancelErr
+		return fmt.Errorf("%w: %w", errEntryCancelUnconfirmed, cancelErr)
 	}
 	return x.persistContext(ctx, map[string]interface{}{"entry_working": false})
 }
@@ -355,7 +515,13 @@ func (x *Executor) settleManagedFills(ctx *store.CopyTradeContext, orders []*sto
 		return err
 	}
 	if pos != nil {
-		updates["quantity"] = pos.qty
+		// This trade owns at most its own confirmed entry fills; a larger
+		// position on the side is not adopted (manual/foreign exposure).
+		updates["quantity"] = math.Min(pos.qty, total)
+		if pos.qty > total+1e-9 && ctx.LastAction != "POSITION_GROWTH_NOT_ADOPTED" {
+			updates["last_action"] = "POSITION_GROWTH_NOT_ADOPTED"
+			x.events.Warn("reconcile-"+ctx.ID, "", "", EvReconcile, fmt.Sprintf("%s %s exchange position %.8g exceeds this trade's confirmed entry fills %.8g; excess not adopted — manual review required", ctx.Symbol, ctx.Direction, pos.qty, total), map[string]interface{}{"context_id": ctx.ID})
+		}
 	} else if ctx.OpenedAt == nil {
 		updates["quantity"] = total
 	} else {
@@ -416,6 +582,13 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 			if err = x.queryManaged(o); err != nil {
 				queryErr = err
 			}
+		}
+	}
+	for _, o := range orders {
+		// A leg that just converged to ABANDONED (never landed) or REJECTED
+		// ends replenishment in this same pass.
+		if o.Status == "REJECTED" || o.Status == "ABANDONED" {
+			ctx.EntryDisabled = true
 		}
 	}
 	if err = x.settleManagedFills(ctx, orders); err != nil {
@@ -536,7 +709,29 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 				}
 				o.Quantity = want
 			}
-			if err = x.submitManaged(o, &plan.Rules, false); err != nil {
+			var preSubmit func(*store.CopyTradeOrder) error
+			if i == 0 && o.OrderType == "MARKET" {
+				// A first market leg submitted from recovery (deferred admission
+				// or an interrupted open) is priced NOW, not at signal time.
+				split := len(orders) > 1
+				preSubmit = func(row *store.CopyTradeOrder) error {
+					return x.revalidateDeferredMarket(ctx, &plan, row, split)
+				}
+			}
+			if err = x.submitManagedChecked(o, &plan.Rules, false, preSubmit); err != nil {
+				if i == 0 && errors.Is(err, errEntryRevalidation) {
+					x.events.Warn(traceID, o.SignalID, "", EvSignalSkipped, "deferred market entry abandoned before submission: "+err.Error(), map[string]interface{}{"context_id": ctx.ID, "order_leg": o})
+					if err = x.persistContext(ctx, map[string]interface{}{"last_action": "ENTRY_REVOKED_REPRICED", "last_error": "ENTRY_REVOKED: " + err.Error()}); err != nil {
+						return err
+					}
+					if err = x.closeEntryEligibility(traceID, ctx, "ENTRY_REVOKED_REPRICED"); err != nil {
+						return err
+					}
+					if orders, err = x.entryOrders(ctx); err != nil {
+						return err
+					}
+					break
+				}
 				x.updateContext(ctx, map[string]interface{}{"last_error": err.Error()})
 				return err
 			}
@@ -572,7 +767,7 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 			return err
 		}
 	}
-	if ctx.LastError != "" && !strings.HasPrefix(ctx.LastError, "FLAT_RECOVERY_PENDING:") {
+	if ctx.LastError != "" && !strings.HasPrefix(ctx.LastError, "FLAT_RECOVERY_PENDING:") && !strings.HasPrefix(ctx.LastError, "ENTRY_REVOKED:") {
 		hasRejected := false
 		for _, o := range orders {
 			hasRejected = hasRejected || o.Status == "REJECTED"
@@ -632,17 +827,106 @@ type managedExitIntent struct {
 	TPLevel  int    `json:"tp_level,omitempty"`
 	OrderID  string `json:"order_id"`
 	Full     bool   `json:"full"`
+	// Resubmission bookkeeping (absent in intents written before it existed).
+	Attempts       int        `json:"attempts,omitempty"`         // resubmits of this intent so far
+	PriorFilled    float64    `json:"prior_filled,omitempty"`     // fills of earlier generations
+	ResidualSeenAt *time.Time `json:"residual_seen_at,omitempty"` // first sighting of a residual after a FILLED full close
 }
 
 func (x *Executor) executeManagedClose(traceID, signalID string, ctx *store.CopyTradeContext, ratio float64) (SkipReason, error) {
 	return x.executeManagedCloseAmount(traceID, signalID, ctx, ratio, 0)
 }
 
+// exitRole is the durable role of every exit generation of one signal. The
+// first generation keeps the historical row ID; later generations add their
+// ordinal so a resubmission never collides with stableID(ctx.ID, role).
+func exitRole(signalID string) string { return "CLOSE_" + signalID }
+
+func (x *Executor) newExitOrder(ctx *store.CopyTradeContext, signalID string, generation int, price, qty float64) *store.CopyTradeOrder {
+	role := exitRole(signalID)
+	key := role
+	if generation > 0 {
+		key = fmt.Sprintf("%s#%d", role, generation)
+	}
+	id := stableID(ctx.ID, key)
+	return &store.CopyTradeOrder{ID: id, TraderID: x.traderID, ContextID: ctx.ID, SignalID: signalID, Role: role, Symbol: ctx.Symbol, Direction: ctx.Direction, ClientID: "ct-" + id[:28], OrderType: "MARKET", Price: price, Quantity: qty, Status: "PLANNED"}
+}
+
+// exitRows returns every recorded exit generation of signalID on this trade.
+func (x *Executor) exitRows(ctx *store.CopyTradeContext, signalID string) ([]*store.CopyTradeOrder, error) {
+	all, err := x.st.CopyTrade().GetOrdersForContext(x.traderID, ctx.ID)
+	if err != nil {
+		return nil, err
+	}
+	var rows []*store.CopyTradeOrder
+	for _, o := range all {
+		if o.Role == exitRole(signalID) {
+			rows = append(rows, o)
+		}
+	}
+	return rows, nil
+}
+
+// pendingExitSignal identifies the signal that owns the current exit intent.
+func (x *Executor) pendingExitSignal(ctx *store.CopyTradeContext, intent managedExitIntent) string {
+	if intent.SignalID != "" {
+		return intent.SignalID
+	}
+	if rows, err := x.st.CopyTrade().GetOrdersForContext(x.traderID, ctx.ID); err == nil {
+		for _, o := range rows {
+			if o.ID == intent.OrderID {
+				return o.SignalID
+			}
+		}
+	}
+	return ""
+}
+
 // minimumReduction is used only to remove a known risk overshoot. Round that
 // reduction UP (never an entry), so a market lot does not leave excess risk.
 func (x *Executor) executeManagedCloseAmount(traceID, signalID string, ctx *store.CopyTradeContext, ratio, minimumReduction float64) (SkipReason, error) {
 	if ctx.ClosePendingJSON != "" {
-		return SkipDuplicate, x.reconcileManagedClose(traceID, ctx)
+		var pending managedExitIntent
+		if err := json.Unmarshal([]byte(ctx.ClosePendingJSON), &pending); err != nil {
+			return SkipNone, err
+		}
+		owner := x.pendingExitSignal(ctx, pending)
+		requestFull := minimumReduction <= 0 && (ratio <= 0 || ratio >= 100)
+		// Only a full close from ANOTHER signal may go past a pending partial
+		// exit; everything else keeps the historical duplicate semantics.
+		if owner == signalID || !requestFull || pending.Full {
+			return SkipDuplicate, x.reconcileManagedClose(traceID, ctx)
+		}
+		// Settle the partial exit without resubmitting it: the full close
+		// below replaces it and is sized from the fresh position.
+		reconcileErr := x.reconcileManagedCloseStep(traceID, ctx, false)
+		if ctx.ClosePendingJSON != "" {
+			superseded, err := x.supersedePartialExit(traceID, signalID, ctx)
+			if err != nil {
+				return SkipWaitingReconciliation, err
+			}
+			if !superseded {
+				return SkipWaitingReconciliation, fmt.Errorf("partial exit still in flight; full close waits for it to settle (%v)", reconcileErr)
+			}
+		}
+		if TradeState(ctx.State).IsTerminal() {
+			return SkipAlreadyFlat, nil
+		}
+	}
+	prior, err := x.exitRows(ctx, signalID)
+	if err != nil {
+		return SkipNone, err
+	}
+	full := ratio <= 0 || ratio >= 100
+	for _, o := range prior {
+		if !orderTerminal(o.Status) {
+			return SkipWaitingReconciliation, fmt.Errorf("exit %s for this signal is unresolved (%s); no new order", o.ClientID, o.Status)
+		}
+		// A partial reduction that already executed must never be repeated.
+		// A full close always targets the fresh remaining position instead.
+		if (o.ExecutedQty > 0 || o.Status == "FILLED") && !full {
+			return SkipDuplicate, nil
+		}
 	}
 	pos, err := x.freshPosition(ctx.Symbol, ctx.Direction)
 	if err != nil {
@@ -656,7 +940,6 @@ func (x *Executor) executeManagedCloseAmount(traceID, signalID string, ctx *stor
 	if err != nil {
 		return SkipNone, err
 	}
-	full := ratio <= 0 || ratio >= 100
 	qty := pos.qty
 	if !full {
 		qty *= ratio / 100
@@ -686,8 +969,8 @@ func (x *Executor) executeManagedCloseAmount(traceID, signalID string, ctx *stor
 	if minimumReduction > 0 && qty+1e-10 < minimumReduction {
 		return SkipNone, fmt.Errorf("market lot prevents required risk reduction; manual review required")
 	}
-	row := x.newManagedOrder(ctx, signalID, "CLOSE_"+signalID, "MARKET", pos.entryPrice, qty)
-	intent, _ := json.Marshal(managedExitIntent{OrderID: row.ID, Full: full})
+	row := x.newExitOrder(ctx, signalID, len(prior), pos.entryPrice, qty)
+	intent, _ := json.Marshal(managedExitIntent{SignalID: signalID, OrderID: row.ID, Full: full})
 	if err = x.st.CopyTrade().CreateExitOrder(ctx, row, string(intent)); err != nil {
 		return SkipNone, err
 	}
@@ -701,6 +984,12 @@ func (x *Executor) executeManagedCloseAmount(traceID, signalID string, ctx *stor
 }
 
 func (x *Executor) reconcileManagedClose(traceID string, ctx *store.CopyTradeContext) error {
+	return x.reconcileManagedCloseStep(traceID, ctx, true)
+}
+
+// reconcileManagedCloseStep settles the durable exit intent. allowResubmit is
+// false right after a resubmission so one pass sends at most one new order.
+func (x *Executor) reconcileManagedCloseStep(traceID string, ctx *store.CopyTradeContext, allowResubmit bool) error {
 	var intent managedExitIntent
 	if err := json.Unmarshal([]byte(ctx.ClosePendingJSON), &intent); err != nil {
 		return err
@@ -759,17 +1048,142 @@ func (x *Executor) reconcileManagedClose(traceID string, ctx *store.CopyTradeCon
 		now := time.Now().UTC()
 		return x.finalizeManagedExit(ctx, row.SignalID, map[string]interface{}{"state": string(StateClosed), "closed_at": &now, "quantity": 0, "close_pending_json": "", "last_action": "CLOSE"})
 	}
-	if row.Status != "FILLED" {
-		return fmt.Errorf("close ended %s with remaining position %.8g; manual review required", row.Status, pos.qty)
+	if row.Status == "FILLED" && !intent.Full {
+		state := StateOpen
+		if ctx.BreakevenApplied {
+			state = StateBreakeven
+		}
+		return x.finalizeManagedExit(ctx, row.SignalID, map[string]interface{}{"state": string(state), "quantity": pos.qty, "close_pending_json": "", "last_action": "REDUCE"})
+	}
+	if row.Status == "FILLED" {
+		// A filled full close with a visible residual: one read may be stale,
+		// so require a second sighting on a later pass before acting on it.
+		if intent.ResidualSeenAt == nil {
+			now := time.Now().UTC()
+			intent.ResidualSeenAt = &now
+			b, _ := json.Marshal(intent)
+			if err = x.persistContext(ctx, map[string]interface{}{"close_pending_json": string(b)}); err != nil {
+				return err
+			}
+			return fmt.Errorf("full close filled but remaining position %.8g is still visible; awaiting fresh confirmation", pos.qty)
+		}
+		if time.Since(*intent.ResidualSeenAt) < exitResidualConfirmAfter {
+			return fmt.Errorf("full close filled but remaining position %.8g is still visible; awaiting fresh confirmation", pos.qty)
+		}
+	}
+	if !allowResubmit {
+		return fmt.Errorf("exit resubmitted (%s); awaiting next reconciliation, remaining position %.8g", row.Status, pos.qty)
+	}
+	return x.resubmitManagedExit(traceID, ctx, intent, row, pos)
+}
+
+// resubmitManagedExit replaces a definitively ended exit order (rejected,
+// cancelled, expired, abandoned, or a full close with a confirmed residual)
+// with a new generation sized from the FRESH position. It never reuses the old
+// client ID. Bounded by maxExitResubmits; a quantity the venue cannot execute
+// releases the intent for manual review instead of blocking later exits.
+func (x *Executor) resubmitManagedExit(traceID string, ctx *store.CopyTradeContext, intent managedExitIntent, prev *store.CopyTradeOrder, pos *positionInfo) error {
+	signalID := intent.SignalID
+	if signalID == "" {
+		signalID = prev.SignalID
+	}
+	if intent.Attempts >= maxExitResubmits {
+		return x.abandonManagedExit(traceID, ctx, signalID, pos, fmt.Sprintf("exit ended %s with remaining position %.8g after %d resubmissions", prev.Status, pos.qty, intent.Attempts))
+	}
+	rules, err := x.ex.(types.ManagedOrderTrader).MarketRules(ctx.Symbol)
+	if err != nil {
+		return err
+	}
+	want := pos.qty
+	if !intent.Full {
+		want = math.Min(pos.qty, math.Max(0, prev.Quantity-prev.ExecutedQty))
+	}
+	qty, ferr := rules.FloorQuantity(types.SanitizeBaseQuantity(want), true)
+	if ferr != nil || qty <= 0 {
+		return x.abandonManagedExit(traceID, ctx, signalID, pos, fmt.Sprintf("exit ended %s; remaining %.8g cannot be sent as a market reduce-only order (%v)", prev.Status, want, ferr))
+	}
+	rows, err := x.exitRows(ctx, signalID)
+	if err != nil {
+		return err
+	}
+	row := x.newExitOrder(ctx, signalID, len(rows), pos.entryPrice, qty)
+	next := intent
+	next.SignalID, next.OrderID = signalID, row.ID
+	next.Attempts++
+	next.PriorFilled += prev.ExecutedQty
+	next.ResidualSeenAt = nil
+	b, _ := json.Marshal(next)
+	if err = x.st.CopyTrade().CreateExitOrder(ctx, row, string(b)); err != nil {
+		return err
+	}
+	ctx.State = string(StateClosePending)
+	ctx.ClosePendingJSON = string(b)
+	ctx.Version++
+	x.events.Warn(traceID, signalID, "", EvCloseSubmitted, fmt.Sprintf("%s %s exit %s ended %s with position %.8g remaining; resubmitting %.8g as generation %d with a new client ID", ctx.Symbol, ctx.Direction, prev.ClientID, prev.Status, pos.qty, qty, len(rows)), map[string]interface{}{"context_id": ctx.ID, "previous": prev, "next": row})
+	if err = x.submitManaged(row, rules, true); err != nil {
+		return err
+	}
+	return x.reconcileManagedCloseStep(traceID, ctx, false)
+}
+
+// abandonManagedExit releases an exit intent that cannot converge on its own.
+// The trade returns to OPEN/BREAKEVEN with its fresh quantity so protections
+// keep running and a later author exit (a full close) can still execute.
+func (x *Executor) abandonManagedExit(traceID string, ctx *store.CopyTradeContext, signalID string, pos *positionInfo, reason string) error {
+	state := StateOpen
+	if ctx.BreakevenApplied {
+		state = StateBreakeven
+	}
+	message := "EXIT_ABANDONED: " + reason + "; manual review required"
+	if err := x.persistContext(ctx, map[string]interface{}{"state": string(state), "close_pending_json": "", "quantity": pos.qty, "last_action": "EXIT_ABANDONED", "last_error": message}); err != nil {
+		return err
+	}
+	// The abandoned author action must not be blindly retried by recovery.
+	if actions, err := x.st.CopyTrade().PendingActions(x.traderID, ctx.ID); err == nil {
+		for _, a := range actions {
+			if a.SignalID == signalID && (a.Action == string(ActionClose) || a.Action == string(ActionReduce)) {
+				_ = x.st.CopyTrade().UpdateAction(a.ID, map[string]interface{}{"status": "rejected", "phase": "exit_abandoned", "error": message})
+			}
+		}
+	}
+	x.events.Error(traceID, signalID, "", EvExecutionError, fmt.Sprintf("%s %s: %s", ctx.Symbol, ctx.Direction, message), map[string]interface{}{"context_id": ctx.ID, "position_quantity": pos.qty})
+	if err := x.restoreRemainingProtections(traceID, signalID, ctx, pos.qty); err != nil {
+		x.events.Warn(traceID, signalID, "", EvExecutionError, "protection repair after abandoned exit: "+err.Error(), nil)
+	}
+	return fmt.Errorf("%s", message)
+}
+
+// supersedePartialExit lets a full close from a new author signal replace a
+// partial exit that is no longer in flight. Returns false while the partial
+// order may still execute (it settles first; the full close is retried).
+func (x *Executor) supersedePartialExit(traceID, signalID string, ctx *store.CopyTradeContext) (bool, error) {
+	var intent managedExitIntent
+	if err := json.Unmarshal([]byte(ctx.ClosePendingJSON), &intent); err != nil {
+		return false, err
 	}
 	if intent.Full {
-		return fmt.Errorf("full close filled but remaining position %.8g is still visible; awaiting fresh confirmation", pos.qty)
+		return false, nil
+	}
+	if intent.OrderID != "" {
+		rows, err := x.st.CopyTrade().GetOrdersForContext(x.traderID, ctx.ID)
+		if err != nil {
+			return false, err
+		}
+		for _, o := range rows {
+			if o.ID == intent.OrderID && !orderTerminal(o.Status) {
+				return false, nil
+			}
+		}
 	}
 	state := StateOpen
 	if ctx.BreakevenApplied {
 		state = StateBreakeven
 	}
-	return x.finalizeManagedExit(ctx, row.SignalID, map[string]interface{}{"state": string(state), "quantity": pos.qty, "close_pending_json": "", "last_action": "REDUCE"})
+	if err := x.persistContext(ctx, map[string]interface{}{"state": string(state), "close_pending_json": "", "last_action": "EXIT_SUPERSEDED"}); err != nil {
+		return false, err
+	}
+	x.events.Warn(traceID, signalID, "", EvTradeUpdated, fmt.Sprintf("%s %s: pending partial exit of %s superseded by full close %s", ctx.Symbol, ctx.Direction, x.pendingExitSignal(ctx, intent), signalID), map[string]interface{}{"context_id": ctx.ID, "superseded_intent": intent})
+	return true, nil
 }
 
 func (x *Executor) finalizeManagedExit(ctx *store.CopyTradeContext, signalID string, updates map[string]interface{}) error {
@@ -806,7 +1220,27 @@ func (e *Engine) recoverPendingActions(ctx *store.CopyTradeContext) {
 			}
 		case ActionClose, ActionReduce:
 			if _, ok := e.exec.ex.(types.ManagedOrderTrader); !ok {
-				continue
+				// Legacy venues have no client-ID recovery: retry ONLY an exit
+				// whose durable intent proves no order was sent for it.
+				if ins.ReduceTPLevel > 0 || !e.exec.legacyExitRetryable(ctx, a.SignalID) {
+					continue
+				}
+				ratio := 100.0
+				if ins.Action == ActionReduce || ins.CloseMode == CloseModePartial {
+					rules, rerr := e.rulesForSignal(a.SignalID)
+					if rerr != nil {
+						continue
+					}
+					ratio = rules.ReduceRatio
+					if ins.CloseRatio != nil {
+						ratio = *ins.CloseRatio
+					}
+				}
+				_, err = e.exec.ExecuteClose(trace, a.SignalID, ctx, ratio)
+				if err != nil && !errors.Is(err, errExitNotSubmitted) {
+					_ = e.st.CopyTrade().UpdateAction(a.ID, map[string]interface{}{"status": "uncertain", "phase": "submission_unknown", "error": err.Error()})
+				}
+				break
 			}
 			if ctx.ClosePendingJSON != "" {
 				continue

@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum/crypto"
 	"nofx/copytrader"
@@ -192,6 +193,7 @@ type AutoTrader struct {
 	stopUntil             time.Time
 	isRunning             bool
 	isRunningMutex        sync.RWMutex       // Mutex to protect isRunning flag
+	runDone               chan struct{}      // Non-nil while a Run call is active; closed when it fully exits (guarded by isRunningMutex)
 	startTime             time.Time          // System start time
 	callCount             int                // AI call count
 	positionFirstSeenTime map[string]int64   // Position first seen time (symbol_side -> timestamp in milliseconds)
@@ -468,14 +470,87 @@ func (at *AutoTrader) reloadStrategyConfigIfChanged() error {
 	return nil
 }
 
-// Run runs the automatic trading main loop
-func (at *AutoTrader) Run() error {
-	at.isRunningMutex.Lock()
-	at.isRunning = true
-	at.isRunningMutex.Unlock()
+// ErrAlreadyRunning is returned by Run/StartAsync when this AutoTrader
+// instance already has an active run loop.
+var ErrAlreadyRunning = errors.New("trader is already running")
 
+// IsRunning reports whether the trader currently has an active run loop.
+func (at *AutoTrader) IsRunning() bool {
+	at.isRunningMutex.RLock()
+	defer at.isRunningMutex.RUnlock()
+	return at.isRunning
+}
+
+// beginRun atomically claims the run slot. It refuses while a previous run is
+// still active or still cleaning up, so two run loops (and two copy-trading
+// engines) can never operate the same account through one instance.
+func (at *AutoTrader) beginRun() (chan struct{}, chan struct{}, error) {
+	at.isRunningMutex.Lock()
+	defer at.isRunningMutex.Unlock()
+	if at.isRunning || at.runDone != nil {
+		return nil, nil, ErrAlreadyRunning
+	}
+	at.isRunning = true
 	at.stopMonitorCh = make(chan struct{})
+	at.runDone = make(chan struct{})
 	at.startTime = time.Now()
+	return at.stopMonitorCh, at.runDone, nil
+}
+
+// finishRun releases the run slot when the run body returns. If the body
+// returned on its own (startup failure, grid init failure, ...) rather than
+// via Stop(), it marks the trader stopped and closes stopCh so any monitors
+// already started for this run exit, then waits for them.
+func (at *AutoTrader) finishRun(stopCh, done chan struct{}) {
+	at.isRunningMutex.Lock()
+	selfExit := at.isRunning && at.stopMonitorCh == stopCh
+	if selfExit {
+		at.isRunning = false
+		close(stopCh)
+	}
+	at.isRunningMutex.Unlock()
+	if selfExit {
+		at.monitorWg.Wait()
+	}
+	at.isRunningMutex.Lock()
+	if at.runDone == done {
+		at.runDone = nil
+	}
+	at.isRunningMutex.Unlock()
+	close(done)
+}
+
+// StartAsync claims the run slot synchronously and then runs the trader in a
+// background goroutine. Callers learn about a duplicate start immediately
+// (ErrAlreadyRunning) instead of from a detached goroutine. onExit, when
+// non-nil, receives the run result after the run loop has fully exited.
+func (at *AutoTrader) StartAsync(onExit func(error)) error {
+	stopCh, done, err := at.beginRun()
+	if err != nil {
+		return err
+	}
+	go func() {
+		runErr := at.runClaimed(stopCh, done)
+		if onExit != nil {
+			onExit(runErr)
+		}
+	}()
+	return nil
+}
+
+// Run runs the automatic trading main loop. It returns ErrAlreadyRunning if
+// this instance is already running; when it returns for any other reason the
+// trader is reported as stopped.
+func (at *AutoTrader) Run() error {
+	stopCh, done, err := at.beginRun()
+	if err != nil {
+		return err
+	}
+	return at.runClaimed(stopCh, done)
+}
+
+func (at *AutoTrader) runClaimed(stopCh, done chan struct{}) error {
+	defer at.finishRun(stopCh, done)
 
 	// Copy-trading traders follow Discord signals; they never run scan cycles.
 	if at.IsCopyTrading() {
@@ -624,10 +699,15 @@ func (at *AutoTrader) Stop() {
 		return
 	}
 	at.isRunning = false
+	stopCh := at.stopMonitorCh
+	done := at.runDone
 	at.isRunningMutex.Unlock()
 
-	close(at.stopMonitorCh) // Notify monitoring goroutine to stop
-	at.monitorWg.Wait()     // Wait for monitoring goroutine to finish
+	close(stopCh)       // Notify monitoring goroutine to stop
+	at.monitorWg.Wait() // Wait for monitoring goroutine to finish
+	if done != nil {
+		<-done // Wait until Run has fully released its slot, so Run can be called again
+	}
 	logger.Info("⏹ Automatic trading system stopped")
 }
 

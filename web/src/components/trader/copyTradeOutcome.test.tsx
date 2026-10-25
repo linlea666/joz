@@ -106,6 +106,60 @@ describe('exchange outcomes', () => {
       )
     ).toBe('failed')
   })
+  it('explains source execution-gate skips, including the legacy boundary code', () => {
+    const skipped = { ...signal, status: 'skipped' } as CopyTradeSignal
+    expect(
+      copyTradeOutcome(
+        { ...skipped, skip_reason: 'BEFORE_TRADER_ACTIVATION' },
+        'zh'
+      )
+    ).toContain('卡片发布早于交易员本次启用时间')
+    expect(
+      copyTradeOutcome(
+        { ...skipped, skip_reason: 'BEFORE_TRADER_ACTIVATION' },
+        'en'
+      )
+    ).toContain("before this trader's current activation")
+    expect(
+      copyTradeOutcome(
+        { ...skipped, skip_reason: 'BEFORE_LIVE_BOUNDARY' },
+        'zh'
+      )
+    ).toContain('实盘生效时间')
+    expect(
+      copyTradeOutcome(
+        { ...skipped, skip_reason: 'BEFORE_EXECUTION_BOUNDARY' },
+        'zh'
+      )
+    ).toContain('旧版记录')
+    expect(
+      copyTradeOutcome({ ...skipped, skip_reason: 'CONFIG_REVOKED' }, 'en')
+    ).toContain('configuration changed')
+    // Admission revocation carries the gate code in its detail.
+    expect(
+      copyTradeOutcome(
+        {
+          ...skipped,
+          skip_reason: 'ENTRY_ADMISSION_REVOKED',
+          instruction_results: [
+            {
+              index: 0,
+              action: 'OPEN',
+              symbol: 'BTC',
+              status: 'skipped',
+              detail: 'unsubmitted entry no longer authorized: CONFIG_REVOKED',
+            },
+          ],
+        },
+        'zh'
+      )
+    ).toContain('跟单配置已变更')
+    // Unrelated skips and executed signals are unchanged.
+    expect(copyTradeOutcome({ ...skipped, skip_reason: 'EXPIRED' }, 'zh')).toBe(
+      'skipped'
+    )
+    expect(copyTradeOutcome(signal, 'zh')).toBe('已处理')
+  })
   it('shows configured offsets, risk meaning, zero and unknown without inventing defaults', () => {
     const { rerender } = render(
       <EntryPolicyThresholds

@@ -156,17 +156,53 @@ func (e *Engine) deferInterpretationRetry(sig *store.CopyTradeSignal, msg *store
 	}
 	delays := []time.Duration{30 * time.Second, 120 * time.Second}
 	next := time.Now().UTC().Add(delays[sig.RetryCount])
-	ref := msg.MessageTimestamp
-	if msg.EditedAt != nil && msg.EditedAt.After(ref) {
-		ref = *msg.EditedAt
-	}
-	ttl := e.interpretationRetryTTL(msg, sig.ID)
+	ref, ttl := e.interpretationRetryWindow(msg, sig.ID)
 	if ttl <= 0 || IsExpired(ref, next, ttl) {
 		return false
 	}
 	e.updateSignal(sig.ID, map[string]interface{}{"status": "retry_wait", "retry_count": sig.RetryCount + 1, "next_retry_at": next, "retry_wait_started_at": time.Now().UTC(), "error_message": err.Error()})
 	e.events.Warn(sig.ID, sig.ID, msg.MessageID, EvAIError, fmt.Sprintf("temporary model failure; deferred attempt %d/2 at %s (no execution actions)", sig.RetryCount+1, next.Format(time.RFC3339)), nil)
 	return true
+}
+
+// interpretationRetryWindow returns the freshness reference and TTL for a task
+// whose interpretation is being deferred. The action is not known yet, so the
+// class is inferred from the current text. Only text that unambiguously reads
+// as a new entry (OPEN/ADD wording, no management/cancel wording) is anchored
+// to the original post, matching processInstruction's OPEN/ADD gate; every
+// other task (management, unknown, image-only) keeps the revision time so a
+// management edit of an old card is never dropped before interpretation.
+// processInstruction still enforces the per-action rule after interpretation.
+func (e *Engine) interpretationRetryWindow(msg *store.DiscordMessage, signalIDs ...string) (time.Time, time.Duration) {
+	ref := msg.MessageTimestamp
+	if !e.interpretationRetryLooksLikeEntry(msg, signalIDs...) && msg.EditedAt != nil && msg.EditedAt.After(ref) {
+		ref = *msg.EditedAt
+	}
+	return ref, e.interpretationRetryTTL(msg, signalIDs...)
+}
+
+func (e *Engine) interpretationRetryLooksLikeEntry(msg *store.DiscordMessage, signalIDs ...string) bool {
+	profile := e.cfg.InterpretationProfile
+	if len(signalIDs) > 0 {
+		rules, err := e.rulesForSignal(signalIDs[0])
+		if err != nil {
+			return false
+		}
+		profile = rules.Profile
+	}
+	current := e.retryCurrentText(msg, profile)
+	return (sourceOpen.MatchString(current) || sourceAdd.MatchString(current)) &&
+		!sourceManagement.MatchString(current) && !sourceCancel.MatchString(current)
+}
+
+func (e *Engine) retryCurrentText(msg *store.DiscordMessage, profile string) string {
+	current := ""
+	for _, s := range e.messageSources(msg, profile) {
+		if s.Role == "current" && !s.Image {
+			current += "\n" + s.Text
+		}
+	}
+	return current
 }
 
 func (e *Engine) interpretationRetryTTL(msg *store.DiscordMessage, signalIDs ...string) time.Duration {
@@ -180,12 +216,7 @@ func (e *Engine) interpretationRetryTTL(msg *store.DiscordMessage, signalIDs ...
 	}
 	openTTL := time.Duration(e.cfg.OpenSignalTTLSeconds) * time.Second
 	mgmtTTL := time.Duration(e.cfg.MgmtSignalTTLSeconds) * time.Second
-	current := ""
-	for _, s := range e.messageSources(msg, profile) {
-		if s.Role == "current" && !s.Image {
-			current += "\n" + s.Text
-		}
-	}
+	current := e.retryCurrentText(msg, profile)
 	if (sourceManagement.MatchString(current) || sourceCancel.MatchString(current)) && !sourceOpen.MatchString(current) && !sourceAdd.MatchString(current) {
 		return mgmtTTL
 	}

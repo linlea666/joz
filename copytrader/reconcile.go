@@ -2,6 +2,7 @@ package copytrader
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"nofx/store"
@@ -167,8 +168,15 @@ func (e *Engine) recheckClosedTrades() {
 			continue
 		}
 
-		// Position is back: spurious close. Resurrect and re-protect.
 		delete(e.closedRecheck, id)
+		if refuse := e.resurrectionRefusal(ctx, pos); refuse != "" {
+			// Never claim a position this trade cannot prove is its own.
+			e.events.Error("reconcile-"+ctx.ID, "", "", EvExecutionError,
+				fmt.Sprintf("%s %s position (qty %.8g @ %.8g) visible after RECONCILE_CLOSED is NOT adopted: %s — manual review required",
+					ctx.Symbol, ctx.Direction, pos.qty, pos.entryPrice, refuse), map[string]interface{}{"context_id": ctx.ID})
+			continue
+		}
+		// Position is back: spurious close. Resurrect and re-protect.
 		e.events.Error("reconcile-"+ctx.ID, "", "", EvExecutionError,
 			fmt.Sprintf("%s %s position reappeared after RECONCILE_CLOSED (qty %.8g) — close was spurious, resurrecting trade and restoring protections",
 				ctx.Symbol, ctx.Direction, pos.qty), nil)
@@ -184,6 +192,53 @@ func (e *Engine) recheckClosedTrades() {
 		// stop loss now instead of one cycle later.
 		e.reconcileOpenTrade(ctx)
 	}
+}
+
+// resurrectEntryTolerancePct bounds how far a reappearing position's average
+// entry may differ from the closed trade's before it is treated as foreign.
+const resurrectEntryTolerancePct = 0.5
+
+// resurrectionRefusal returns why a position seen after RECONCILE_CLOSED must
+// not be re-attached to ctx ("" = it may be). Venues with fresh position reads
+// (Binance managed orders) confirmed the close with fresh data twice, so a
+// position appearing later is a new (manual or foreign) position. Elsewhere it
+// must match the old trade exactly and be owned by nobody else.
+func (e *Engine) resurrectionRefusal(ctx *store.CopyTradeContext, pos *positionInfo) string {
+	if _, ok := e.exec.ex.(types.ManagedOrderTrader); ok {
+		return "close was confirmed by fresh position reads on a managed venue"
+	}
+	if _, ok := e.exec.ex.(types.FreshPositionReader); ok {
+		return "close was confirmed by fresh position reads"
+	}
+	owners, err := e.st.CopyTrade().AccountContexts(e.traderID, ctx.Symbol, ctx.Direction)
+	if err != nil {
+		return "ownership lookup failed: " + err.Error()
+	}
+	for _, o := range owners {
+		if o.ID != ctx.ID {
+			return fmt.Sprintf("another active trade %s owns this account/symbol/direction", o.ID)
+		}
+	}
+	if ctx.Quantity <= 0 {
+		return "closed trade has no recorded quantity to match"
+	}
+	if !e.exec.sameVenueQuantity(ctx.Symbol, pos.qty, ctx.Quantity) {
+		return fmt.Sprintf("quantity %.8g differs from the closed trade's %.8g", pos.qty, ctx.Quantity)
+	}
+	ref := ctx.AvgFillPrice
+	if ref <= 0 {
+		ref = ctx.PlannedEntryPrice
+	}
+	// Without any recorded entry reference only the exact-size match applies.
+	if ref > 0 {
+		if pos.entryPrice <= 0 {
+			return "position entry price unavailable"
+		}
+		if math.Abs(pos.entryPrice-ref)/ref*100 > resurrectEntryTolerancePct {
+			return fmt.Sprintf("entry %.8g differs from the closed trade's %.8g", pos.entryPrice, ref)
+		}
+	}
+	return ""
 }
 
 // reconcileEntryPending handles limit entries: fill detection and timeout.
@@ -275,7 +330,20 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 			return
 		}
 	}
-	if ctx.Quantity != pos.qty {
+	// Growth beyond the tracked size has no fill evidence from this trade (its
+	// own entry fills are settled by the entry paths): it may be a manual or
+	// foreign position on the same side. Warn only; never adopt it or enlarge
+	// this trade's SL/TP to cover it.
+	protectQty := pos.qty
+	if e.grownBeyondTracked(ctx, pos.qty) {
+		protectQty = ctx.Quantity
+		if ctx.LastAction != "POSITION_GROWTH_NOT_ADOPTED" {
+			e.events.Warn(traceID, "", "", EvReconcile,
+				fmt.Sprintf("%s %s exchange position %.8g exceeds tracked %.8g without fill evidence; not adopted, protections stay sized to %.8g — manual review required",
+					ctx.Symbol, ctx.Direction, pos.qty, ctx.Quantity, ctx.Quantity), map[string]interface{}{"context_id": ctx.ID, "position_quantity": pos.qty})
+			e.exec.updateContext(ctx, map[string]interface{}{"last_action": "POSITION_GROWTH_NOT_ADOPTED"})
+		}
+	} else if ctx.Quantity != pos.qty {
 		e.exec.updateContext(ctx, map[string]interface{}{"quantity": pos.qty})
 	}
 	if ctx.ExecutionVersion == 0 && pos.entryPrice > 0 && ctx.AvgFillPrice != pos.entryPrice {
@@ -286,10 +354,32 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 		level = ctx.BreakevenTPLevel
 	}
 	if !ctx.BreakevenApplied && confirmedTPLevel(ctx, level) && e.breakevenWanted(ctx) {
-		e.applyBreakeven(traceID, ctx, pos.qty)
+		e.applyBreakeven(traceID, ctx, protectQty)
 	}
-	e.recordRecovery(ctx, "protection", e.exec.restoreRemainingProtections(traceID, "", ctx, pos.qty), false)
+	e.recordRecovery(ctx, "protection", e.exec.restoreRemainingProtections(traceID, "", ctx, protectQty), false)
 
+}
+
+// sameVenueQuantity reports whether two base quantities are the same size at
+// the venue's quantity precision (within half a lot step).
+func (x *Executor) sameVenueQuantity(symbol string, a, b float64) bool {
+	if math.Abs(a-b) <= 1e-9*math.Max(1, math.Max(a, b)) {
+		return true
+	}
+	if m, ok := x.ex.(types.ManagedOrderTrader); ok {
+		if rules, err := m.MarketRules(symbol); err == nil && rules.QuantityStep > 0 {
+			return math.Abs(a-b) < rules.QuantityStep/2
+		}
+		return false
+	}
+	fa, errA := x.ex.FormatQuantity(symbol, a)
+	fb, errB := x.ex.FormatQuantity(symbol, b)
+	return errA == nil && errB == nil && fa == fb
+}
+
+// grownBeyondTracked: the exchange shows more than this trade has adopted.
+func (e *Engine) grownBeyondTracked(ctx *store.CopyTradeContext, qty float64) bool {
+	return ctx.Quantity > 0 && qty > ctx.Quantity && !e.exec.sameVenueQuantity(ctx.Symbol, qty, ctx.Quantity)
 }
 
 // breakevenWanted reports whether this trade should move its SL to entry
@@ -317,6 +407,9 @@ func (e *Engine) applyBreakeven(traceID string, ctx *store.CopyTradeContext, qty
 		return
 	}
 	qty = pos.qty
+	if e.grownBeyondTracked(ctx, qty) {
+		qty = ctx.Quantity // never size protection to un-adopted growth
+	}
 	if ctx.ExecutionVersion == 0 && pos.entryPrice > 0 {
 		entry = pos.entryPrice
 	}

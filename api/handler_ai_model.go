@@ -196,7 +196,7 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 		return candidates
 	}
 
-	tradersToReload := make(map[string]bool)
+	tradersToReload := make(map[string]*store.Trader)
 	for modelID, modelData := range req.Models {
 		// SSRF protection: validate custom_api_url before storing
 		if modelData.CustomAPIURL != "" {
@@ -212,7 +212,7 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 		for candidateID := range modelIDCandidates(modelID) {
 			traders, _ := s.store.Trader().ListByAIModelID(userID, candidateID)
 			for _, t := range traders {
-				tradersToReload[t.ID] = true
+				tradersToReload[t.ID] = t
 			}
 		}
 
@@ -224,7 +224,8 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 	}
 
 	// Remove affected traders from memory BEFORE reloading to pick up new config
-	for traderID := range tradersToReload {
+	for traderID, t := range tradersToReload {
+		prepareCopyTradeReload(t)
 		logger.Infof("🔄 Removing trader %s from memory to reload with new AI model config", traderID)
 		s.traderManager.RemoveTrader(traderID)
 	}

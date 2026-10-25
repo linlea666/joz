@@ -11,16 +11,51 @@ import (
 var ErrManagedOrderNotFound = errors.New("managed order not found")
 var ErrManagedOrderRejected = errors.New("managed order definitely rejected")
 
+// ErrManagedOrderNotSent marks a failure that happened before the order
+// request reached the venue (market-rule lookup, local normalization). No
+// order can exist for its client ID. It also satisfies ErrManagedOrderRejected
+// so ledger callers record a terminal, never-created order instead of UNKNOWN.
+var ErrManagedOrderNotSent = errors.New("managed order not sent")
+
+// ErrManagedOrderRetryable marks an outcome that proves no order was created
+// AND is expected to be transient (not sent, rate limit, clock skew, auth).
+// Retrying with the same intent is safe; it never applies to UNKNOWN results.
+var ErrManagedOrderRetryable = errors.New("managed order not executed; retry is safe")
+
 // ManagedRejection preserves the venue error while retaining sentinel compatibility.
 type ManagedRejection struct {
-	Code  int64
-	Cause error
+	Code      int64
+	Cause     error
+	Retryable bool
 }
 
 func (e *ManagedRejection) Error() string {
 	return fmt.Sprintf("%v: %v", ErrManagedOrderRejected, e.Cause)
 }
-func (e *ManagedRejection) Unwrap() []error { return []error{ErrManagedOrderRejected, e.Cause} }
+func (e *ManagedRejection) Unwrap() []error {
+	if e.Retryable {
+		return []error{ErrManagedOrderRejected, ErrManagedOrderRetryable, e.Cause}
+	}
+	return []error{ErrManagedOrderRejected, e.Cause}
+}
+
+// ManagedNotSent wraps a pre-send failure; see ErrManagedOrderNotSent.
+type ManagedNotSent struct{ Cause error }
+
+func (e *ManagedNotSent) Error() string {
+	return fmt.Sprintf("%v: %v", ErrManagedOrderNotSent, e.Cause)
+}
+func (e *ManagedNotSent) Unwrap() []error {
+	return []error{ErrManagedOrderNotSent, ErrManagedOrderRejected, ErrManagedOrderRetryable, e.Cause}
+}
+
+// NotSent wraps err as a pre-send failure (nil stays nil).
+func NotSent(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ManagedNotSent{Cause: err}
+}
 
 // StopOrderReader is optional. A missing history row is NOT evidence of rejection.
 // Implementations query using the executor's authenticated account credentials.
@@ -83,6 +118,31 @@ type ManagedMarketRules struct {
 	QuantityStep, MinQuantity, MaxQuantity                   float64
 	MarketQuantityStep, MarketMinQuantity, MarketMaxQuantity float64
 	PriceTick, MinPrice, MaxPrice, MinNotional               float64
+	// PERCENT_PRICE multipliers relative to the mark price (0 = unknown).
+	PercentPriceUp, PercentPriceDown float64
+}
+
+// LimitPriceAllowed reports whether a LIMIT price passes the static
+// PRICE_FILTER bounds and the documented PERCENT_PRICE rule (BUY: price <=
+// mark*multiplierUp; SELL: price >= mark*multiplierDown). Unknown rules or a
+// non-positive reference price never block submission.
+func (r *ManagedMarketRules) LimitPriceAllowed(side string, price, reference float64) bool {
+	if r == nil || price <= 0 {
+		return true
+	}
+	if (r.MinPrice > 0 && price < r.MinPrice) || (r.MaxPrice > 0 && price > r.MaxPrice) {
+		return false
+	}
+	if reference <= 0 || math.IsNaN(reference) || math.IsInf(reference, 0) {
+		return true
+	}
+	switch side {
+	case "BUY":
+		return r.PercentPriceUp <= 0 || price <= reference*r.PercentPriceUp
+	case "SELL":
+		return r.PercentPriceDown <= 0 || price >= reference*r.PercentPriceDown
+	}
+	return true
 }
 
 type ManagedOrderRequest struct {

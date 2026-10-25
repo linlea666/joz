@@ -38,6 +38,11 @@ const (
 	EvReconcile        = "copytrade.reconcile.update"
 )
 
+// EvSourceAuthorFiltered: the message author is not in the configured author
+// filter. The message is consumed without creating a signal; the event makes a
+// misconfigured filter visible.
+const EvSourceAuthorFiltered = "copytrade.source.author_filtered"
+
 // EventLogger writes trace events to the store and mirrors them to the
 // application log. Persistence failures never break the pipeline.
 type EventLogger struct {
