@@ -119,9 +119,9 @@ export function BeginnerGuideCards({
           ? isZh
             ? 'Ready to create'
             : 'Ready to create'
-        : isZh
-          ? 'Finish the first three steps first'
-          : 'Finish the first three steps first',
+          : isZh
+            ? 'Finish the first three steps first'
+            : 'Finish the first three steps first',
       ready: traderReady,
       actionLabel: traderReady
         ? isZh
@@ -188,7 +188,9 @@ export function BeginnerGuideCards({
               <p className="mt-2 min-h-[72px] text-sm leading-6 text-nofx-text-muted">
                 {card.desc}
               </p>
-              <div className="mt-3 text-xs text-nofx-text-muted">{card.meta}</div>
+              <div className="mt-3 text-xs text-nofx-text-muted">
+                {card.meta}
+              </div>
 
               <button
                 type="button"

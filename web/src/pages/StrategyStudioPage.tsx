@@ -41,7 +41,13 @@ import { buildDashboardPath, ROUTES } from '../router/paths'
 const API_BASE = import.meta.env.VITE_API_BASE || ''
 
 type Scope =
-  'all' | 'crypto' | 'stock' | 'commodity' | 'index' | 'forex' | 'pre_ipo'
+  | 'all'
+  | 'crypto'
+  | 'stock'
+  | 'commodity'
+  | 'index'
+  | 'forex'
+  | 'pre_ipo'
 type ListMode = 'claw402' | 'pool'
 
 const scopeOptions: Array<{ value: Scope; zh: string; en: string }> = [

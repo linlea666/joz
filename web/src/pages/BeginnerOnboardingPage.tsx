@@ -155,7 +155,8 @@ export function BeginnerOnboardingPage() {
                   : 'text-[13px] tracking-[0.12em] lg:whitespace-nowrap'
               }`}
             >
-              Claw402 + DeepSeek <span className="mx-2 text-nofx-text-muted">·</span>
+              Claw402 + DeepSeek{' '}
+              <span className="mx-2 text-nofx-text-muted">·</span>
               {isZh ? 'Pay per call' : 'Pay per call'}
             </div>
           </div>
@@ -195,7 +196,9 @@ export function BeginnerOnboardingPage() {
                         onClick={() => void loadOnboarding(false)}
                         disabled={refreshingBalance}
                         className="inline-flex h-12 w-12 items-center justify-center rounded-2xl border border-nofx-success/20 bg-nofx-bg-deeper text-nofx-success transition hover:bg-nofx-success/10 disabled:cursor-not-allowed disabled:opacity-60"
-                        aria-label={isZh ? 'Refresh balance' : 'Refresh balance'}
+                        aria-label={
+                          isZh ? 'Refresh balance' : 'Refresh balance'
+                        }
                       >
                         <RefreshCw
                           className={`h-4 w-4 ${refreshingBalance ? 'animate-spin' : ''}`}
@@ -214,9 +217,9 @@ export function BeginnerOnboardingPage() {
                         Don&apos;t have USDC yet?
                       </div>
                       Buy USDC on Binance, OKX or Coinbase, then withdraw it to
-                      the address above — and pick the{' '}
-                      <b>Base network</b> when the exchange asks. It usually
-                      arrives in about a minute. Only send USDC on Base.
+                      the address above — and pick the <b>Base network</b> when
+                      the exchange asks. It usually arrives in about a minute.
+                      Only send USDC on Base.
                     </div>
                   </div>
                 </section>
@@ -226,7 +229,9 @@ export function BeginnerOnboardingPage() {
                     <div>
                       <div className="mb-3 flex items-center gap-2 text-sm font-medium text-nofx-gold">
                         <Wallet className="h-4 w-4" />
-                        <span>{isZh ? 'Wallet address' : 'Wallet address'}</span>
+                        <span>
+                          {isZh ? 'Wallet address' : 'Wallet address'}
+                        </span>
                       </div>
                       <div className="flex items-stretch gap-3">
                         <div className="min-w-0 flex-1 rounded-2xl border border-[rgba(26,24,19,0.14)] bg-nofx-bg-deeper px-5 py-3 font-mono text-[14px] text-nofx-text">
@@ -270,7 +275,9 @@ export function BeginnerOnboardingPage() {
                               )
                             }
                             className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-nofx-gold/20 bg-nofx-gold/10 text-nofx-gold transition hover:bg-nofx-gold/15"
-                            aria-label={isZh ? 'Copy private key' : 'Copy private key'}
+                            aria-label={
+                              isZh ? 'Copy private key' : 'Copy private key'
+                            }
                           >
                             <Copy className="h-5 w-5" />
                           </button>
