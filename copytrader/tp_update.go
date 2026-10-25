@@ -176,6 +176,7 @@ func (x *Executor) updateTakeProfits(traceID, signalID string, ctx *store.CopyTr
 			plan = append(plan, prior)
 		}
 		intent.Stage = "INSTALL"
+		stampTPSync(plan)
 		b, _ := json.Marshal(intent)
 		p, _ := json.Marshal(plan)
 		if err = x.persistContext(ctx, map[string]interface{}{"tp_update_intent_json": string(b), "tp_plan_json": string(p), "tp_position_quantity": pos.qty, "last_action": "UPDATE_TP"}); err != nil {

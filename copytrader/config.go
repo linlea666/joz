@@ -73,7 +73,7 @@ type CopyTradingConfig struct {
 	// Risk
 	RiskMode               RiskMode `json:"risk_mode"`
 	RiskAmountUSD          float64  `json:"risk_amount_usd"`           // by_loss: USD risk; percent: % of equity; fixed: margin USD
-	MaxPositionNotionalUSD float64  `json:"max_position_notional_usd"` // hard cap on single-position notional (0 = default)
+	MaxPositionNotionalUSD float64  `json:"max_position_notional_usd"` // hard cap on single-position notional; must be > 0 (stored 0 is read as DefaultMaxPositionNotionalUSD)
 	MaxOpenPositions       int      `json:"max_open_positions"`
 	MajorLeverage          int      `json:"major_leverage"`
 	AltcoinLeverage        int      `json:"altcoin_leverage"`
@@ -105,7 +105,7 @@ func DefaultCopyTradingConfig() CopyTradingConfig {
 		ContextLookbackDays:     5,
 		RiskMode:                RiskModeByLoss,
 		RiskAmountUSD:           50,
-		MaxPositionNotionalUSD:  30000,
+		MaxPositionNotionalUSD:  DefaultMaxPositionNotionalUSD,
 		MaxOpenPositions:        5,
 		MajorLeverage:           20,
 		AltcoinLeverage:         10,
@@ -131,7 +131,31 @@ func ParseCopyTradingConfig(raw string) (*CopyTradingConfig, error) {
 	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
 		return nil, fmt.Errorf("invalid copy trading config JSON: %w", err)
 	}
+	// Older configurations stored 0 meaning "default". Normalize it here so
+	// they keep starting; Validate rejects 0 for anything constructed anew.
+	if cfg.MaxPositionNotionalUSD == 0 {
+		cfg.MaxPositionNotionalUSD = DefaultMaxPositionNotionalUSD
+	}
 	return &cfg, nil
+}
+
+// DefaultMaxPositionNotionalUSD is the single-position notional cap applied
+// when a stored configuration (or an in-flight entry plan) carries no cap.
+const DefaultMaxPositionNotionalUSD = 30000.0
+
+// EffectiveNotionalCap is the ONE interpretation of a notional cap value used
+// by every sizing path: a positive finite value is the cap, anything else
+// (legacy 0 / missing) is the default cap. There is no "unlimited".
+func EffectiveNotionalCap(v float64) float64 {
+	if finite(v) && v > 0 {
+		return v
+	}
+	return DefaultMaxPositionNotionalUSD
+}
+
+// NotionalCap returns the effective single-position notional cap.
+func (c *CopyTradingConfig) NotionalCap() float64 {
+	return EffectiveNotionalCap(c.MaxPositionNotionalUSD)
 }
 
 // Encode serializes the config for storage.
@@ -210,6 +234,9 @@ func (c *CopyTradingConfig) Validate() error {
 	}
 	if c.RiskAmountUSD <= 0 {
 		return fmt.Errorf("risk_amount_usd must be > 0")
+	}
+	if c.MaxPositionNotionalUSD <= 0 {
+		return fmt.Errorf("单仓名义价值上限 max_position_notional_usd 必须大于 0，请填写一个上限（默认 %.0f）(max_position_notional_usd must be > 0; set a notional cap, default %.0f)", DefaultMaxPositionNotionalUSD, DefaultMaxPositionNotionalUSD)
 	}
 	if c.RiskMode == RiskModePercent && c.RiskAmountUSD > 100 {
 		return fmt.Errorf("percent risk mode requires risk_amount_usd <= 100 (it is a percentage)")

@@ -3,6 +3,8 @@ package copytrader
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strings"
 )
 
 type resolvedEntryPlan struct {
@@ -72,12 +74,51 @@ func resolveEntryPlan(direction Direction, orders []EntryOrder, market, threshol
 	return p, SkipNone, nil
 }
 
+// logEntryPlan records the final plan as it will be submitted. risk_budget is
+// the budget this plan is sized against: the by-loss budget, or (percent /
+// fixed modes, which carry none) the risk the legs actually take.
+// planned_risk_usd is always what the floored legs carry (qty x stop distance).
 func (x *Executor) logEntryPlan(traceID, signalID string, p *OpenPlan, legs []map[string]interface{}) {
 	var shape resolvedEntryPlan
 	_ = json.Unmarshal(p.EntryDecisionJSON, &shape)
-	x.events.Info(traceID, signalID, p.RootMsgID, EvEntryDecision, "final entry plan; shared risk budget", map[string]interface{}{
+	used := 0.0
+	kinds := make([]string, 0, len(legs))
+	for _, leg := range legs {
+		price, _ := leg["price"].(float64)
+		qty, _ := leg["quantity"].(float64)
+		used += qty * math.Abs(price-p.StopLoss)
+		kinds = append(kinds, fmt.Sprintf("%v %.8g@%.8g", leg["type"], qty, price))
+	}
+	budget := p.RiskBudget
+	if budget <= 0 {
+		budget = used
+	}
+	origin, policy := shape.Origin, shape.EntryPolicy
+	if origin == "" {
+		origin = "single"
+	}
+	if policy == "" {
+		policy = EntryPolicyLegacy
+	}
+	shapeText := "single leg"
+	if len(legs) > 1 {
+		shapeText = fmt.Sprintf("%d legs sharing one risk budget", len(legs))
+	}
+	msg := fmt.Sprintf("final entry plan: %s %s %s [%s], SL %.8g, risk $%.2f (origin %s, policy %s)",
+		p.Symbol, p.Direction, shapeText, strings.Join(kinds, " + "), p.StopLoss, used, origin, policy)
+	data := map[string]interface{}{
 		"plan": p.EntryDecisionJSON, "decision": shape.Decision,
 		"source_order_type": shape.SourceOrderType, "symbol": p.Symbol,
-		"legs": legs, "risk_budget": p.RiskBudget, "rules_snapshot": p.RulesSnapshotJSON,
-	})
+		"legs": legs, "risk_budget": budget, "planned_risk_usd": used,
+		"origin": origin, "entry_policy": policy, "rules_snapshot": p.RulesSnapshotJSON,
+	}
+	x.events.Info(traceID, signalID, p.RootMsgID, EvEntryDecision, msg, data)
+	// A shared-risk combination compressed by the notional / margin caps (or
+	// by lot flooring beyond 1%) carries less risk than configured.
+	if len(legs) > 1 && p.RiskBudget > 0 && used < p.RiskBudget*0.99 {
+		x.events.Warn(traceID, signalID, p.RootMsgID, EvQuantityPlan,
+			fmt.Sprintf("shared-risk legs compressed: configured risk $%.2f, actual risk $%.2f (notional cap $%.2f, margin budget $%.2f, lot flooring)",
+				p.RiskBudget, used, EffectiveNotionalCap(p.MaxNotional), p.AvailableMargin*.9*float64(p.Leverage)),
+			map[string]interface{}{"configured_risk_usd": p.RiskBudget, "actual_risk_usd": used, "notional_cap_usd": EffectiveNotionalCap(p.MaxNotional), "available_margin_usd": p.AvailableMargin})
+	}
 }

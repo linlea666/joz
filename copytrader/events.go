@@ -36,6 +36,12 @@ const (
 	EvEmergencyClose   = "copytrade.execution.emergency_close"
 	EvExecutionError   = "copytrade.execution.error"
 	EvReconcile        = "copytrade.reconcile.update"
+
+	// Managed order-leg progress, named by the leg's role (ENTRY_* legs keep
+	// EvEntrySubmitted). See managedLegEvent.
+	EvTPUpdated   = "copytrade.order.tp_updated"
+	EvExitUpdated = "copytrade.order.exit_updated"
+	EvRiskUpdated = "copytrade.order.risk_updated"
 )
 
 // EvSourceAuthorFiltered: the message author is not in the configured author

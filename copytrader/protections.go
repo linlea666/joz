@@ -223,10 +223,7 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 		return nil
 	}
 	if ctx.TPPositionQuantity != qty {
-		scale := math.Min(1, qty/total)
-		if ctx.TPPositionQuantity > 0 && qty > ctx.TPPositionQuantity+1e-10 {
-			scale = qty / ctx.TPPositionQuantity
-		}
+		scale := tpRescale(ctx.TPPositionQuantity, qty, total, plan)
 		for i := range plan {
 			if !plan[i].Filled && plan[i].ReplacedBy == "" {
 				want := math.Max(0, plan[i].Quantity-plan[i].FilledQuantity) * scale
@@ -236,6 +233,7 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 				plan[i].DesiredQuantity = &want
 			}
 		}
+		stampTPSync(plan)
 		b, _ := json.Marshal(plan)
 		if err := x.persistContext(ctx, map[string]interface{}{"tp_plan_json": string(b), "tp_position_quantity": qty}); err != nil {
 			return err
@@ -424,7 +422,58 @@ func (x *Executor) restoreRemainingProtections(traceID, signalID string, ctx *st
 			return err
 		}
 	}
-	return x.persistContext(ctx, map[string]interface{}{"tp_position_quantity": qty})
+	// Record the TP fills this position size already reflects, together with
+	// it, so the next pass can tell TP fills from external reductions.
+	synced := readTPPlan(ctx)
+	stampTPSync(synced)
+	b, _ := json.Marshal(synced)
+	return x.persistContext(ctx, map[string]interface{}{"tp_plan_json": string(b), "tp_position_quantity": qty})
+}
+
+// tpCumulativeFill is every fill ever attributed to one TP allocation
+// (current order, earlier generations and market replacements). It only grows.
+func tpCumulativeFill(tp TPPlanEntry) float64 {
+	return tp.FilledQuantity + tp.PriorFilledQuantity + tp.ReplacementFilled
+}
+
+// stampTPSync records, per level, the cumulative TP fill reflected by the
+// tp_position_quantity persisted alongside the plan.
+func stampTPSync(plan []TPPlanEntry) {
+	for i := range plan {
+		v := tpCumulativeFill(plan[i])
+		plan[i].SyncedFill = &v
+	}
+}
+
+// tpRescale returns the factor applied to the remaining TP quantities when
+// the live position differs from the one the ladder was last synced to.
+//
+// TP fills reduce the position and the remaining TP quantities by the same
+// amount, so they must not shrink the other levels. An external change
+// (author reduction, manual close, add) scales the TP levels AND the runner
+// proportionally: scale = qty / (synced position - TP fills since the sync).
+// The result never lets the remaining reduce-only TPs exceed the position.
+// Plans synced before fill stamps existed keep the previous behaviour.
+func tpRescale(syncedQty, qty, total float64, plan []TPPlanEntry) float64 {
+	guard := qty / total // never over-reduce
+	if syncedQty > 0 {
+		stamped := true
+		since := 0.0
+		for _, tp := range plan {
+			if tp.SyncedFill == nil {
+				stamped = false
+				break
+			}
+			since += math.Max(0, tpCumulativeFill(tp)-*tp.SyncedFill)
+		}
+		if base := syncedQty - since; stamped && base > 1e-12 {
+			return math.Min(qty/base, guard)
+		}
+		if qty > syncedQty+1e-10 {
+			return qty / syncedQty
+		}
+	}
+	return math.Min(1, guard)
 }
 
 const (

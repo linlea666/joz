@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -1281,6 +1282,29 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 			return SkipSanityCheck, nil
 		}
 	}
+	// Final-entry stop guard: validation checks the stop against the LIVE
+	// market for market specs, but an adverse market-with-reference entry is
+	// planned as a limit at the author's reference. The stop must sit on the
+	// losing side of the price that will actually fill.
+	if entryType == EntryPlanLimit {
+		if (interp.Direction == DirectionLong && slPrice >= entryPrice) ||
+			(interp.Direction == DirectionShort && slPrice <= entryPrice) {
+			reason := fmt.Sprintf("%s stop loss %.8g is not on the losing side of the final limit entry %.8g (planned from %s, market %.8g) — not entering",
+				interp.Direction, slPrice, entryPrice, shape.Decision.Reason, marketPrice)
+			e.events.Warn(traceID, signalID, msg.MessageID, EvRiskRejected, reason,
+				map[string]interface{}{"entry_type": entryType, "entry_price": entryPrice, "stop_loss": slPrice, "market_price": marketPrice, "decision_reason": shape.Decision.Reason})
+			return SkipRiskRejected, nil
+		}
+	}
+	// A shared-risk second leg carries half the risk budget at its own
+	// distance: apply the same 0.05% stop-distance floor as the first leg.
+	if shape.SplitReference > 0 {
+		if err := splitStopDistanceFloor(entryPrice, shape.SplitReference, slPrice); err != nil {
+			e.events.Warn(traceID, signalID, msg.MessageID, EvRiskRejected, err.Error(),
+				map[string]interface{}{"entry_price": entryPrice, "second_limit": shape.SplitReference, "stop_loss": slPrice})
+			return SkipRiskRejected, nil
+		}
+	}
 	if interp.StopLossLevels[0].Conditional != "" {
 		e.events.Warn(traceID, signalID, msg.MessageID, EvSignalClassified,
 			"author uses a conditional stop ("+interp.StopLossLevels[0].Conditional+"); executing the hard price", nil)
@@ -1315,10 +1339,11 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 		tpOrdinals = append(tpOrdinals, tp.Ordinal)
 	}
 	defaults, _ := ParseTPRatios(e.cfg.DefaultTPRatios)
-	tpRatios, err := AllocateTPRatios(tpLevels, defaults)
+	tpRatios, tpAlloc, err := AllocateTPRatiosDetailed(tpLevels, defaults)
 	if err != nil {
 		return SkipNone, fmt.Errorf("TP allocation failed: %w", err)
 	}
+	e.logTPAllocation(traceID, signalID, msg.MessageID, tpAlloc, tpRatios, defaults)
 
 	// Deterministic sizing.
 	riskStart := time.Now()
@@ -1337,7 +1362,7 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 		EntryPrice:             entryPrice,
 		StopLossPrice:          slPrice,
 		Leverage:               leverage,
-		MaxPositionNotionalUSD: e.cfg.MaxPositionNotionalUSD,
+		MaxPositionNotionalUSD: e.cfg.NotionalCap(),
 		AvailableMarginUSD:     available,
 	})
 	riskMs := time.Since(riskStart).Milliseconds()
@@ -1352,6 +1377,18 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 			sizing.FinalQuantity, sizing.NotionalUSD, sizing.EstimatedMarginUSD,
 			sizing.EstimatedRiskUSD, sizing.AppliedConstraints),
 		map[string]interface{}{"sizing": json.RawMessage(sizingJSON)})
+	// Shared-risk combinations are re-sized per leg by the executor, which
+	// reports its own compression in the final entry plan.
+	if len(sizing.AppliedConstraints) > 0 && shape.SplitReference <= 0 {
+		configured := fmt.Sprintf("%s amount %.4g", e.cfg.RiskMode, e.cfg.RiskAmountUSD)
+		if e.cfg.RiskMode == RiskModeByLoss {
+			configured = fmt.Sprintf("risk $%.2f", e.cfg.RiskAmountUSD)
+		}
+		e.events.Warn(traceID, signalID, msg.MessageID, EvQuantityPlan,
+			fmt.Sprintf("position size compressed by %v: configured %s, actual risk $%.2f (qty %.8g -> %.8g, notional cap $%.2f, available margin $%.2f)",
+				sizing.AppliedConstraints, configured, sizing.EstimatedRiskUSD, sizing.RawQuantity, sizing.FinalQuantity, e.cfg.NotionalCap(), available),
+			map[string]interface{}{"configured_risk_usd": e.cfg.RiskAmountUSD, "risk_mode": e.cfg.RiskMode, "actual_risk_usd": sizing.EstimatedRiskUSD, "constraints": sizing.AppliedConstraints, "notional_cap_usd": e.cfg.NotionalCap(), "available_margin_usd": available})
+	}
 
 	plan := &OpenPlan{
 		Symbol:            canonical,
@@ -1369,7 +1406,7 @@ func (e *Engine) routeOpen(traceID, signalID string, msg *store.DiscordMessage, 
 		Sizing:     sizing,
 		RootMsgID:  msg.MessageID,
 		ChannelID:  msg.ChannelID,
-		RiskBudget: 0, MaxNotional: e.cfg.MaxPositionNotionalUSD, AvailableMargin: available,
+		RiskBudget: 0, MaxNotional: e.cfg.NotionalCap(), AvailableMargin: available,
 		EntryTimeout: time.Duration(e.cfg.EntryTimeoutMinutes) * time.Minute,
 	}
 	if e.cfg.RiskMode == RiskModeByLoss {
@@ -1576,14 +1613,34 @@ func (e *Engine) routeUpdateTP(traceID, signalID string, msg *store.DiscordMessa
 				len(prices)+len(droppedTPs), MaxTPLevels, droppedTPs), nil)
 	}
 	defaults, _ := ParseTPRatios(e.cfg.DefaultTPRatios)
-	ratios, err := AllocateTPRatios(levels, defaults)
+	ratios, tpAlloc, err := AllocateTPRatiosDetailed(levels, defaults)
 	if err != nil {
 		return SkipNone, err
 	}
+	e.logTPAllocation(traceID, signalID, msg.MessageID, tpAlloc, ratios, defaults)
 	return e.exec.ExecuteUpdateTP(traceID, signalID, ctx, prices, ratios)
 }
 
 // --- helpers ---
+
+// logTPAllocation records which policy produced a TP ladder whenever the
+// author gave no ratios (configured defaults or the built-in fallback).
+func (e *Engine) logTPAllocation(traceID, signalID, messageID, source string, ratios, defaults []float64) {
+	total := 0.0
+	for _, r := range ratios {
+		total += r
+	}
+	runner := math.Max(0, 100-total)
+	data := map[string]interface{}{"tp_allocation": source, "tp_ratios": ratios, "default_tp_ratios": defaults, "runner_pct": runner}
+	switch source {
+	case TPAllocConfigured:
+		e.events.Info(traceID, signalID, messageID, EvSignalClassified,
+			fmt.Sprintf("TP allocation: configured default_tp_ratios %v for %d levels (runner %.4g%%)", ratios, len(ratios), runner), data)
+	case TPAllocBuiltinFallback:
+		e.events.Info(traceID, signalID, messageID, EvSignalClassified,
+			fmt.Sprintf("TP allocation: built-in fallback %v — author gave %d levels without ratios but default_tp_ratios has %d values", ratios, len(ratios), len(defaults)), data)
+	}
+}
 
 // accountBalances reads equity and available margin (best effort).
 func (e *Engine) accountBalances() (equity, available float64, err error) {

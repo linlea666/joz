@@ -31,6 +31,9 @@ type TPPlanEntry struct {
 	OrderKind           string   `json:"order_kind,omitempty"`
 	ClientID            string   `json:"client_id,omitempty"`
 	Status              string   `json:"status,omitempty"`
+	// SyncedFill is this level's cumulative fill (see tpCumulativeFill) at
+	// the moment tp_position_quantity was last persisted. Absent in older plans.
+	SyncedFill *float64 `json:"synced_fill,omitempty"`
 }
 
 // Executor turns validated instructions into idempotent exchange operations.

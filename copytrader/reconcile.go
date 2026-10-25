@@ -298,6 +298,8 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 			return
 		}
 		// Position gone: SL hit, TP ladder completed, or closed manually.
+		// Terminal cleanup clears stop_order_id; keep it as exit evidence.
+		stopID := ctx.StopOrderID
 		if err := e.exec.finishTradeOrders(ctx); err != nil {
 			e.recordRecovery(ctx, "terminal_cleanup", err, true)
 			return
@@ -305,11 +307,21 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 		e.recordRecovery(ctx, "terminal_cleanup", nil, true)
 		e.events.recoveryResult(ctx.ID, "protection", "", time.Now().UTC())
 		delete(e.posMissSeen, ctx.ID)
-		if err := e.exec.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "RECONCILE_CLOSED"}); err != nil {
+		ev := e.exec.collectExitEvidence(traceID, ctx, stopID)
+		closeUpdates := map[string]interface{}{"last_action": "RECONCILE_CLOSED"}
+		if ev.ClosedAt != nil && (ctx.OpenedAt == nil || !ev.ClosedAt.Before(*ctx.OpenedAt)) {
+			closeUpdates["closed_at"] = ev.ClosedAt
+		}
+		if err := e.exec.markContext(ctx, StateClosed, closeUpdates); err != nil {
 			return
 		}
+		pnl := "realized PnL unavailable"
+		if ev.RealizedPnL != nil {
+			pnl = fmt.Sprintf("realized PnL %.4f", *ev.RealizedPnL)
+		}
 		e.events.Info(traceID, "", "", EvTradeClosed,
-			fmt.Sprintf("%s position no longer on exchange (SL/TP hit or manual close); trade closed", ctx.Symbol), nil)
+			fmt.Sprintf("%s position no longer on exchange; trade closed: exit %s (%s), %s", ctx.Symbol, ev.Reason, ev.Source, pnl),
+			map[string]interface{}{"context_id": ctx.ID, "exit": ev})
 		// Keep watching for a few cycles: if the position reappears the close
 		// was based on stale data and the trade must be resurrected.
 		if e.closedRecheck == nil {
