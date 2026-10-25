@@ -1352,6 +1352,55 @@ export const translations = {
         CONFIG_REVOKED:
           'Copy-trade configuration changed or route revoked: the message was delivered under an older configuration and will not open a position under the current one',
       },
+      dupProtectionAlwaysOn:
+        'Always on: the executor never opens the same signal twice (not configurable).',
+      parseModelLabel: 'Parsing Model (must support images) *',
+      parseModel: 'Parsing Model (must support images)',
+      marginModeExchangeHint:
+        'Copy trading does not change the margin mode. Set cross/isolated margin on the exchange.',
+      authorIds: 'Author IDs',
+      authorNames: 'Author names (exact)',
+      authorFilterBoth:
+        'When both IDs and names are set, a message must match both.',
+      exchangeAccount: 'Exchange account',
+      viewTitle: 'Copy-trading settings in effect',
+      sourceMode: 'Source mode',
+      sourceChannels: 'Source channels',
+      minutesValue: '{minutes} min',
+      entryTimeoutNever: '0 (never expires)',
+      defaultValueSuffix: ' (default)',
+      alwaysOn: 'Always on',
+      validation: {
+        required: 'Required.',
+        positive: 'Must be greater than 0.',
+        percentMax: 'Percentage mode: at most 100.',
+        leverageRange: 'Enter a whole number from 1 to 125.',
+        positiveInteger: 'Enter a whole number of at least 1.',
+        offsetRequired:
+          'Required. Enter 0 to allow no adverse price difference.',
+        nonNegative: 'Must be 0 or greater.',
+        tpRatios:
+          'Use up to 3 comma-separated values, each above 0 and at most 100, summing to at most 100 (e.g. 50,30,20).',
+        channelNumeric: 'Enter a numeric Discord channel ID.',
+        sourceChannels:
+          'Source channels must be unique numeric IDs (at most 20).',
+        chromaSources:
+          'Chroma mode requires at least one actual source channel.',
+        chromaAuthors:
+          'Chroma mode requires an author ID or exact author name filter.',
+      },
+      saveRunningTitle: 'Save and restart the running trader?',
+      saveRunningMessage:
+        'Saving restarts the copy-trading engine. Messages still being interpreted are replayed after the restart. If execution settings change, pending opens that were not yet submitted are voided, and cards posted before this save will no longer open positions.',
+      saveRunningConfirm: 'Save and restart',
+      presetOverwriteTitle: 'Replace the channel profile?',
+      presetOverwriteMessage:
+        'This preset replaces your current channel profile with its recommended text. Copy your profile first if you want to keep it.',
+      presetOverwriteConfirm: 'Replace profile',
+      sourceApplyPending:
+        'Saved; the Discord source route is still waiting to be applied. Check the status in Discord settings.',
+      sourceAppliedRestarted:
+        'Saved; the trader restarted and its Discord source route is applied.',
       dupProtection: 'Duplicate Open Protection',
       paused: 'Paused (block new opens)',
       on: 'ON',
@@ -1448,8 +1497,6 @@ export const translations = {
       noContexts: 'No active trades',
       noStats: 'No AI runs recorded',
       colTime: 'Time',
-      colEvent: 'Event',
-      colMessage: 'Message',
       colAction: 'Action',
       colSymbol: 'Symbol',
       colStatus: 'Status',
@@ -2759,6 +2806,49 @@ export const translations = {
         CONFIG_REVOKED:
           '跟单配置已变更或路由已撤销：该消息按旧配置投递，在当前配置下不会再开仓',
       },
+      dupProtectionAlwaysOn:
+        '始终开启：执行层保证同一信号不会重复开仓，不可关闭。',
+      parseModelLabel: '解析模型（需支持图片）*',
+      parseModel: '解析模型（需支持图片）',
+      marginModeExchangeHint:
+        '跟单不会修改保证金模式，请在交易所中设置全仓/逐仓。',
+      authorIds: '作者 ID',
+      authorNames: '作者名称（精确匹配）',
+      authorFilterBoth: '作者 ID 与作者名称同时填写时，须同时满足。',
+      exchangeAccount: '交易所账户',
+      viewTitle: '生效的跟单参数',
+      sourceMode: '来源模式',
+      sourceChannels: '实际监听频道',
+      minutesValue: '{minutes} 分钟',
+      entryTimeoutNever: '0（不自动过期）',
+      defaultValueSuffix: '（默认）',
+      alwaysOn: '始终开启',
+      validation: {
+        required: '必填。',
+        positive: '必须大于 0。',
+        percentMax: '资金百分比模式下不能超过 100。',
+        leverageRange: '请输入 1 至 125 之间的整数。',
+        positiveInteger: '请输入不小于 1 的整数。',
+        offsetRequired: '必填。0 表示不容许不利价差。',
+        nonNegative: '不能小于 0。',
+        tpRatios:
+          '最多 3 档，用英文逗号分隔，每档大于 0 且不超过 100，总和不超过 100（如 50,30,20）。',
+        channelNumeric: '请输入数字形式的 Discord 频道 ID。',
+        sourceChannels: '实际监听频道必须是不重复的数字 ID（最多 20 个）。',
+        chromaSources: 'Chroma 模式必须填写至少一个实际监听频道。',
+        chromaAuthors: 'Chroma 模式必须填写作者 ID 或作者名称中的至少一种。',
+      },
+      saveRunningTitle: '保存并重启运行中的交易员？',
+      saveRunningMessage:
+        '保存会重启跟单引擎，正在解释的消息会在重启后重放。如果执行条件发生变化，尚未提交的开仓会被作废，并且本次保存之前发布的卡片之后不能再开仓。',
+      saveRunningConfirm: '保存并重启',
+      presetOverwriteTitle: '覆盖频道画像？',
+      presetOverwriteMessage:
+        '切换到该预设会用推荐画像覆盖你当前的频道画像。如需保留，请先复制当前画像。',
+      presetOverwriteConfirm: '覆盖画像',
+      sourceApplyPending:
+        '配置已保存，采集路由等待应用；请在 Discord 设置中核对状态。',
+      sourceAppliedRestarted: '已保存，交易员已重启，采集路由已应用。',
       dupProtection: '重复开仓保护',
       paused: '暂停（禁止新开仓）',
       on: '开',
@@ -2847,8 +2937,6 @@ export const translations = {
       noContexts: '暂无进行中的交易',
       noStats: '暂无 AI 调用记录',
       colTime: '时间',
-      colEvent: '事件',
-      colMessage: '内容',
       colAction: '动作',
       colSymbol: '币种',
       colStatus: '状态',

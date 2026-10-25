@@ -266,11 +266,18 @@ func (r MessageRules) AllowsAuthor(msg *store.DiscordMessage) bool {
 	}
 	return true
 }
-func (e *Engine) messageRules(msg *store.DiscordMessage) MessageRules {
+
+// messageRules returns the rules frozen on the message's delivery, or the live
+// config when the message carries no snapshot. A snapshot that cannot be
+// decoded is an error: falling back to empty rules would disable the author
+// filter.
+func (e *Engine) messageRules(msg *store.DiscordMessage) (MessageRules, error) {
 	r := e.cfg.MessageRules()
 	if msg.RulesSnapshot != "" {
 		r = MessageRules{}
-		_ = json.Unmarshal([]byte(msg.RulesSnapshot), &r)
+		if err := json.Unmarshal([]byte(msg.RulesSnapshot), &r); err != nil {
+			return MessageRules{}, fmt.Errorf("decode delivery rule snapshot: %w", err)
+		}
 	}
-	return r
+	return r, nil
 }

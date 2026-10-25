@@ -25,6 +25,7 @@ import { CopyTradeLogModal } from './CopyTradeLogModal'
 import { AutopilotLaunchPanel } from './AutopilotLaunchPanel'
 import { Bot, Plus, MessageCircle } from 'lucide-react'
 import { confirmToast } from '../../lib/notify'
+import { waitForSourceApplied } from './copyTradeForm'
 import { toast } from 'sonner'
 
 interface AITradersPageProps {
@@ -277,29 +278,37 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
         is_cross_margin: data.is_cross_margin,
         show_in_competition: data.show_in_competition,
         copy_trading_config: data.copy_trading_config,
+        // The form does not edit these legacy AI-scan fields; send the stored
+        // values back so saving never clears them.
+        trading_symbols: editingTrader.trading_symbols,
+        custom_prompt: editingTrader.custom_prompt,
+        override_base_prompt: editingTrader.override_base_prompt,
+        use_ai500: editingTrader.use_ai500,
+        use_oi_top: editingTrader.use_oi_top,
       }
 
-      const result = await api.updateTrader(editingTrader.trader_id, request)
-      if (result?.config_reload_status === 'failed') {
-        toast.warning(t('copytrade.configSavedInactive', language))
-      } else if (result?.source_applied === false) {
-        toast.warning(
-          language === 'zh'
-            ? '配置已保存，采集路由等待应用；请在 Discord 设置中核对状态。'
-            : 'Saved; source application pending. Check Discord status.'
-        )
-      } else {
-        toast.success(
-          t(
-            result?.restart_requested
-              ? 'copytrade.configRestartRequested'
-              : 'aiTradersToast.saved',
-            language
-          )
-        )
-      }
+      const traderId = editingTrader.trader_id
+      const isCopy = editingTrader.trader_type === 'copy_trading'
+      const result = await api.updateTrader(traderId, request)
       setShowEditModal(false)
       setEditingTrader(null)
+      void mutateTraders()
+      if (result?.config_reload_status === 'failed') {
+        toast.warning(t('copytrade.configSavedInactive', language))
+      } else if (isCopy && result?.restart_requested) {
+        // The engine restarts asynchronously; confirm the Discord route via
+        // the status endpoint instead of trusting the immediate response.
+        const applied = await waitForSourceApplied(traderId, (id) =>
+          api.getStatus(id, true)
+        )
+        if (applied) {
+          toast.success(t('copytrade.sourceAppliedRestarted', language))
+        } else {
+          toast.warning(t('copytrade.sourceApplyPending', language))
+        }
+      } else {
+        toast.success(t('aiTradersToast.saved', language))
+      }
       await mutateTraders()
     } catch (error) {
       console.error('Failed to update trader:', error)

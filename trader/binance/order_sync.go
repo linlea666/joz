@@ -27,6 +27,9 @@ type historyFlight struct {
 
 var historyFlights sync.Map
 
+// historyDiscoveryOverlap is how far symbol discovery looks behind the cursor.
+const historyDiscoveryOverlap = 10 * time.Minute
+
 // SyncOrdersFromBinance syncs Binance Futures trade history to local database
 // Uses COMMISSION detection + fromId for efficient incremental sync
 // Also creates/updates position records to ensure orders/fills/positions data consistency
@@ -80,8 +83,17 @@ func (t *FuturesTrader) syncHistory(ctx context.Context, traderID string, exchan
 	if err = st.GormDB().Model(progress).Update("last_attempt", now).Error; err != nil {
 		return err
 	}
+	var syncNotes []string
 	defer func() {
 		updates := map[string]interface{}{"last_error": ""}
+		if result == nil && len(syncNotes) > 0 {
+			// Successful sync with caveats: keep them visible in sync status.
+			detail := []rune(strings.Join(syncNotes, "；"))
+			if len(detail) > 512 {
+				detail = append(detail[:512], '…')
+			}
+			updates["last_error"] = "成交历史已同步，需注意：" + string(detail)
+		}
 		if result != nil {
 			// Exchange query errors have already been stripped of signed URLs.
 			detail := []rune(result.Error())
@@ -110,10 +122,17 @@ func (t *FuturesTrader) syncHistory(ctx context.Context, traderID string, exchan
 	// Step 2: Detect symbols to sync using multiple methods
 	// COMMISSION detection may miss trades (VIP users, BNB discount, 0-fee trades)
 	symbolMap := make(map[string]bool)
-	lastSyncTime := time.UnixMilli(lastSyncTimeMs) // Convert to time.Time for API calls
+	// The cursor is the newest fill across all symbols. Income records can lag
+	// and another symbol's later fill may already have advanced the cursor, so
+	// discovery re-scans a safety window behind it; trade IDs deduplicate.
+	discoveryStartMs := lastSyncTimeMs - historyDiscoveryOverlap.Milliseconds()
+	if discoveryStartMs < 0 {
+		discoveryStartMs = 0
+	}
+	discoveryStart := time.UnixMilli(discoveryStartMs)
 
 	// Method 1: COMMISSION income detection
-	commissionSymbols, err := t.historyIncomeSymbolsContext(ctx, "COMMISSION", lastSyncTime)
+	commissionSymbols, err := t.historyIncomeSymbolsContext(ctx, "COMMISSION", discoveryStart)
 	if err != nil {
 		return fmt.Errorf("commission symbol query: %w", err)
 	} else {
@@ -134,7 +153,7 @@ func (t *FuturesTrader) syncHistory(ctx context.Context, traderID string, exchan
 	}
 
 	// Method 3: Include symbols from recent fills in DB (in case some were partially synced)
-	recentSymbols, err := orderStore.GetRecentFillSymbolsByExchange(exchangeID, lastSyncTimeMs)
+	recentSymbols, err := orderStore.GetRecentFillSymbolsByExchange(exchangeID, discoveryStartMs)
 	if err != nil {
 		return err
 	}
@@ -147,7 +166,7 @@ func (t *FuturesTrader) syncHistory(ctx context.Context, traderID string, exchan
 	// This catches trades that COMMISSION missed (VIP users, BNB fee discount)
 	// IMPORTANT: Must run always, not just when symbolMap is empty,
 	// because a position might be fully closed (no active position) but have PnL
-	pnlSymbols, err := t.historyIncomeSymbolsContext(ctx, "REALIZED_PNL", lastSyncTime)
+	pnlSymbols, err := t.historyIncomeSymbolsContext(ctx, "REALIZED_PNL", discoveryStart)
 	if err != nil {
 		return fmt.Errorf("PnL symbol query: %w", err)
 	} else {
@@ -186,7 +205,7 @@ func (t *FuturesTrader) syncHistory(ctx context.Context, traderID string, exchan
 			if lastID > 0 {
 				batch, queryErr = t.getTradesFromID(ctx, symbol, lastID+1, 500)
 			} else {
-				batch, queryErr = t.getTradesSince(ctx, symbol, lastSyncTime, 500)
+				batch, queryErr = t.getTradesSince(ctx, symbol, discoveryStart, 500)
 			}
 			apiCalls++
 			if queryErr != nil {
@@ -250,8 +269,13 @@ func (t *FuturesTrader) syncHistory(ctx context.Context, traderID string, exchan
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := t.persistHistoryTrade(st, traderID, exchangeID, exchangeType, trade); err != nil {
+		note, err := t.persistHistoryTradeNoted(st, traderID, exchangeID, exchangeType, trade)
+		if err != nil {
 			return err
+		}
+		if note != "" {
+			logger.Warnf("Binance history sync note; account %s: %s", exchangeID, note)
+			syncNotes = append(syncNotes, note)
 		}
 		syncedCount++
 	}
@@ -261,6 +285,9 @@ func (t *FuturesTrader) syncHistory(ctx context.Context, traderID string, exchan
 	}
 	if len(allTrades) > 0 {
 		latest := allTrades[len(allTrades)-1].Time.UTC().UnixMilli()
+		if latest < lastSyncTimeMs {
+			latest = lastSyncTimeMs // overlap re-reads never move the cursor back
+		}
 		if err := st.GormDB().Model(progress).Update("cursor_ms", latest).Error; err != nil {
 			return err
 		}
@@ -272,16 +299,53 @@ func (t *FuturesTrader) syncHistory(ctx context.Context, traderID string, exchan
 // Existing historical rows remain unchanged. New fill/order/position changes
 // commit atomically so a failed position update cannot be hidden by dedup.
 func (t *FuturesTrader) persistHistoryTrade(st *store.Store, traderID, exchangeID, exchangeType string, trade types.TradeRecord) error {
+	_, err := t.persistHistoryTradeNoted(st, traderID, exchangeID, exchangeType, trade)
+	return err
+}
+
+// historyFillLegs maps one fill to position-ledger effects. Hedge fills use
+// their explicit positionSide. One-way (BOTH/empty) fills use realized PnL and
+// the locally tracked open quantity; nil means the fill needs manual review.
+func (t *FuturesTrader) historyFillLegs(tx *gorm.DB, traderID, symbol string, trade types.TradeRecord) ([]types.OneWayLeg, error) {
+	if ps := strings.ToUpper(trade.PositionSide); ps == "LONG" || ps == "SHORT" {
+		return []types.OneWayLeg{{Action: t.determineOrderAction(trade.Side, ps, trade.RealizedPnL), Quantity: trade.Quantity}}, nil
+	}
+	positions := store.NewPositionStore(tx)
+	var open [2]float64
+	for i, side := range []string{"LONG", "SHORT"} {
+		p, err := positions.GetOpenPositionBySymbol(traderID, symbol, side)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil && p.Quantity > 0 {
+			open[i] = p.Quantity
+		}
+	}
+	return types.ClassifyOneWayFill(trade.Side, trade.Quantity, trade.RealizedPnL, open[0], open[1]), nil
+}
+
+// historyOrderAction is stored for fills whose one-way direction cannot be
+// determined. Such fills are kept (and deduplicated) but do not move positions.
+const historyOrderActionReview = "review"
+
+// persistHistoryTradeNoted persists one fill and returns a human-readable note
+// when the fill was stored with a caveat (non-USDT fee, direction review).
+//
+// Order rows are keyed by the venue's real orderId; several fills of one order
+// share one aggregated row. Fills are deduplicated only by trade ID. Fills
+// without an orderId (legacy callers/tests) keep the historical trade-ID key.
+func (t *FuturesTrader) persistHistoryTradeNoted(st *store.Store, traderID, exchangeID, exchangeType string, trade types.TradeRecord) (string, error) {
 	if trade.TradeID == "" || trade.Symbol == "" || trade.Time.IsZero() || (trade.Side != "BUY" && trade.Side != "SELL") || trade.Price <= 0 || trade.Quantity <= 0 {
-		return fmt.Errorf("invalid history fill identity/quantity")
+		return "", fmt.Errorf("invalid history fill identity/quantity")
 	}
 	for _, v := range []float64{trade.Price, trade.Quantity, trade.Fee, trade.RealizedPnL} {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return fmt.Errorf("non-finite history fill")
+			return "", fmt.Errorf("non-finite history fill")
 		}
 	}
-	return st.Transaction(func(tx *gorm.DB) error {
-
+	var notes []string
+	err := st.Transaction(func(tx *gorm.DB) error {
+		notes = notes[:0]
 		symbol := market.Normalize(trade.Symbol)
 		var count int64
 		if err := tx.Model(&store.TraderFill{}).Where("exchange_id = ? AND symbol = ? AND exchange_trade_id = ?", exchangeID, symbol, trade.TradeID).Count(&count).Error; err != nil {
@@ -290,32 +354,127 @@ func (t *FuturesTrader) persistHistoryTrade(st *store.Store, traderID, exchangeI
 		if count > 0 {
 			return nil
 		}
-		if err := tx.Model(&store.TraderOrder{}).Where("exchange_id = ? AND symbol = ? AND exchange_order_id = ?", exchangeID, symbol, trade.TradeID).Count(&count).Error; err != nil {
+		// Legacy rows keyed the order by trade ID; one without its fill is an
+		// interrupted pre-transaction write. Aggregated real-orderId rows always
+		// carry at least one fill, so they never match here.
+		if err := tx.Model(&store.TraderOrder{}).Where("exchange_id = ? AND symbol = ? AND exchange_order_id = ? AND NOT EXISTS (SELECT 1 FROM trader_fills f WHERE f.order_id = trader_orders.id)", exchangeID, symbol, trade.TradeID).Count(&count).Error; err != nil {
 			return err
 		}
 		if count > 0 {
 			return fmt.Errorf("legacy incomplete history row requires review: %s %s", symbol, trade.TradeID)
 		}
 
-		action := t.determineOrderAction(trade.Side, trade.PositionSide, trade.RealizedPnL)
-		side := trade.PositionSide
-		if side == "" || side == "BOTH" {
-			side = "SHORT"
-			if strings.Contains(action, "long") {
-				side = "LONG"
+		feeAsset := trade.FeeAsset
+		if feeAsset == "" {
+			feeAsset = "USDT"
+		}
+		// Order and position fees are summed as USDT. A fee paid in another
+		// asset (e.g. BNB discount) keeps its raw value on the fill only.
+		usdtFee := trade.Fee
+		if feeAsset != "USDT" {
+			usdtFee = 0
+			if trade.Fee != 0 {
+				notes = append(notes, fmt.Sprintf("%s 成交 %s 手续费 %.8g %s 未折算，未计入 USDT 手续费", symbol, trade.TradeID, trade.Fee, feeAsset))
 			}
 		}
-		at := trade.Time.UTC().UnixMilli()
-		row := &store.TraderOrder{TraderID: traderID, ExchangeID: exchangeID, ExchangeType: exchangeType, ExchangeOrderID: trade.TradeID, Symbol: symbol, Side: strings.ToUpper(trade.Side), PositionSide: side, Type: "MARKET", OrderAction: action, Quantity: trade.Quantity, Price: trade.Price, Status: "FILLED", FilledQuantity: trade.Quantity, AvgFillPrice: trade.Price, Commission: trade.Fee, FilledAt: at, CreatedAt: at, UpdatedAt: at}
-		if err := tx.Create(row).Error; err != nil {
+
+		legs, err := t.historyFillLegs(tx, traderID, symbol, trade)
+		if err != nil {
 			return err
 		}
-		f := &store.TraderFill{TraderID: traderID, ExchangeID: exchangeID, ExchangeType: exchangeType, OrderID: row.ID, ExchangeOrderID: trade.TradeID, ExchangeTradeID: trade.TradeID, Symbol: symbol, Side: row.Side, Price: trade.Price, Quantity: trade.Quantity, QuoteQuantity: trade.Price * trade.Quantity, Commission: trade.Fee, CommissionAsset: "USDT", RealizedPnL: trade.RealizedPnL, CreatedAt: at}
+		action, side := historyOrderActionReview, "BOTH"
+		if len(legs) == 0 {
+			notes = append(notes, fmt.Sprintf("%s 成交 %s 单向持仓方向无法判定，已记为 review、未更新持仓", symbol, trade.TradeID))
+		} else {
+			action = legs[0].Action
+			side = trade.PositionSide
+			if side == "" || side == "BOTH" {
+				side = "SHORT"
+				if strings.Contains(action, "long") {
+					side = "LONG"
+				}
+			}
+		}
+
+		at := trade.Time.UTC().UnixMilli()
+		orderKey, legacyKey := trade.OrderID, trade.OrderID == ""
+		if legacyKey {
+			orderKey = trade.TradeID
+		}
+		var row store.TraderOrder
+		found := true
+		if err := tx.Where("exchange_id = ? AND symbol = ? AND exchange_order_id = ?", exchangeID, symbol, orderKey).First(&row).Error; err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			found = false
+		}
+		if found && !legacyKey {
+			// Attach only to a row this code created for the same order: its
+			// fills reference the order ID and carry distinct trade IDs. A
+			// legacy trade-ID-keyed row that merely shares the number is not.
+			if err := tx.Model(&store.TraderFill{}).Where("order_id = ? AND exchange_order_id = ? AND exchange_trade_id <> ?", row.ID, orderKey, orderKey).Count(&count).Error; err != nil {
+				return err
+			}
+			if count == 0 {
+				return fmt.Errorf("history order identity collides with a legacy row and requires review: %s order %s trade %s", symbol, orderKey, trade.TradeID)
+			}
+		} else if found {
+			return fmt.Errorf("history order identity collides with an existing row and requires review: %s %s", symbol, orderKey)
+		}
+		if found {
+			filled := row.FilledQuantity + trade.Quantity
+			avg := trade.Price
+			if filled > 0 {
+				avg = (row.AvgFillPrice*row.FilledQuantity + trade.Price*trade.Quantity) / filled
+			}
+			updates := map[string]interface{}{"filled_quantity": filled, "quantity": filled, "avg_fill_price": avg, "price": avg, "commission": row.Commission + usdtFee}
+			if at > row.FilledAt {
+				updates["filled_at"] = at
+			}
+			if at > row.UpdatedAt {
+				updates["updated_at"] = at
+			}
+			if at < row.CreatedAt {
+				updates["created_at"] = at
+			}
+			if err := tx.Model(&store.TraderOrder{}).Where("id = ?", row.ID).Updates(updates).Error; err != nil {
+				return err
+			}
+		} else {
+			row = store.TraderOrder{TraderID: traderID, ExchangeID: exchangeID, ExchangeType: exchangeType, ExchangeOrderID: orderKey, Symbol: symbol, Side: strings.ToUpper(trade.Side), PositionSide: side, Type: "MARKET", OrderAction: action, Quantity: trade.Quantity, Price: trade.Price, Status: "FILLED", FilledQuantity: trade.Quantity, AvgFillPrice: trade.Price, Commission: usdtFee, CommissionAsset: "USDT", FilledAt: at, CreatedAt: at, UpdatedAt: at}
+			if err := tx.Create(&row).Error; err != nil {
+				return err
+			}
+		}
+		f := &store.TraderFill{TraderID: traderID, ExchangeID: exchangeID, ExchangeType: exchangeType, OrderID: row.ID, ExchangeOrderID: orderKey, ExchangeTradeID: trade.TradeID, Symbol: symbol, Side: strings.ToUpper(trade.Side), Price: trade.Price, Quantity: trade.Quantity, QuoteQuantity: trade.Price * trade.Quantity, Commission: trade.Fee, CommissionAsset: feeAsset, RealizedPnL: trade.RealizedPnL, CreatedAt: at}
 		if err := tx.Create(f).Error; err != nil {
 			return err
 		}
-		return store.NewPositionBuilder(store.NewPositionStore(tx)).ProcessTrade(traderID, exchangeID, exchangeType, symbol, side, action, trade.Quantity, trade.Price, trade.Fee, trade.RealizedPnL, at, trade.TradeID)
+		builder := store.NewPositionBuilder(store.NewPositionStore(tx))
+		for i, leg := range legs {
+			legSide := "SHORT"
+			if strings.Contains(leg.Action, "long") {
+				legSide = "LONG"
+			}
+			if ps := strings.ToUpper(trade.PositionSide); ps == "LONG" || ps == "SHORT" {
+				legSide = ps
+			}
+			fee := usdtFee * leg.Quantity / trade.Quantity
+			pnl := 0.0
+			if i == 0 {
+				pnl = trade.RealizedPnL // a reversal's PnL belongs to its close leg
+			}
+			if err := builder.ProcessTrade(traderID, exchangeID, exchangeType, symbol, legSide, leg.Action, leg.Quantity, trade.Price, fee, pnl, at, orderKey); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
+	if err != nil {
+		return "", err
+	}
+	return strings.Join(notes, "；"), nil
 }
 func (t *FuturesTrader) getPositionSymbolsChecked(ctx context.Context) ([]string, error) {
 	positions, err := t.client.NewGetPositionRiskService().Do(ctx)
@@ -352,7 +511,10 @@ func (t *FuturesTrader) getPositionSymbols() []string {
 	return symbols
 }
 
-// determineOrderAction determines the order action based on trade data
+// determineOrderAction maps a hedge-mode fill (positionSide LONG/SHORT) to its
+// action. One-way (BOTH/empty) fills need ledger context and are classified by
+// historyFillLegs; here they resolve only when realized PnL proves a close,
+// and otherwise return "" rather than guessing an open.
 func (t *FuturesTrader) determineOrderAction(side, positionSide string, realizedPnL float64) string {
 	side = strings.ToUpper(side)
 	if strings.EqualFold(positionSide, "LONG") {
@@ -367,43 +529,15 @@ func (t *FuturesTrader) determineOrderAction(side, positionSide string, realized
 		}
 		return "open_short"
 	}
-
-	positionSide = strings.ToUpper(positionSide)
-
-	// If there's realized PnL, it's likely a close trade
-	isClose := realizedPnL != 0
-
-	if positionSide == "LONG" || positionSide == "" {
-		if side == "BUY" {
-			if isClose {
-				return "close_short" // Buying to close short
-			}
-			return "open_long"
-		} else {
-			if isClose {
-				return "close_long" // Selling to close long
-			}
-			return "open_short"
-		}
-	} else if positionSide == "SHORT" {
-		if side == "SELL" {
-			if isClose {
-				return "close_long"
-			}
-			return "open_short"
-		} else {
-			if isClose {
-				return "close_short"
-			}
-			return "open_long"
+	if realizedPnL != 0 {
+		switch side {
+		case "BUY":
+			return "close_short"
+		case "SELL":
+			return "close_long"
 		}
 	}
-
-	// Default fallback
-	if side == "BUY" {
-		return "open_long"
-	}
-	return "open_short"
+	return ""
 }
 
 // StartOrderSync starts background order sync task for Binance

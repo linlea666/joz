@@ -223,25 +223,17 @@ func (t *FuturesTrader) CheckMinNotional(symbol string, quantity float64) error 
 	return nil
 }
 
-// GetSymbolPrecision gets the quantity precision for a trading pair
+// GetSymbolPrecision gets the quantity precision for a trading pair.
+// Filters come from the shared per-symbol exchangeInfo cache.
 func (t *FuturesTrader) GetSymbolPrecision(symbol string) (int, error) {
-	exchangeInfo, err := t.client.NewExchangeInfoService().Do(context.Background())
-	if err != nil {
+	e, found, err := t.loadSymbol(symbol)
+	if !found && err != nil {
 		return 0, fmt.Errorf("failed to get trading rules: %w", err)
 	}
-
-	for _, s := range exchangeInfo.Symbols {
-		if s.Symbol == symbol {
-			// Get precision from LOT_SIZE filter
-			for _, filter := range s.Filters {
-				if filter["filterType"] == "LOT_SIZE" {
-					stepSize := filter["stepSize"].(string)
-					precision := calculatePrecision(stepSize)
-					logger.Infof("  %s quantity precision: %d (stepSize: %s)", symbol, precision, stepSize)
-					return precision, nil
-				}
-			}
-		}
+	if found && e.stepSize != "" {
+		precision := calculatePrecision(e.stepSize)
+		logger.Infof("  %s quantity precision: %d (stepSize: %s)", symbol, precision, e.stepSize)
+		return precision, nil
 	}
 
 	logger.Infof("  ⚠ %s precision information not found, using default precision 3", symbol)
@@ -260,24 +252,15 @@ func (t *FuturesTrader) FormatQuantity(symbol string, quantity float64) (string,
 	return fmt.Sprintf(format, quantity), nil
 }
 
-// GetSymbolPricePrecision gets the price precision for a trading pair
+// GetSymbolPricePrecision gets the price precision for a trading pair.
+// Filters come from the shared per-symbol exchangeInfo cache.
 func (t *FuturesTrader) GetSymbolPricePrecision(symbol string) (int, error) {
-	exchangeInfo, err := t.client.NewExchangeInfoService().Do(context.Background())
-	if err != nil {
+	e, found, err := t.loadSymbol(symbol)
+	if !found && err != nil {
 		return 0, fmt.Errorf("failed to get trading rules: %w", err)
 	}
-
-	for _, s := range exchangeInfo.Symbols {
-		if s.Symbol == symbol {
-			// Get precision from PRICE_FILTER filter
-			for _, filter := range s.Filters {
-				if filter["filterType"] == "PRICE_FILTER" {
-					tickSize := filter["tickSize"].(string)
-					precision := calculatePrecision(tickSize)
-					return precision, nil
-				}
-			}
-		}
+	if found && e.tickSize != "" {
+		return calculatePrecision(e.tickSize), nil
 	}
 
 	// Default to 2 decimal places for price

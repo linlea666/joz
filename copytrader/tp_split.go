@@ -47,23 +47,41 @@ func CapTPLadder(prices []float64, levels []TPLevel, direction Direction) (keptP
 	return keptPrices, keptLevels, droppedPrices
 }
 
+// TP allocation sources, reported by AllocateTPRatiosDetailed for audit.
+const (
+	TPAllocExplicit        = "explicit"         // every level carries the author's ratio
+	TPAllocMixed           = "mixed"            // explicit levels kept, remainder split evenly
+	TPAllocConfigured      = "configured"       // default_tp_ratios, one value per level
+	TPAllocBuiltinFallback = "builtin_fallback" // level count differs from default_tp_ratios
+)
+
 // AllocateTPRatios decides the position percentage per TP level.
 //
 // Semantics (never invent TP levels the author didn't give):
 //   - explicit ratios from the signal always win over configured defaults;
-//   - all levels unspecified: 1 TP => 100%, 2 TPs => 50/50,
-//     3 TPs => configured defaults (e.g. 50/30/20);
+//   - all levels unspecified and the configured defaults have exactly one
+//     value per level => the configured values are used AS-IS: a total below
+//     100 keeps the remainder as a runner (same as explicit ratios < 100);
+//   - all levels unspecified and the level count differs from the configured
+//     defaults => built-in fallback: 1 TP => 100%, 2 TPs => 50/50,
+//     3 TPs => 50/30/20;
 //   - partially specified: explicit values kept, the remaining percentage is
 //     split evenly across unspecified levels ("TP1 25%, TP2 rest" => 25/75);
-//   - at most 3 levels in V1 (callers truncate before allocation);
-//   - the final level absorbs rounding so the total is exactly 100.
+//   - at most 3 levels in V1 (callers truncate before allocation).
 func AllocateTPRatios(levels []TPLevel, defaults []float64) ([]float64, error) {
+	out, _, err := AllocateTPRatiosDetailed(levels, defaults)
+	return out, err
+}
+
+// AllocateTPRatiosDetailed is AllocateTPRatios plus the allocation source
+// (TPAlloc*), so callers can record which policy produced the ladder.
+func AllocateTPRatiosDetailed(levels []TPLevel, defaults []float64) ([]float64, string, error) {
 	n := len(levels)
 	if n == 0 {
-		return nil, nil
+		return nil, "", nil
 	}
 	if n > 3 {
-		return nil, fmt.Errorf("at most 3 TP levels supported, got %d", n)
+		return nil, "", fmt.Errorf("at most 3 TP levels supported, got %d", n)
 	}
 
 	out := make([]float64, n)
@@ -72,7 +90,7 @@ func AllocateTPRatios(levels []TPLevel, defaults []float64) ([]float64, error) {
 	for i, lv := range levels {
 		if lv.Ratio != nil {
 			if *lv.Ratio <= 0 || *lv.Ratio > 100 {
-				return nil, fmt.Errorf("TP level %d ratio %v out of range (0, 100]", i+1, *lv.Ratio)
+				return nil, "", fmt.Errorf("TP level %d ratio %v out of range (0, 100]", i+1, *lv.Ratio)
 			}
 			out[i] = *lv.Ratio
 			explicitTotal += *lv.Ratio
@@ -81,34 +99,39 @@ func AllocateTPRatios(levels []TPLevel, defaults []float64) ([]float64, error) {
 		}
 	}
 	if explicitTotal > 100+1e-9 {
-		return nil, fmt.Errorf("explicit TP ratios sum to %.2f, exceeding 100", explicitTotal)
+		return nil, "", fmt.Errorf("explicit TP ratios sum to %.2f, exceeding 100", explicitTotal)
 	}
 
 	switch {
 	case len(unspecified) == 0:
 		// Fully explicit. A total below 100 means the author intentionally
 		// keeps a runner; respect it as-is.
+		return out, TPAllocExplicit, nil
 	case len(unspecified) == n:
-		// Fully unspecified: apply the default policy.
+		if len(defaults) == n {
+			total := 0.0
+			for _, v := range defaults {
+				if !finite(v) || v <= 0 || v > 100 {
+					return nil, "", fmt.Errorf("default TP ratio %v out of range (0, 100]", v)
+				}
+				total += v
+			}
+			if total > 100+1e-9 {
+				return nil, "", fmt.Errorf("default TP ratios sum to %.2f, exceeding 100", total)
+			}
+			// Configured per-level values; a total below 100 is a runner.
+			copy(out, defaults)
+			return out, TPAllocConfigured, nil
+		}
 		switch n {
 		case 1:
 			out[0] = 100
 		case 2:
 			out[0], out[1] = 50, 50
 		case 3:
-			d := defaults
-			if len(d) != 3 {
-				d = []float64{50, 30, 20}
-			}
-			copy(out, d)
-			// Normalize configured defaults that don't reach 100.
-			sum := d[0] + d[1] + d[2]
-			if math.Abs(sum-100) > 1e-9 && sum > 0 {
-				for i := range out {
-					out[i] = out[i] / sum * 100
-				}
-			}
+			copy(out, []float64{50, 30, 20})
 		}
+		return out, TPAllocBuiltinFallback, nil
 	default:
 		// Mixed: split the remainder evenly across unspecified levels.
 		remaining := 100 - explicitTotal
@@ -116,8 +139,8 @@ func AllocateTPRatios(levels []TPLevel, defaults []float64) ([]float64, error) {
 		for _, idx := range unspecified {
 			out[idx] = share
 		}
+		return out, TPAllocMixed, nil
 	}
-	return out, nil
 }
 
 // SplitTPQuantities converts ratios into per-level quantities based on the

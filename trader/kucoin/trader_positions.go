@@ -23,14 +23,14 @@ func (t *KuCoinTrader) GetPositions() ([]map[string]interface{}, error) {
 
 	var positions []struct {
 		Symbol           string  `json:"symbol"`
-		CurrentQty       int64   `json:"currentQty"`      // Position quantity (in lots, integer)
-		AvgEntryPrice    float64 `json:"avgEntryPrice"`   // Average entry price
-		MarkPrice        float64 `json:"markPrice"`       // Mark price
-		UnrealisedPnl    float64 `json:"unrealisedPnl"`   // Unrealized PnL
-		Leverage         float64 `json:"leverage"`        // Leverage setting
-		RealLeverage     float64 `json:"realLeverage"`    // Effective leverage (may be nil in cross mode)
-		LiquidationPrice float64 `json:"liquidationPrice"`// Liquidation price
-		Multiplier       float64 `json:"multiplier"`      // Contract multiplier
+		CurrentQty       int64   `json:"currentQty"`       // Position quantity (in lots, integer)
+		AvgEntryPrice    float64 `json:"avgEntryPrice"`    // Average entry price
+		MarkPrice        float64 `json:"markPrice"`        // Mark price
+		UnrealisedPnl    float64 `json:"unrealisedPnl"`    // Unrealized PnL
+		Leverage         float64 `json:"leverage"`         // Leverage setting
+		RealLeverage     float64 `json:"realLeverage"`     // Effective leverage (may be nil in cross mode)
+		LiquidationPrice float64 `json:"liquidationPrice"` // Liquidation price
+		Multiplier       float64 `json:"multiplier"`       // Contract multiplier
 		IsOpen           bool    `json:"isOpen"`
 		CrossMode        bool    `json:"crossMode"`
 		OpeningTimestamp int64   `json:"openingTimestamp"`

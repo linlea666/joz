@@ -117,7 +117,10 @@ func (e *Engine) reconcileOnce() {
 		}
 		switch TradeState(ctx.State) {
 		case StateEntryPending:
-			e.reconcileEntryPending(ctx)
+			// Limit entries: exchange truth is checked BEFORE the timeout path
+			// so a filled order is never marked EXPIRED, and a failed cancel
+			// never orphans a fill.
+			e.reconcileLegacyEntry("reconcile-"+ctx.ID, ctx)
 		case StateOpen, StateBreakeven:
 			e.reconcileOpenTrade(ctx)
 		case StateClosePending:
@@ -183,7 +186,7 @@ func (e *Engine) recheckClosedTrades() {
 		e.exec.updateContext(ctx, map[string]interface{}{
 			"state":       string(StateOpen),
 			"quantity":    pos.qty,
-			"last_action": "RECOVERED_SPURIOUS_CLOSE",
+			"last_action": lastActionSpuriousCloseRecovered,
 			"closed_at":   nil,
 		})
 		ctx.State = string(StateOpen)
@@ -241,13 +244,6 @@ func (e *Engine) resurrectionRefusal(ctx *store.CopyTradeContext, pos *positionI
 	return ""
 }
 
-// reconcileEntryPending handles limit entries: fill detection and timeout.
-// Exchange truth is checked BEFORE the timeout path so a filled order is never
-// marked EXPIRED, and a failed cancel never orphans a fill.
-func (e *Engine) reconcileEntryPending(ctx *store.CopyTradeContext) {
-	e.reconcileLegacyEntry("reconcile-"+ctx.ID, ctx)
-}
-
 // executedQtyOf extracts the filled quantity from a GetOrderStatus result,
 // sanitized like confirmFill's path: contract-denominated exchanges convert
 // fills with contracts*ctVal, whose float artifacts must not be persisted.
@@ -256,14 +252,6 @@ func executedQtyOf(status map[string]interface{}) float64 {
 		return types.SanitizeBaseQuantity(q)
 	}
 	return 0
-}
-
-// handleEntryFill promotes an ENTRY_PENDING context to OPEN and places
-// protections from the stored TP plan.
-func (e *Engine) handleEntryFill(traceID string, ctx *store.CopyTradeContext, status map[string]interface{}) {
-	if err := e.exec.settleLegacyEntry(traceID, ctx, status); err != nil {
-		e.events.Error(traceID, "", "", EvExecutionError, err.Error(), nil)
-	}
 }
 
 // reconcileOpenTrade detects closes and TP partial fills.
@@ -298,6 +286,8 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 			return
 		}
 		// Position gone: SL hit, TP ladder completed, or closed manually.
+		// Terminal cleanup clears stop_order_id; keep it as exit evidence.
+		stopID := ctx.StopOrderID
 		if err := e.exec.finishTradeOrders(ctx); err != nil {
 			e.recordRecovery(ctx, "terminal_cleanup", err, true)
 			return
@@ -305,11 +295,21 @@ func (e *Engine) reconcileOpenTrade(ctx *store.CopyTradeContext) {
 		e.recordRecovery(ctx, "terminal_cleanup", nil, true)
 		e.events.recoveryResult(ctx.ID, "protection", "", time.Now().UTC())
 		delete(e.posMissSeen, ctx.ID)
-		if err := e.exec.markContext(ctx, StateClosed, map[string]interface{}{"last_action": "RECONCILE_CLOSED"}); err != nil {
+		ev := e.exec.collectExitEvidence(traceID, ctx, stopID)
+		closeUpdates := map[string]interface{}{"last_action": "RECONCILE_CLOSED"}
+		if ev.ClosedAt != nil && (ctx.OpenedAt == nil || !ev.ClosedAt.Before(*ctx.OpenedAt)) {
+			closeUpdates["closed_at"] = ev.ClosedAt
+		}
+		if err := e.exec.markContext(ctx, StateClosed, closeUpdates); err != nil {
 			return
 		}
+		pnl := "realized PnL unavailable"
+		if ev.RealizedPnL != nil {
+			pnl = fmt.Sprintf("realized PnL %.4f", *ev.RealizedPnL)
+		}
 		e.events.Info(traceID, "", "", EvTradeClosed,
-			fmt.Sprintf("%s position no longer on exchange (SL/TP hit or manual close); trade closed", ctx.Symbol), nil)
+			fmt.Sprintf("%s position no longer on exchange; trade closed: exit %s (%s), %s", ctx.Symbol, ev.Reason, ev.Source, pnl),
+			map[string]interface{}{"context_id": ctx.ID, "exit": ev})
 		// Keep watching for a few cycles: if the position reappears the close
 		// was based on stale data and the trade must be resurrected.
 		if e.closedRecheck == nil {
@@ -450,10 +450,4 @@ func (e *Engine) reconcileClosePending(ctx *store.CopyTradeContext) {
 		e.events.Error("reconcile-"+ctx.ID, "", "", EvExecutionError,
 			fmt.Sprintf("%s close submitted >5m ago but position still open — manual check required", ctx.Symbol), nil)
 	}
-}
-
-// planFromContext rebuilds an OpenPlan for protection placement after a limit
-// fill, using the TP plan stored at submit time (Quantity field holds ratios).
-func (e *Engine) planFromContext(ctx *store.CopyTradeContext) *OpenPlan {
-	return recipePlan(ctx)
 }

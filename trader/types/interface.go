@@ -36,6 +36,8 @@ type TradeRecord struct {
 	RealizedPnL  float64   // Realized PnL (non-zero for closing trades)
 	Fee          float64   // Trading fee/commission
 	Time         time.Time // Trade execution time
+	OrderID      string    // Exchange order ID the fill belongs to (empty if unknown)
+	FeeAsset     string    // Commission asset (empty = unknown, treated as USDT by legacy callers)
 }
 
 // Trader Unified trader interface

@@ -13,8 +13,6 @@ import (
 
 var discretionaryExit = regexp.MustCompile(`(?i)(可以先跑|自行.*(?:止盈|減倉|减仓|TP)|止盈或者減倉|止盈或者减仓|consider.*(?:clos|exit|profit)|(?:may|could).*\b(?:close|exit|trim)\b)`)
 var explicitManagement = regexp.MustCompile(`(?i)(减仓|減倉|减掉|減掉|減半|减半|全平|平仓|平倉|\b(?:reduce|trim|close|exit)\b|(?:止盈|take profit)\s*[0-9一二三四五六七八九十])`)
-var recapOnly = regexp.MustCompile(`(?i)(收益|获利|獲利|起飞|起飛|(?:TP\s*\d|止盈).*(?:到达|到達|已到|hit|完成|✅))`)
-var jonziTerminal = regexp.MustCompile(`(?i)(trade was (?:manually )?closed|stop/loss was hit|trailed stop was hit|交易已(?:手动|手動)?(?:平仓|平倉|关闭|關閉)|(?:跟踪|追踪|跟蹤|追蹤)?止[損损].*(?:被觸發|被触发|已觸發|已触发))`)
 var cardSymbol = regexp.MustCompile(`(?i)\b([A-Z0-9]+)/(?:USDT|USD)\b`)
 var cardDirection = regexp.MustCompile(`(?i)\b(long|short)\b|做多|做空|多头|多頭|空头|空頭`)
 var cardField = regexp.MustCompile(`(?i)^\s*[-•]?\s*(entry|入场价?|入場價?|trailed stop|移动止损|移動止損|跟踪止损|追踪止损|stop/loss|止损(?:\s*\(stop/loss\))?|止損|tp|止盈(?:\s*\(tp\))?)\s*[:：]\s*(.*)$`)
@@ -27,8 +25,6 @@ var holdWording = regexp.MustCompile(`(?i)持有|持倉|持仓|\bhold\b`)
 
 // A recognized fragment is not permission to execute only part of an
 // unresolved instruction. This boundary is shared by deterministic and AI paths.
-var retainedPosition = regexp.MustCompile(`(?:留|保留|剩)[下著着餘余]?\s*[0-9]+(?:\.[0-9]+)?\s*[%％成]`)
-
 func unresolvedManagement(text string) string {
 	if sourceFullProfitExit.MatchString(text) && retainedPosition.MatchString(text) {
 		return "full exit conflicts with retained-position wording"

@@ -51,9 +51,11 @@ cd /opt/nofx && ./start.sh update
 |---|---|---|---|
 | CMM | `cmm_v1` | `channel` | 现有实际频道；双价格语义按已确认规则选择“市价＋限价” |
 | TYLER | `tyler_v1` | `channel` | 现有实际频道；保留验证过的管理口令和条件 |
-| jonzi | `jonzi_v1` | `chroma` | 配置新增通知和更新通知的实际频道，明确当前消息作者过滤 |
+| jonzi | `jonzi_v1` | `channel`（推荐，2026-10 更新） | 逻辑频道 `1452344484103848026`，实际监听频道留空，作者 ID 过滤；详见 [jonzi 普通频道模式](jonzi-channel-mode.zh-CN.md) |
 
-已核查的 jonzi 示例（权限与当前实际消息作者请用“频道预览”再核对）：
+（2026-10 更新）jonzi 推荐使用普通频道模式，配置、消息处理规则和运维要点见 [jonzi 普通频道模式](jonzi-channel-mode.zh-CN.md)。下面的 Chroma 配置仅作为可选方案保留。
+
+可选的 jonzi Chroma 示例（权限与当前实际消息作者请用“频道预览”再核对）：
 
 ```json
 {

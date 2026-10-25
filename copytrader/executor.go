@@ -31,6 +31,9 @@ type TPPlanEntry struct {
 	OrderKind           string   `json:"order_kind,omitempty"`
 	ClientID            string   `json:"client_id,omitempty"`
 	Status              string   `json:"status,omitempty"`
+	// SyncedFill is this level's cumulative fill (see tpCumulativeFill) at
+	// the moment tp_position_quantity was last persisted. Absent in older plans.
+	SyncedFill *float64 `json:"synced_fill,omitempty"`
 }
 
 // Executor turns validated instructions into idempotent exchange operations.
@@ -97,12 +100,15 @@ type OpenPlan struct {
 
 // ExecuteOpen runs the OPEN saga and returns the created trade context.
 func (x *Executor) ExecuteOpen(traceID, signalID string, plan *OpenPlan) (*store.CopyTradeContext, error) {
-	managedAdmission.Lock()
-	defer managedAdmission.Unlock()
+	// The account binding is resolved first so admission serializes per
+	// exchange account rather than globally (see managedAdmission).
 	exchangeID, err := x.st.CopyTrade().TraderExchangeID(x.traderID)
 	if err != nil {
 		return nil, err
 	}
+	admission := admissionLock(exchangeID)
+	admission.Lock()
+	defer admission.Unlock()
 	plan.ExchangeID = exchangeID
 	owners, err := x.st.CopyTrade().AccountContexts(x.traderID, plan.Symbol, string(plan.Direction))
 	if err != nil {
@@ -730,28 +736,6 @@ func positionFromRows(positions []map[string]interface{}, symbol, direction stri
 	return nil
 }
 
-// hasStopLossOrder reports whether a live stop-loss style order exists for the
-// symbol. Returns (exists, ok); ok=false means the exchange query failed and
-// the answer is unknown (callers must NOT treat that as "missing").
-func (x *Executor) hasStopLossOrder(symbol string) (bool, bool) {
-	orders, err := x.ex.GetOpenOrders(symbol)
-	if err != nil {
-		return false, false
-	}
-	for _, o := range orders {
-		t := strings.ToUpper(o.Type)
-		if strings.Contains(t, "TAKE_PROFIT") {
-			continue
-		}
-		// STOP / STOP_MARKET / STOP_LIMIT, or any conditional order with a
-		// trigger price that is not a take-profit.
-		if strings.Contains(t, "STOP") || o.StopPrice > 0 {
-			return true, true
-		}
-	}
-	return false, true
-}
-
 // confirmFill polls the order status briefly for actual avg price / quantity,
 // degrading to the reference values when the exchange is slow.
 //
@@ -856,9 +840,46 @@ func (x *Executor) cancelStopLossOrders(symbol, direction string) error {
 	return x.ex.CancelStopLossOrders(symbol)
 }
 
-// updateContext persists updates ignoring version conflicts (engine is the
-// only writer per trader; versioning guards the reconciler races).
+// checkStateTransition audits any update that changes the context state
+// against the lifecycle table. Rewriting the current state is always allowed.
+// A transition outside the table is a logic bug or a stale event: it is logged
+// as an error for review. Only a malformed state value refuses the update.
+func (x *Executor) checkStateTransition(ctx *store.CopyTradeContext, updates map[string]interface{}) error {
+	raw, ok := updates["state"]
+	if !ok {
+		return nil
+	}
+	var to TradeState
+	switch v := raw.(type) {
+	case string:
+		to = TradeState(v)
+	case TradeState:
+		to = v
+	default:
+		return fmt.Errorf("invalid trade state value %T", raw)
+	}
+	from := TradeState(ctx.State)
+	if from == to || isSpuriousCloseRecovery(from, to, updates) {
+		return nil
+	}
+	// Audit only: every existing write path is behaviour-tested, while refusing
+	// a write the table did not anticipate could freeze a live trade in a stale
+	// state. Unexpected transitions are surfaced loudly and still persisted.
+	if _, err := Transition(from, to); err != nil {
+		x.events.Error("reconcile-"+ctx.ID, "", "", EvExecutionError,
+			fmt.Sprintf("%s %s: %v (not in lifecycle table; persisted, review required)", ctx.Symbol, ctx.Direction, err),
+			map[string]interface{}{"context_id": ctx.ID, "from_state": string(from), "to_state": string(to)})
+	}
+	return nil
+}
+
+// persistContext writes updates with optimistic versioning (engine is the
+// only writer per trader; versioning guards the reconciler races) and mirrors
+// them onto ctx. State changes outside stateTransitions are audited.
 func (x *Executor) persistContext(ctx *store.CopyTradeContext, updates map[string]interface{}) error {
+	if err := x.checkStateTransition(ctx, updates); err != nil {
+		return err
+	}
 	if err := x.st.CopyTrade().UpdateContextVersioned(ctx.ID, ctx.Version, updates); err != nil {
 		return err
 	}

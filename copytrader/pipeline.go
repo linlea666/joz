@@ -32,7 +32,9 @@ func (e *Engine) messageSources(msg *store.DiscordMessage, profiles ...string) [
 		profile = profiles[0]
 	}
 	segments := BuildSourceSegments(msg, profile)
-	if e.messageRules(msg).SourceMode == "chroma" {
+	// An undecodable snapshot is rejected in HandleMessage; here it simply
+	// does not select the chroma layout.
+	if rules, err := e.messageRules(msg); err == nil && rules.SourceMode == "chroma" {
 		for i := range segments {
 			if strings.HasPrefix(segments[i].ID, "embed:") {
 				segments[i].Role = "reference"

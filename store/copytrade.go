@@ -340,20 +340,6 @@ func (s *CopyTradeStore) GetActiveContexts(traderID string) ([]*CopyTradeContext
 	return ctxs, err
 }
 
-// GetActiveContextByRootMessage finds the active context anchored to a message.
-func (s *CopyTradeStore) GetActiveContextByRootMessage(traderID, rootMessageID string) (*CopyTradeContext, error) {
-	var ctx CopyTradeContext
-	err := s.db.Where("trader_id = ? AND root_message_id = ? AND state IN ?", traderID, rootMessageID, activeStates).
-		First(&ctx).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	return &ctx, nil
-}
-
 // GetActiveContextBySymbol finds the active context for a symbol+direction.
 func (s *CopyTradeStore) GetActiveContextBySymbol(traderID, symbol, direction string) (*CopyTradeContext, error) {
 	q := s.db.Where("trader_id = ? AND symbol = ? AND state IN ?", traderID, symbol, activeStates)

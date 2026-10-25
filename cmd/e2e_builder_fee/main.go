@@ -20,7 +20,7 @@ type clearinghouseState struct {
 	CrossMarginSummary struct {
 		AccountValue string `json:"accountValue"`
 	} `json:"crossMarginSummary"`
-	Withdrawable    string `json:"withdrawable"`
+	Withdrawable   string `json:"withdrawable"`
 	AssetPositions []struct {
 		Position struct {
 			Coin          string `json:"coin"`

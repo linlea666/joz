@@ -31,17 +31,27 @@ const (
 	EvTradeOpened      = "copytrade.trade.opened"
 	EvTradeUpdated     = "copytrade.trade.updated"
 	EvTradeClosed      = "copytrade.trade.closed"
-	EvTradeCancelled   = "copytrade.trade.cancelled"
 	EvTradeExpired     = "copytrade.trade.expired"
 	EvEmergencyClose   = "copytrade.execution.emergency_close"
 	EvExecutionError   = "copytrade.execution.error"
 	EvReconcile        = "copytrade.reconcile.update"
+
+	// Managed order-leg progress, named by the leg's role (ENTRY_* legs keep
+	// EvEntrySubmitted). See managedLegEvent.
+	EvTPUpdated   = "copytrade.order.tp_updated"
+	EvExitUpdated = "copytrade.order.exit_updated"
+	EvRiskUpdated = "copytrade.order.risk_updated"
 )
 
 // EvSourceAuthorFiltered: the message author is not in the configured author
 // filter. The message is consumed without creating a signal; the event makes a
 // misconfigured filter visible.
 const EvSourceAuthorFiltered = "copytrade.source.author_filtered"
+
+// EvSourceRulesInvalid: the delivery's frozen rule snapshot cannot be decoded.
+// The message is rejected (consumed without a signal) instead of running with
+// empty rules, which would bypass the author filter.
+const EvSourceRulesInvalid = "copytrade.source.rules_invalid"
 
 // EventLogger writes trace events to the store and mirrors them to the
 // application log. Persistence failures never break the pipeline.

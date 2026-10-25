@@ -4,10 +4,10 @@ import "testing"
 
 func TestDrawdownCloseArmsOnPriceBasisOnly(t *testing.T) {
 	cases := []struct {
-		name         string
-		pricePnLPct  float64
-		drawdownPct  float64
-		shouldClose  bool
+		name        string
+		pricePnLPct float64
+		drawdownPct float64
+		shouldClose bool
 	}{
 		// +0.5% price move (what +5% margin at 10x used to arm on) must NOT
 		// arm the monitor, no matter how large the relative drawdown is.

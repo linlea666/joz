@@ -20,45 +20,20 @@ func managedNumber(v interface{}) float64 {
 	return n
 }
 
+// MarketRules returns verified trading rules, reusing a per-symbol TTL cache
+// (see market_rules_cache.go). Each call gets its own copy.
 func (t *FuturesTrader) MarketRules(symbol string) (*types.ManagedMarketRules, error) {
-	info, err := t.client.NewExchangeInfoService().Do(context.Background())
-	if err != nil {
-		return nil, err
+	e, found, err := t.loadSymbol(symbol)
+	if !found {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %s is not listed on Binance Futures", types.ErrInstrumentUnavailable, symbol)
 	}
-	for _, s := range info.Symbols {
-		if s.Symbol != symbol {
-			continue
-		}
-		r := &types.ManagedMarketRules{Symbol: s.Symbol, Status: s.Status, ContractType: string(s.ContractType), QuoteAsset: s.QuoteAsset}
-		for _, f := range s.Filters {
-			switch f["filterType"] {
-			case "LOT_SIZE":
-				r.QuantityStep = managedNumber(f["stepSize"])
-				r.MinQuantity = managedNumber(f["minQty"])
-				r.MaxQuantity = managedNumber(f["maxQty"])
-			case "MARKET_LOT_SIZE":
-				r.MarketQuantityStep = managedNumber(f["stepSize"])
-				r.MarketMinQuantity = managedNumber(f["minQty"])
-				r.MarketMaxQuantity = managedNumber(f["maxQty"])
-			case "PRICE_FILTER":
-				r.PriceTick = managedNumber(f["tickSize"])
-				r.MinPrice = managedNumber(f["minPrice"])
-				r.MaxPrice = managedNumber(f["maxPrice"])
-			case "MIN_NOTIONAL":
-				r.MinNotional = managedNumber(f["notional"])
-			case "PERCENT_PRICE":
-				r.PercentPriceUp = managedNumber(f["multiplierUp"])
-				r.PercentPriceDown = managedNumber(f["multiplierDown"])
-			}
-		}
-		if r.Status != "TRADING" || (r.ContractType != "PERPETUAL" && r.ContractType != "TRADIFI_PERPETUAL") || r.QuoteAsset != "USDT" || r.QuantityStep <= 0 || r.PriceTick <= 0 {
-			// Preserve observed rules for diagnostics; callers must still honor
-			// the error and cannot use rejected rules for order submission.
-			return r, fmt.Errorf("%w: %s is not a supported tradable USDT perpetual or has incomplete rules (status=%s, contract_type=%s, quote_asset=%s)", types.ErrInstrumentUnavailable, symbol, r.Status, r.ContractType, r.QuoteAsset)
-		}
-		return r, nil
-	}
-	return nil, fmt.Errorf("%w: %s is not listed on Binance Futures", types.ErrInstrumentUnavailable, symbol)
+	r := e.rules
+	// Rejected rules are returned for diagnostics only; callers must still
+	// honor the error and cannot use them for order submission.
+	return &r, err
 }
 
 func (t *FuturesTrader) SubmitManagedOrder(req *types.ManagedOrderRequest) (*types.ManagedOrderResult, error) {

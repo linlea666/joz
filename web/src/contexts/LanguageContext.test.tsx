@@ -26,7 +26,9 @@ describe('Chinese-default language policy', () => {
     )
 
     expect(screen.getByTestId('lang').textContent).toBe('zh')
-    await waitFor(() => expect(localStorage.getItem('nofx_language')).toBe('zh'))
+    await waitFor(() =>
+      expect(localStorage.getItem('nofx_language')).toBe('zh')
+    )
   })
 
   it('ignores the legacy `language` key that was force-written while the UI was English-only', () => {
@@ -74,7 +76,9 @@ describe('Chinese-default language policy', () => {
 
     screen.getByRole('button', { name: 'to-en' }).click()
 
-    await waitFor(() => expect(screen.getByTestId('lang').textContent).toBe('en'))
+    await waitFor(() =>
+      expect(screen.getByTestId('lang').textContent).toBe('en')
+    )
     expect(localStorage.getItem('nofx_language')).toBe('en')
   })
 

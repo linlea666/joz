@@ -175,10 +175,10 @@ func confirmBreakout(state *BreakoutState, currentLevel market.BreakoutLevel, di
 type BreakoutAction int
 
 const (
-	BreakoutActionNone BreakoutAction = iota
-	BreakoutActionReducePosition // Short box breakout: reduce to 50%
-	BreakoutActionPauseGrid      // Mid box breakout: pause grid + cancel orders
-	BreakoutActionCloseAll       // Long box breakout: pause + cancel + close all
+	BreakoutActionNone           BreakoutAction = iota
+	BreakoutActionReducePosition                // Short box breakout: reduce to 50%
+	BreakoutActionPauseGrid                     // Mid box breakout: pause grid + cancel orders
+	BreakoutActionCloseAll                      // Long box breakout: pause + cancel + close all
 )
 
 // getBreakoutAction returns the appropriate action for a breakout level

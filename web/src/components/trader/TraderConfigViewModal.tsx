@@ -3,42 +3,63 @@ import {
   entryPolicyLabel,
 } from './EntryPolicyThresholds'
 import { useCopyTradeProfiles } from '../../hooks/useCopyTradeProfiles'
-import type { CopyTradingConfig, TraderConfigData } from '../../types'
+import type { CopyTradingConfig, Exchange, TraderConfigData } from '../../types'
+import { DEFAULT_COPY_TRADING_CONFIG } from '../../types'
 import { t } from '../../i18n/translations'
 import { useLanguage } from '../../contexts/LanguageContext'
 import { PunkAvatar, getTraderAvatar } from '../common/PunkAvatar'
+import { getShortName } from './utils'
 
-// Extract the name part after the last underscore
-function getShortName(fullName: string): string {
-  const parts = fullName.split('_')
-  return parts.length > 1 ? parts[parts.length - 1] : fullName
+/** Effective values: the backend applies the same defaults to absent fields. */
+function parseEffectiveCopyConfig(raw?: string): CopyTradingConfig | null {
+  try {
+    return { ...DEFAULT_COPY_TRADING_CONFIG, ...JSON.parse(raw || '{}') }
+  } catch {
+    return null // show no guessed settings
+  }
+}
+
+type ViewTraderData = TraderConfigData & {
+  /** Exchange type reported by the public config endpoint. */
+  exchange?: string
+}
+
+/** Exchange name for display; never a truncated account UUID. */
+function exchangeDisplayName(
+  traderData: ViewTraderData,
+  exchanges: Exchange[] = []
+): string {
+  const account = exchanges.find((e) => e.id === traderData.exchange_id)
+  if (account) {
+    const base = (account.name || account.exchange_type || '').toUpperCase()
+    return account.account_name ? `${base} - ${account.account_name}` : base
+  }
+  if (traderData.exchange) return traderData.exchange.toUpperCase()
+  return '—'
 }
 
 interface TraderConfigViewModalProps {
   isOpen: boolean
   onClose: () => void
-  traderData?: TraderConfigData | null
+  traderData?: ViewTraderData | null
+  /** The viewer's exchange accounts, used to name the bound account. */
+  exchanges?: Exchange[]
 }
 
 export function TraderConfigViewModal({
   isOpen,
   onClose,
   traderData,
+  exchanges,
 }: TraderConfigViewModalProps) {
   const { language } = useLanguage()
-  const { profiles } = useCopyTradeProfiles(
-    isOpen && traderData?.trader_type === 'copy_trading'
-  )
+  const isCopyTrading = traderData?.trader_type === 'copy_trading'
+  const { profiles } = useCopyTradeProfiles(isOpen && isCopyTrading)
   if (!isOpen || !traderData) return null
 
-  let copyConfig: Partial<CopyTradingConfig> | null = null
-  if (traderData.trader_type === 'copy_trading') {
-    try {
-      copyConfig = JSON.parse(traderData.copy_trading_config || '{}')
-    } catch {
-      /* show no guessed settings */
-    }
-  }
+  const copyConfig = isCopyTrading
+    ? parseEffectiveCopyConfig(traderData.copy_trading_config)
+    : null
 
   const InfoRow = ({
     label,
@@ -58,6 +79,17 @@ export function TraderConfigViewModal({
       </span>
     </div>
   )
+
+  const riskModeLabel = (mode: CopyTradingConfig['risk_mode']) =>
+    t(
+      `copytrade.${({ by_loss: 'riskByLoss', percent: 'riskPercent', fixed: 'riskFixed' } as const)[mode] ?? 'riskByLoss'}`,
+      language
+    )
+
+  const notional = (cfg: CopyTradingConfig) =>
+    cfg.max_position_notional_usd > 0
+      ? `$${cfg.max_position_notional_usd.toLocaleString()}`
+      : `$${DEFAULT_COPY_TRADING_CONFIG.max_position_notional_usd.toLocaleString()}${t('copytrade.defaultValueSuffix', language)}`
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm">
@@ -124,56 +156,75 @@ export function TraderConfigViewModal({
                 value={traderData.trader_name}
               />
               <InfoRow
-                label={t('traderConfigView.aiModel', language)}
-                value={getShortName(traderData.ai_model).toUpperCase()}
+                label={
+                  isCopyTrading
+                    ? t('copytrade.parseModel', language)
+                    : t('traderConfigView.aiModel', language)
+                }
+                value={getShortName(traderData.ai_model || '').toUpperCase()}
               />
               <InfoRow
                 label={t('traderConfigView.exchange', language)}
-                value={getShortName(traderData.exchange_id).toUpperCase()}
+                value={exchangeDisplayName(traderData, exchanges)}
               />
-              <InfoRow
-                label={t('traderConfigView.initialBalance', language)}
-                value={`$${traderData.initial_balance.toLocaleString()}`}
-              />
-              <InfoRow
-                label={t('traderConfigView.marginMode', language)}
-                value={
-                  traderData.is_cross_margin
-                    ? t('traderConfigView.crossMargin', language)
-                    : t('traderConfigView.isolatedMargin', language)
-                }
-              />
-              <InfoRow
-                label={t('traderConfigView.scanIntervalLabel', language)}
-                value={t('traderConfigView.scanInterval', language, {
-                  minutes: traderData.scan_interval_minutes || 15,
-                })}
-              />
+              {typeof traderData.initial_balance === 'number' && (
+                <InfoRow
+                  label={t('traderConfigView.initialBalance', language)}
+                  value={`$${traderData.initial_balance.toLocaleString()}`}
+                />
+              )}
+              {/* Copy trading neither scans nor sets the margin mode. */}
+              {!isCopyTrading && (
+                <>
+                  <InfoRow
+                    label={t('traderConfigView.marginMode', language)}
+                    value={
+                      traderData.is_cross_margin
+                        ? t('traderConfigView.crossMargin', language)
+                        : t('traderConfigView.isolatedMargin', language)
+                    }
+                  />
+                  <InfoRow
+                    label={t('traderConfigView.scanIntervalLabel', language)}
+                    value={t('traderConfigView.scanInterval', language, {
+                      minutes: traderData.scan_interval_minutes || 15,
+                    })}
+                  />
+                </>
+              )}
             </div>
           </div>
 
           {copyConfig && (
-            <div className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5">
+            <div
+              className="bg-nofx-bg border border-nofx-gold/20 rounded-lg p-5"
+              data-testid="copy-config-view"
+            >
+              <h3 className="text-lg font-semibold text-nofx-text mb-4">
+                {t('copytrade.viewTitle', language)}
+              </h3>
               <InfoRow
-                label={language === 'zh' ? '来源模式' : 'Source mode'}
+                label={t('copytrade.sourceMode', language)}
                 value={copyConfig.source_mode || 'channel'}
               />
               <InfoRow
-                label={language === 'zh' ? '实际监听频道' : 'Source channels'}
+                label={t('copytrade.sourceChannels', language)}
                 value={(copyConfig.source_channel_ids?.length
                   ? copyConfig.source_channel_ids
                   : [copyConfig.primary_channel_id]
                 ).join(', ')}
               />
               <InfoRow
-                label={language === 'zh' ? '精确作者过滤' : 'Exact authors'}
-                value={
-                  [
-                    ...(copyConfig.source_author_ids || []),
-                    ...(copyConfig.source_author_names || []),
-                  ].join(', ') || '—'
-                }
+                label={t('copytrade.authorIds', language)}
+                value={(copyConfig.source_author_ids || []).join(', ') || '—'}
               />
+              <InfoRow
+                label={t('copytrade.authorNames', language)}
+                value={(copyConfig.source_author_names || []).join(', ') || '—'}
+              />
+              <p className="text-xs text-nofx-text-muted mt-1 mb-2">
+                {t('copytrade.authorFilterBoth', language)}
+              </p>
               <InfoRow
                 label={t('copytrade.interpretationProfile', language)}
                 value={
@@ -184,6 +235,60 @@ export function TraderConfigViewModal({
                   copyConfig.interpretation_profile ||
                   t('copytrade.profileDefault', language)
                 }
+              />
+              <InfoRow
+                label={t('copytrade.riskMode', language)}
+                value={riskModeLabel(copyConfig.risk_mode)}
+              />
+              <InfoRow
+                label={
+                  copyConfig.risk_mode === 'percent'
+                    ? t('copytrade.riskAmountPct', language)
+                    : t('copytrade.riskAmountUsd', language)
+                }
+                value={
+                  copyConfig.risk_mode === 'percent'
+                    ? `${copyConfig.risk_amount_usd}%`
+                    : `$${copyConfig.risk_amount_usd}`
+                }
+              />
+              <InfoRow
+                label={t('copytrade.majorLeverage', language)}
+                value={`${copyConfig.major_leverage}x`}
+              />
+              <InfoRow
+                label={t('copytrade.altLeverage', language)}
+                value={`${copyConfig.altcoin_leverage}x`}
+              />
+              <InfoRow
+                label={t('copytrade.maxNotional', language)}
+                value={notional(copyConfig)}
+              />
+              <InfoRow
+                label={t('copytrade.maxPositions', language)}
+                value={copyConfig.max_open_positions}
+              />
+              <InfoRow
+                label={t('copytrade.tpRatios', language)}
+                value={copyConfig.default_tp_ratios || '50,30,20'}
+              />
+              <InfoRow
+                label={t('copytrade.entryTimeout', language)}
+                value={
+                  copyConfig.entry_timeout_minutes === 0
+                    ? t('copytrade.entryTimeoutNever', language)
+                    : t('copytrade.minutesValue', language, {
+                        minutes: copyConfig.entry_timeout_minutes,
+                      })
+                }
+              />
+              <InfoRow
+                label={t('copytrade.majorOffset', language)}
+                value={`${copyConfig.major_price_offset_pct}%`}
+              />
+              <InfoRow
+                label={t('copytrade.altOffset', language)}
+                value={`${copyConfig.altcoin_price_offset_pct}%`}
               />
               <InfoRow
                 label={t('copytrade.entryPolicy', language)}
@@ -203,6 +308,14 @@ export function TraderConfigViewModal({
               <InfoRow
                 label={t('copytrade.reduceDefault', language)}
                 value={`${copyConfig.default_reduce_ratio ?? 50}%`}
+              />
+              <InfoRow
+                label={t('copytrade.paused', language)}
+                value={!!copyConfig.paused}
+              />
+              <InfoRow
+                label={t('copytrade.dupProtection', language)}
+                value={t('copytrade.alwaysOn', language)}
               />
               <p className="text-xs text-nofx-text-muted mt-2">
                 {t('copytrade.rulesHint', language)}

@@ -152,13 +152,22 @@ describe('Hyperliquid guided connection', () => {
   it('does not expose a global Hyperliquid setup panel in the header', () => {
     render(
       <MemoryRouter>
-        <CopyTradeLogModal traderId="test" traderName="Test" language="en" onClose={() => {}} />
+        <CopyTradeLogModal
+          traderId="test"
+          traderName="Test"
+          language="en"
+          onClose={() => {}}
+        />
         <HeaderBar language="en" isLoggedIn={false} />
       </MemoryRouter>
     )
 
-    expect(screen.queryByRole('button', { name: 'Connect Hyperliquid' })).toBeNull()
-    expect(screen.queryByRole('heading', { name: 'Connect Hyperliquid' })).toBeNull()
+    expect(
+      screen.queryByRole('button', { name: 'Connect Hyperliquid' })
+    ).toBeNull()
+    expect(
+      screen.queryByRole('heading', { name: 'Connect Hyperliquid' })
+    ).toBeNull()
   })
 
   it('explains the authorization outcome before asking for a signature', () => {

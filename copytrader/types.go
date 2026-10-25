@@ -167,8 +167,7 @@ type SourceInterpretation struct {
 	ReduceTPLevel      int       `json:"reduce_tp_level,omitempty"`
 	CancelPendingEntry bool      `json:"cancel_pending_entry,omitempty"`
 	CloseMode          CloseMode `json:"close_mode,omitempty"`
-	CloseRatio         *float64  `json:"close_ratio,omitempty"`    // PARTIAL close percentage (0-100)
-	CloseTPLevel       *int      `json:"close_tp_level,omitempty"` // "TP2 hit" style partial closes
+	CloseRatio         *float64  `json:"close_ratio,omitempty"` // PARTIAL close percentage (0-100)
 
 	EntryOrders      []EntryOrder      `json:"entry_orders,omitempty"`
 	TakeProfitLevels []TPLevel         `json:"take_profit_levels,omitempty"`

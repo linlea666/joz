@@ -53,7 +53,7 @@ func TestTruncateMessages_TruncatesOldest(t *testing.T) {
 	// Create messages that definitely exceed a small context limit
 	msgs := []map[string]string{
 		{"role": "system", "content": "System prompt"},
-		{"role": "user", "content": strings.Repeat("old message ", 500)},     // ~2000 chars
+		{"role": "user", "content": strings.Repeat("old message ", 500)},      // ~2000 chars
 		{"role": "assistant", "content": strings.Repeat("old reply ", 500)},   // ~2000 chars
 		{"role": "user", "content": strings.Repeat("newer msg ", 500)},        // ~2000 chars
 		{"role": "assistant", "content": strings.Repeat("newer reply ", 500)}, // ~2000 chars

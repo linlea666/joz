@@ -32,12 +32,14 @@ func (t *FuturesTrader) accountTradesFromID(ctx context.Context, symbol string, 
 	if err != nil {
 		return nil, fmt.Errorf("unsupported history signing configuration")
 	}
-	signature, err := signer(t.client.SecretKey, q.Encode())
+	// Same layout as the SDK: sign the exact query string and append the
+	// signature last, so the server verifies the bytes that were signed.
+	qs := q.Encode()
+	signature, err := signer(t.client.SecretKey, qs)
 	if err != nil {
 		return nil, fmt.Errorf("history signing failed")
 	}
-	q.Set("signature", *signature)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(t.client.BaseURL, "/")+"/fapi/v1/userTrades?"+q.Encode(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(t.client.BaseURL, "/")+"/fapi/v1/userTrades?"+qs+"&signature="+url.QueryEscape(*signature), nil)
 	if err != nil {
 		return nil, fmt.Errorf("invalid history endpoint")
 	}
@@ -107,6 +109,10 @@ func decodeAccountTrades(accountTrades []*futures.AccountTrade) ([]types.TradeRe
 			RealizedPnL:  pnl,
 			Fee:          fee,
 			Time:         time.UnixMilli(at.Time).UTC(),
+			FeeAsset:     strings.ToUpper(strings.TrimSpace(at.CommissionAsset)),
+		}
+		if at.OrderID > 0 {
+			trade.OrderID = strconv.FormatInt(at.OrderID, 10)
 		}
 		trades = append(trades, trade)
 	}

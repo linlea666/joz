@@ -1,7 +1,6 @@
 package copytrader
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -169,17 +168,6 @@ func (e *Engine) reconcileLegacyEntry(traceID string, ctx *store.CopyTradeContex
 			e.events.Info(traceID, "", "", EvTradeExpired, "entry timed out; no fills", nil)
 		}
 	}
-}
-
-func recipePlan(ctx *store.CopyTradeContext) *OpenPlan {
-	var r TPRecipe
-	if json.Unmarshal([]byte(ctx.TPRecipeJSON), &r) != nil || r.Version != 1 {
-		for _, tp := range readTPPlan(ctx) {
-			r.Prices = append(r.Prices, tp.Price)
-			r.Ratios = append(r.Ratios, tp.Quantity)
-		}
-	}
-	return &OpenPlan{Symbol: ctx.Symbol, Direction: Direction(ctx.Direction), StopLoss: ctx.StopLossPrice, TPPrices: r.Prices, TPRatios: r.Ratios, Leverage: ctx.Leverage}
 }
 
 func entryExpired(ctx *store.CopyTradeContext, legacyMinutes int) bool {

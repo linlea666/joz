@@ -343,12 +343,12 @@ func TestKuCoinValueCalculation(t *testing.T) {
 
 	var rawResponse struct {
 		Items []struct {
-			Symbol    string `json:"symbol"`
-			TradeId   string `json:"tradeId"`
-			Price     string `json:"price"`
-			Size      int64  `json:"size"`
-			Value     string `json:"value"` // This is the actual USDT value from API
-			Side      string `json:"side"`
+			Symbol  string `json:"symbol"`
+			TradeId string `json:"tradeId"`
+			Price   string `json:"price"`
+			Size    int64  `json:"size"`
+			Value   string `json:"value"` // This is the actual USDT value from API
+			Side    string `json:"side"`
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(data, &rawResponse); err != nil {
@@ -517,13 +517,13 @@ func TestKuCoinPnLCalculation(t *testing.T) {
 
 	// Group by symbol and calculate P&L
 	type SymbolPnL struct {
-		Symbol       string
-		TotalFees    float64
-		GrossPnL     float64 // From price difference
-		NetPnL       float64 // Gross - fees
-		OpenQty      float64
-		CloseQty     float64
-		AvgOpenPrice float64
+		Symbol        string
+		TotalFees     float64
+		GrossPnL      float64 // From price difference
+		NetPnL        float64 // Gross - fees
+		OpenQty       float64
+		CloseQty      float64
+		AvgOpenPrice  float64
 		AvgClosePrice float64
 	}
 	pnlBySymbol := make(map[string]*SymbolPnL)

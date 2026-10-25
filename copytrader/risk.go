@@ -5,6 +5,10 @@ import (
 	"math"
 )
 
+// MinStopDistanceRatio is the sizing floor for any by-loss leg: a stop closer
+// than 0.05% of that leg's entry would produce absurd quantities.
+const MinStopDistanceRatio = 0.0005
+
 // SizingInput carries everything the deterministic risk engine needs.
 // The AI never provides quantities; only prices and direction.
 type SizingInput struct {
@@ -16,7 +20,8 @@ type SizingInput struct {
 	StopLossPrice float64 // required for by_loss
 	Leverage      int
 
-	// Hard caps. Zero disables the individual cap.
+	// Hard caps. MaxPositionNotionalUSD is read through EffectiveNotionalCap
+	// (0 = the default cap, never unlimited); AvailableMarginUSD must be > 0.
 	MaxPositionNotionalUSD float64
 	AvailableMarginUSD     float64
 	MarginBufferPct        float64 // portion of available margin usable, default 0.9
@@ -70,7 +75,7 @@ func ComputePositionSize(in SizingInput) (*SizingResult, error) {
 			return nil, fmt.Errorf("stop loss equals entry price, cannot size by loss")
 		}
 		// Guard against absurd sizing from razor-thin stops (entry 100 / SL 99.95).
-		if riskPerUnit/in.EntryPrice < 0.0005 {
+		if riskPerUnit/in.EntryPrice < MinStopDistanceRatio {
 			return nil, fmt.Errorf("stop distance %.4f%% of entry is below the 0.05%% sizing floor", riskPerUnit/in.EntryPrice*100)
 		}
 		res.RiskPerUnit = riskPerUnit
@@ -90,12 +95,9 @@ func ComputePositionSize(in SizingInput) (*SizingResult, error) {
 	res.RawQuantity = qty
 
 	// Hard cap: max position notional.
-	if in.MaxPositionNotionalUSD > 0 {
-		maxQty := in.MaxPositionNotionalUSD / in.EntryPrice
-		if qty > maxQty {
-			qty = maxQty
-			res.AppliedConstraints = append(res.AppliedConstraints, "max_position_notional")
-		}
+	if maxQty := EffectiveNotionalCap(in.MaxPositionNotionalUSD) / in.EntryPrice; qty > maxQty {
+		qty = maxQty
+		res.AppliedConstraints = append(res.AppliedConstraints, "max_position_notional")
 	}
 
 	// Hard cap: available margin (with buffer for fees/slippage).
@@ -167,7 +169,7 @@ type entryDecision struct {
 // A zero threshold is handled separately and never gains any tolerance.
 const entryThresholdEpsilon = 1e-9
 
-// DecideEntryType applies the DIRECTION-AWARE price-deviation policy.
+// decideEntry applies the DIRECTION-AWARE price-deviation policy.
 //
 // "Favorable" means the live market is at or better than the author's
 // reference (long: market <= ref, short: market >= ref) — the follower's
@@ -186,11 +188,6 @@ const entryThresholdEpsilon = 1e-9
 //   - thresholdPct <= 0 disables the adverse tolerance entirely: only
 //     favorable prices enter at market, everything unfavorable rests as a
 //     limit at the reference.
-func DecideEntryType(direction Direction, spec PriceSpec, marketPrice, thresholdPct float64, limitToMarketWithin bool) (EntryPlanType, float64, error) {
-	d, err := decideEntry(direction, spec, marketPrice, thresholdPct, limitToMarketWithin)
-	return d.OrderType, d.EntryPrice, err
-}
-
 func decideEntry(direction Direction, spec PriceSpec, marketPrice, thresholdPct float64, limitToMarketWithin bool) (entryDecision, error) {
 	d := entryDecision{
 		Direction: direction, SourcePriceSpec: spec, MarketPrice: marketPrice,

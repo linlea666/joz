@@ -14,9 +14,21 @@ import (
 	"nofx/trader/types"
 )
 
-// Serialize copy-trade admission across engines sharing the same account.
-// Ownership is additionally verified in durable contexts and fresh positions.
-var managedAdmission sync.Mutex
+// managedAdmission serializes copy-trade admission per exchange account
+// (exchange_id -> *sync.Mutex): engines sharing one account still admit one
+// OPEN at a time, while different accounts no longer wait on each other's
+// exchange round-trips. The in-process lock is only the first line: durable
+// ownership (CopyTradeOwnership primary key on exchange_id/symbol/direction,
+// claimed in the context-creating transaction) plus the per-account fence row
+// (CopyTradeAccountFence, locked in that transaction) keep admission exclusive across
+// processes, and fresh positions/open orders are re-checked under the lock.
+var managedAdmission sync.Map
+
+// admissionLock returns the admission mutex of one exchange account.
+func admissionLock(exchangeID string) *sync.Mutex {
+	mu, _ := managedAdmission.LoadOrStore(exchangeID, &sync.Mutex{})
+	return mu.(*sync.Mutex)
+}
 
 // managedNotFoundGrace is how long an order row without a venue order ID may
 // stay SUBMITTING/UNKNOWN while the venue reports it as not found, before the
@@ -100,9 +112,60 @@ func (x *Executor) recordManagedResult(row *store.CopyTradeOrder, result *types.
 		if trace == "" {
 			trace = "reconcile-" + row.ContextID
 		}
-		x.events.Info(trace, row.SignalID, "", EvEntrySubmitted, fmt.Sprintf("%s %s %s: %s, filled %.8g/%.8g @ %.8g", row.Symbol, row.Direction, row.Role, row.Status, row.ExecutedQty, row.Quantity, row.AvgPrice), map[string]interface{}{"context_id": row.ContextID, "order_leg": row})
+		x.events.Info(trace, row.SignalID, "", managedLegEvent(row.Role), fmt.Sprintf("%s %s %s: %s, filled %.8g/%.8g @ %.8g", row.Symbol, row.Direction, row.Role, row.Status, row.ExecutedQty, row.Quantity, row.AvgPrice), map[string]interface{}{"context_id": row.ContextID, "order_leg": row})
+		if row.Status == "FILLED" && row.Role == "ENTRY_1" && row.OrderType == "MARKET" {
+			x.logMarketFillRisk(trace, row)
+		}
 	}
 	return nil
+}
+
+// managedLegEvent names a ledger leg's progress event by its role.
+func managedLegEvent(role string) string {
+	switch {
+	case strings.HasPrefix(role, "ENTRY_"):
+		return EvEntrySubmitted
+	case strings.HasPrefix(role, "TP_"):
+		return EvTPUpdated
+	case strings.HasPrefix(role, "CLOSE_risk-"):
+		return EvRiskUpdated
+	case strings.HasPrefix(role, "CLOSE_"):
+		return EvExitUpdated // author exits, TP replacements and emergency closes
+	}
+	return EvReconcile
+}
+
+// marketFillRiskWarnRatio: a single market entry whose filled risk exceeds the
+// planned risk by more than this fraction is reported as a warning.
+const marketFillRiskWarnRatio = 0.2
+
+// logMarketFillRisk compares the realized risk of a filled single-leg market
+// entry (fill price vs stop) with the risk planned at submission.
+func (x *Executor) logMarketFillRisk(trace string, row *store.CopyTradeOrder) {
+	ctx, err := x.st.CopyTrade().GetContext(row.ContextID)
+	if err != nil || ctx == nil || ctx.EntryPolicy == EntryPolicySplit {
+		return
+	}
+	stop := ctx.StopLossPrice
+	var plan managedEntryPlan
+	if json.Unmarshal([]byte(ctx.EntryPlanJSON), &plan) == nil && plan.StopLoss > 0 {
+		stop = plan.StopLoss
+	}
+	if stop <= 0 || row.Price <= 0 || row.AvgPrice <= 0 {
+		return
+	}
+	planned := row.Quantity * math.Abs(row.Price-stop)
+	actual := EffectiveRisk(row.ExecutedQty, row.AvgPrice, stop)
+	if planned <= 0 {
+		return
+	}
+	data := map[string]interface{}{"context_id": row.ContextID, "planned_risk_usd": planned, "actual_risk_usd": actual, "risk_budget_usd": plan.RiskBudget, "planned_price": row.Price, "fill_price": row.AvgPrice, "stop_loss": stop, "planned_quantity": row.Quantity, "filled_quantity": row.ExecutedQty}
+	msg := fmt.Sprintf("%s %s market entry filled: actual risk $%.2f vs planned $%.2f (fill %.8g vs plan %.8g, SL %.8g)", row.Symbol, row.Direction, actual, planned, row.AvgPrice, row.Price, stop)
+	if actual > planned*(1+marketFillRiskWarnRatio) {
+		x.events.Warn(trace, row.SignalID, "", EvQuantityPlan, msg+fmt.Sprintf(" — exceeds plan by %.1f%%", (actual/planned-1)*100), data)
+		return
+	}
+	x.events.Info(trace, row.SignalID, "", EvQuantityPlan, msg, data)
 }
 
 func (x *Executor) queryManaged(row *store.CopyTradeOrder) error {
@@ -246,6 +309,25 @@ func (x *Executor) cancelManaged(row *store.CopyTradeOrder) error {
 	return nil
 }
 
+// splitStopDistanceFloor applies the single-entry 0.05% stop-distance sizing
+// floor to BOTH legs of a shared-risk combination. A leg whose stop is too
+// close would carry an absurd quantity; the whole combination is rejected
+// (it is never silently converted into a single full-size entry).
+func splitStopDistanceFloor(first, second, stop float64) error {
+	for _, leg := range []struct {
+		name  string
+		price float64
+	}{{"first", first}, {"second", second}} {
+		if leg.price <= 0 {
+			return fmt.Errorf("%s leg price missing", leg.name)
+		}
+		if r := math.Abs(leg.price-stop) / leg.price; r < MinStopDistanceRatio {
+			return fmt.Errorf("%s leg stop distance %.4f%% of %.8g is below the %.2f%% sizing floor; combination rejected", leg.name, r*100, leg.price, MinStopDistanceRatio*100)
+		}
+	}
+	return nil
+}
+
 // splitQuantities allocates RISK, not equal coin amounts. Aggregate margin and
 // notional caps scale both legs together before flooring to venue lot sizes.
 func splitQuantities(plan *OpenPlan, rules *types.ManagedMarketRules) (float64, float64, error) {
@@ -256,13 +338,12 @@ func splitQuantities(plan *OpenPlan, rules *types.ManagedMarketRules) (float64, 
 	if d1 <= 0 || d2 <= 0 || (plan.Direction == DirectionLong && plan.SplitReference <= plan.StopLoss) || (plan.Direction == DirectionShort && plan.SplitReference >= plan.StopLoss) {
 		return 0, 0, fmt.Errorf("invalid split stop distance")
 	}
+	if err := splitStopDistanceFloor(plan.EntryPrice, plan.SplitReference, plan.StopLoss); err != nil {
+		return 0, 0, err
+	}
 	q1, q2 := plan.RiskBudget/2/d1, plan.RiskBudget/2/d2
 	notional := q1*plan.EntryPrice + q2*plan.SplitReference
-	cap := plan.MaxNotional
-	if cap <= 0 {
-		cap = 30000
-	}
-	cap = math.Min(cap, plan.AvailableMargin*.9*float64(plan.Leverage))
+	cap := math.Min(EffectiveNotionalCap(plan.MaxNotional), plan.AvailableMargin*.9*float64(plan.Leverage))
 	scale := math.Min(1, cap/notional)
 	q1 *= scale
 	q2 *= scale
@@ -323,7 +404,7 @@ func (x *Executor) executeManagedOpen(traceID, signalID string, plan *OpenPlan) 
 	if split {
 		policy = EntryPolicySplit
 	}
-	state := managedEntryPlan{Version: 1, RiskBudget: plan.RiskBudget, StopLoss: plan.StopLoss, MaxNotional: plan.MaxNotional, MarginBudget: plan.AvailableMargin * .9, SignalExpiresAt: plan.SignalExpiresAt, Rules: *rules, SplitReference: plan.SplitReference}
+	state := managedEntryPlan{Version: 1, RiskBudget: plan.RiskBudget, StopLoss: plan.StopLoss, MaxNotional: EffectiveNotionalCap(plan.MaxNotional), MarginBudget: plan.AvailableMargin * .9, SignalExpiresAt: plan.SignalExpiresAt, Rules: *rules, SplitReference: plan.SplitReference}
 	if len(plan.EntryDecisionJSON) > 0 {
 		var shape resolvedEntryPlan
 		if json.Unmarshal(plan.EntryDecisionJSON, &shape) == nil && shape.Decision.SourcePriceSpec.Type != "" {
@@ -410,9 +491,7 @@ func (x *Executor) revalidateDeferredMarket(ctx *store.CopyTradeContext, plan *m
 		}
 		qty = math.Min(qty, budget/math.Abs(market-stop))
 	}
-	if plan.MaxNotional > 0 {
-		qty = math.Min(qty, plan.MaxNotional/market)
-	}
+	qty = math.Min(qty, EffectiveNotionalCap(plan.MaxNotional)/market)
 	if plan.MarginBudget > 0 && ctx.Leverage > 0 {
 		qty = math.Min(qty, plan.MarginBudget*float64(ctx.Leverage)/market)
 	}
@@ -689,9 +768,7 @@ func (x *Executor) reconcileManagedEntry(traceID string, ctx *store.CopyTradeCon
 				budget := math.Max(0, plan.RiskBudget-used)
 				want := math.Min(o.Quantity, budget/math.Abs(o.Price-plan.StopLoss))
 				usedNotional := orders[0].ExecutedQty * orders[0].AvgPrice
-				if plan.MaxNotional > 0 {
-					want = math.Min(want, math.Max(0, plan.MaxNotional-usedNotional)/o.Price)
-				}
+				want = math.Min(want, math.Max(0, EffectiveNotionalCap(plan.MaxNotional)-usedNotional)/o.Price)
 				if plan.MarginBudget > 0 {
 					want = math.Min(want, math.Max(0, plan.MarginBudget*float64(ctx.Leverage)-usedNotional)/o.Price)
 				}
@@ -788,9 +865,7 @@ func (x *Executor) enforceManagedRisk(traceID string, ctx *store.CopyTradeContex
 	}
 	distance := math.Abs(ctx.AvgFillPrice - plan.StopLoss)
 	capQty := plan.RiskBudget / distance
-	if plan.MaxNotional > 0 {
-		capQty = math.Min(capQty, plan.MaxNotional/ctx.AvgFillPrice)
-	}
+	capQty = math.Min(capQty, EffectiveNotionalCap(plan.MaxNotional)/ctx.AvgFillPrice)
 	if plan.MarginBudget > 0 {
 		capQty = math.Min(capQty, plan.MarginBudget*float64(ctx.Leverage)/ctx.AvgFillPrice)
 	}
@@ -803,9 +878,7 @@ func (x *Executor) enforceManagedRisk(traceID string, ctx *store.CopyTradeContex
 	// Recompute after cancelling: that request may itself have raced a fill.
 	distance = math.Abs(ctx.AvgFillPrice - plan.StopLoss)
 	capQty = plan.RiskBudget / distance
-	if plan.MaxNotional > 0 {
-		capQty = math.Min(capQty, plan.MaxNotional/ctx.AvgFillPrice)
-	}
+	capQty = math.Min(capQty, EffectiveNotionalCap(plan.MaxNotional)/ctx.AvgFillPrice)
 	if plan.MarginBudget > 0 {
 		capQty = math.Min(capQty, plan.MarginBudget*float64(ctx.Leverage)/ctx.AvgFillPrice)
 	}
@@ -1203,6 +1276,10 @@ func (e *Engine) recoverPendingActions(ctx *store.CopyTradeContext) {
 		return
 	}
 	for _, a := range actions {
+		if TradeState(ctx.State).IsTerminal() && (a.Action == string(ActionOpen) || a.Action == string(ActionAdd)) {
+			e.settleTerminalEntryAction(ctx, a)
+			continue
+		}
 		if TradeState(ctx.State).IsTerminal() && a.Action != string(ActionCancel) && a.Action != string(ActionClose) && a.Action != string(ActionReduce) {
 			continue
 		}
@@ -1309,9 +1386,79 @@ func (e *Engine) recoverPendingActions(ctx *store.CopyTradeContext) {
 			continue
 		}
 		if err == nil {
-			_ = e.st.CopyTrade().UpdateAction(a.ID, map[string]interface{}{"status": "done", "error": ""})
+			if e.st.CopyTrade().UpdateAction(a.ID, map[string]interface{}{"status": "done", "error": ""}) == nil {
+				e.syncRecoveredSignal(a, store.SignalStatusExecuted, "")
+			}
 		}
 	}
+}
+
+// settleTerminalEntryAction closes an OPEN/ADD action that is still pending
+// (typically executing/waiting_admission after a deferred entry was revoked)
+// once its trade reached a terminal state with every entry leg settled.
+func (e *Engine) settleTerminalEntryAction(ctx *store.CopyTradeContext, a *store.CopyTradeAction) {
+	orders, err := e.exec.entryOrders(ctx)
+	if err != nil {
+		return
+	}
+	filled := ctx.EntryFilledQuantity > 0 || ctx.OpenedAt != nil
+	revoked := strings.HasPrefix(ctx.LastError, "ENTRY_REVOKED") || strings.HasPrefix(ctx.LastAction, "ENTRY_REVOKED")
+	for _, o := range orders {
+		if !orderTerminal(o.Status) {
+			return // a leg is still unresolved; keep the action pending
+		}
+		filled = filled || o.ExecutedQty > 0
+		revoked = revoked || (o.Status == "ABANDONED" && o.OrderID == "")
+	}
+	phase, signalStatus, skip := "completed", store.SignalStatusExecuted, ""
+	switch {
+	case filled:
+	case revoked:
+		phase, signalStatus, skip = "admission_revoked", store.SignalStatusSkipped, "ENTRY_ADMISSION_REVOKED"
+	case ctx.State == string(StateExpired):
+		phase, signalStatus, skip = "expired", store.SignalStatusSkipped, string(SkipExpired)
+	default:
+		phase, signalStatus, skip = "cancelled", store.SignalStatusSkipped, "ENTRY_CANCELLED"
+	}
+	updates := map[string]interface{}{"status": "done", "phase": phase}
+	if phase != "completed" && a.Error == "" && ctx.LastError != "" {
+		updates["error"] = ctx.LastError
+	}
+	if err = e.st.CopyTrade().UpdateAction(a.ID, updates); err != nil {
+		return
+	}
+	e.events.Info("reconcile-"+ctx.ID, a.SignalID, a.MessageID, EvReconcile,
+		fmt.Sprintf("%s %s %s action settled after trade became %s: phase %s", ctx.Symbol, ctx.Direction, a.Action, ctx.State, phase),
+		map[string]interface{}{"context_id": ctx.ID, "action_id": a.ID, "phase": phase})
+	e.syncRecoveredSignal(a, signalStatus, skip)
+}
+
+// syncRecoveredSignal moves a signal that is still waiting on recovery
+// (executing / execution_wait) to its recovered outcome, once none of its
+// recorded actions remain unresolved. Committed outcomes are never rewritten.
+func (e *Engine) syncRecoveredSignal(a *store.CopyTradeAction, status, skipReason string) {
+	if a.SignalID == "" {
+		return
+	}
+	sig, err := e.st.CopyTrade().GetSignal(a.SignalID)
+	if err != nil || sig == nil || (sig.Status != store.SignalStatusExecuting && sig.Status != "execution_wait") {
+		return
+	}
+	if actions, aerr := e.st.CopyTrade().GetActionsForMessage(e.traderID, a.MessageID); aerr != nil {
+		return
+	} else {
+		for _, other := range actions {
+			if other.SignalID == a.SignalID && other.ID != a.ID && (other.Status == "executing" || other.Status == "uncertain") {
+				return
+			}
+		}
+	}
+	updates := map[string]interface{}{"status": status, "next_retry_at": nil, "skip_reason": skipReason}
+	if err = e.st.CopyTrade().UpdateSignal(a.SignalID, updates); err != nil {
+		return
+	}
+	e.events.Info("reconcile-action-"+a.ID, a.SignalID, a.MessageID, EvReconcile,
+		fmt.Sprintf("signal outcome recovered: %s %s", status, skipReason), map[string]interface{}{"action_id": a.ID, "context_id": a.ContextID})
 }
 
 // Orphan intents have no exchange side effects if they never passed preflight.
