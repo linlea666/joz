@@ -38,11 +38,11 @@ func (t *KuCoinTrader) GetBalance() (map[string]interface{}, error) {
 	}
 
 	result := map[string]interface{}{
-		"totalWalletBalance":    account.MarginBalance,        // Wallet balance (without unrealized PnL)
+		"totalWalletBalance":    account.MarginBalance, // Wallet balance (without unrealized PnL)
 		"availableBalance":      account.AvailableBalance,
 		"totalUnrealizedProfit": account.UnrealisedPNL,
 		"total_equity":          account.AccountEquity,
-		"totalEquity":           account.AccountEquity,        // For GetAccountInfo compatibility
+		"totalEquity":           account.AccountEquity, // For GetAccountInfo compatibility
 	}
 
 	logger.Infof("✓ KuCoin balance: Total equity=%.2f, Available=%.2f, Unrealized PnL=%.2f",

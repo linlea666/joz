@@ -22,7 +22,7 @@ import (
 // Inherits TraderTestSuite and adds Aster specific mock logic
 type AsterTraderTestSuite struct {
 	*testutil.TraderTestSuite // Embeds base test suite
-	mockServer              *httptest.Server
+	mockServer                *httptest.Server
 }
 
 // NewAsterTraderTestSuite creates Aster test suite
