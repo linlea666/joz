@@ -24,6 +24,7 @@ import { api } from '../../lib/api'
 import { toast } from 'sonner'
 import { useCopyTradeProfiles } from '../../hooks/useCopyTradeProfiles'
 import { NofxSelect } from '../ui/select'
+import { getShortName } from './utils'
 import { confirmToast } from '../../lib/notify'
 import {
   applyNumericInputs,
@@ -45,12 +46,6 @@ const CHANNEL_PROFILE_TEMPLATE_EN = `How they post entries:
 - Noise to ignore:
 - Slang:
 - Images / cards:`
-
-// Extract the name part after the underscore
-function getShortName(fullName: string): string {
-  const parts = fullName.split('_')
-  return parts.length > 1 ? parts[parts.length - 1] : fullName
-}
 
 function getStrategyAIConfig(strategy: Strategy) {
   return (

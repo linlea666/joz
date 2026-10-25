@@ -31,11 +31,9 @@ export function getModelDisplayName(modelId: string): string {
   }
 }
 
-// Extract name part after underscore
-export function getShortName(fullName: string): string {
-  const parts = fullName.split('_')
-  return parts.length > 1 ? parts[parts.length - 1] : fullName
-}
+// Single shared implementation lives in ./utils; re-exported for existing
+// importers of model-constants.
+export { getShortName } from './utils'
 
 export const DEFAULT_CLAW402_MODEL = 'gpt-5.6'
 

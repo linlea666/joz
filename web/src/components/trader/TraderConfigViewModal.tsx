@@ -8,12 +8,7 @@ import { DEFAULT_COPY_TRADING_CONFIG } from '../../types'
 import { t } from '../../i18n/translations'
 import { useLanguage } from '../../contexts/LanguageContext'
 import { PunkAvatar, getTraderAvatar } from '../common/PunkAvatar'
-
-// Extract the name part after the last underscore
-function getShortName(fullName: string): string {
-  const parts = fullName.split('_')
-  return parts.length > 1 ? parts[parts.length - 1] : fullName
-}
+import { getShortName } from './utils'
 
 /** Effective values: the backend applies the same defaults to absent fields. */
 function parseEffectiveCopyConfig(raw?: string): CopyTradingConfig | null {

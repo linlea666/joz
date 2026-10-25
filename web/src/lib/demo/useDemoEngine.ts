@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type {
   AccountInfo,
   Position,
@@ -477,25 +477,24 @@ function build(S: SimState): DemoDataset {
 }
 
 export function useDemoEngine(active: boolean): DemoDataset | null {
-  const ref = useRef<SimState | null>(null)
-  const [, tick] = useState(0)
+  // The mutable simulation state lives only inside the effect; every tick
+  // publishes a freshly built dataset through state, so render never reads a
+  // ref.
+  const [data, setData] = useState<DemoDataset | null>(null)
 
   useEffect(() => {
     if (!active) {
-      ref.current = null
+      setData(null)
       return
     }
-    ref.current = initState()
-    tick((n) => n + 1)
+    const sim = initState()
+    setData(build(sim))
     const id = setInterval(() => {
-      if (ref.current) {
-        step(ref.current)
-        tick((n) => n + 1)
-      }
+      step(sim)
+      setData(build(sim))
     }, TICK_MS)
     return () => clearInterval(id)
   }, [active])
 
-  if (!active || !ref.current) return null
-  return build(ref.current)
+  return active ? data : null
 }

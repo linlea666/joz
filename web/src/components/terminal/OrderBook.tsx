@@ -428,15 +428,17 @@ function Row({ px, sz, cum, maxCum, side, h, mark }: RowProps) {
       : 'linear-gradient(to left, rgba(46,139,87,0.36), rgba(46,139,87,0.05))'
   const isMark = mark != null && px === mark
 
-  // this Row instance is keyed by price, so these refs persist across updates —
+  // this Row instance is keyed by price, so this state persists across updates —
   // we flash green/red only when THIS level's size actually changes, and keep
   // the direction class fixed until the next change so the animation isn't cut
-  // short by the 60fps re-renders.
-  const prevSz = useRef(sz)
-  const dirRef = useRef('')
-  if (sz !== prevSz.current) {
-    dirRef.current = sz > prevSz.current ? 'ob-up' : 'ob-dn'
-    prevSz.current = sz
+  // short by the 60fps re-renders. (React's "adjust state when a prop changes"
+  // pattern: the conditional setState re-renders this Row before commit
+  // instead of reading/writing refs during render.)
+  const [prevSz, setPrevSz] = useState(sz)
+  const [dir, setDir] = useState('')
+  if (sz !== prevSz) {
+    setDir(sz > prevSz ? 'ob-up' : 'ob-dn')
+    setPrevSz(sz)
   }
 
   return (
@@ -452,7 +454,7 @@ function Row({ px, sz, cum, maxCum, side, h, mark }: RowProps) {
           animation) exactly when this level's size changes */}
       <div
         key={sz}
-        className={dirRef.current}
+        className={dir}
         style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }}
       />
       <div
