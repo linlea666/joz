@@ -13,8 +13,39 @@ import (
 
 var _ types.StopOrderReader = (*FuturesTrader)(nil)
 
+// maxRememberedStopAlgoIDs bounds the in-memory clientAlgoId -> algoId map.
+const maxRememberedStopAlgoIDs = 4096
+
+func stopAlgoKey(symbol, clientID string) string { return symbol + "\x00" + clientID }
+
+func (t *FuturesTrader) rememberStopAlgoID(symbol, clientID string, algoID int64) {
+	if clientID == "" || algoID <= 0 {
+		return
+	}
+	t.stopAlgoIDsMu.Lock()
+	defer t.stopAlgoIDsMu.Unlock()
+	if t.stopAlgoIDs == nil || len(t.stopAlgoIDs) >= maxRememberedStopAlgoIDs {
+		// Losing entries only falls back to the clientAlgoId query.
+		t.stopAlgoIDs = make(map[string]int64)
+	}
+	t.stopAlgoIDs[stopAlgoKey(symbol, clientID)] = algoID
+}
+
+func (t *FuturesTrader) rememberedStopAlgoID(symbol, clientID string) int64 {
+	t.stopAlgoIDsMu.Lock()
+	defer t.stopAlgoIDsMu.Unlock()
+	return t.stopAlgoIDs[stopAlgoKey(symbol, clientID)]
+}
+
 func (t *FuturesTrader) GetStopOrder(symbol, orderID, clientID string) (*types.StopOrderResult, error) {
 	svc := t.client.NewGetAlgoOrderService()
+	if orderID == "" && clientID != "" {
+		// Prefer the algoId the placement response returned. The identity check
+		// below still requires the venue's clientAlgoId to equal clientID.
+		if id := t.rememberedStopAlgoID(symbol, clientID); id > 0 {
+			orderID = strconv.FormatInt(id, 10)
+		}
+	}
 	if orderID != "" {
 		id, err := strconv.ParseInt(orderID, 10, 64)
 		if err != nil || id <= 0 {

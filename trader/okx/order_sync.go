@@ -3,14 +3,18 @@ package okx
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"nofx/logger"
 	"nofx/market"
 	"nofx/store"
 	"nofx/trader/syncloop"
+	"nofx/trader/types"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // OKXTrade represents a trade record from OKX fills history
@@ -29,10 +33,28 @@ type OKXTrade struct {
 	ExecTime    time.Time
 	IsMaker     bool
 	OrderType   string
-	OrderAction string // open_long, open_short, close_long, close_short
+	OrderAction string  // open_long, open_short, close_long, close_short; "" for net (one-way) fills
+	FillPnL     float64 // fillPnl reported by OKX (used to classify net-mode fills)
 }
 
-// GetTrades retrieves trade/fill records from OKX
+// okxHistoryOrderActionReview marks net-mode fills whose direction cannot be
+// determined safely; they are stored but do not move positions.
+const okxHistoryOrderActionReview = "review"
+
+func parseOKXHistoryNumber(field, raw string, optional bool) (float64, error) {
+	if raw == "" && optional {
+		return 0, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("malformed fill %s %q", field, raw)
+	}
+	return v, nil
+}
+
+// GetTrades retrieves trade/fill records from OKX. Fill sizes are contracts;
+// they are converted with the instrument's contract value, and the whole batch
+// fails when that value is unavailable rather than recording contracts as coins.
 func (t *OKXTrader) GetTrades(startTime time.Time, limit int) ([]OKXTrade, error) {
 	if limit <= 0 {
 		limit = 100
@@ -62,6 +84,7 @@ func (t *OKXTrader) GetTrades(startTime time.Time, limit int) ([]OKXTrade, error
 		PosSide  string `json:"posSide"`  // long, short, or net
 		FillPx   string `json:"fillPx"`   // Fill price
 		FillSz   string `json:"fillSz"`   // Fill size (contracts)
+		FillPnl  string `json:"fillPnl"`  // Realized PnL of a closing fill
 		Fee      string `json:"fee"`      // Fee (negative for cost)
 		FeeCcy   string `json:"feeCcy"`   // Fee currency
 		Ts       string `json:"ts"`       // Trade timestamp (ms)
@@ -74,32 +97,65 @@ func (t *OKXTrader) GetTrades(startTime time.Time, limit int) ([]OKXTrade, error
 	}
 
 	trades := make([]OKXTrade, 0, len(fills))
+	ctVals := map[string]float64{}
 
 	for _, fill := range fills {
-		fillPrice, _ := strconv.ParseFloat(fill.FillPx, 64)
-		fillSz, _ := strconv.ParseFloat(fill.FillSz, 64)
-		fee, _ := strconv.ParseFloat(fill.Fee, 64)
-		ts, _ := strconv.ParseInt(fill.Ts, 10, 64)
+		fillPrice, err := parseOKXHistoryNumber("price", fill.FillPx, false)
+		if err != nil {
+			return nil, err
+		}
+		fillSz, err := parseOKXHistoryNumber("size", fill.FillSz, false)
+		if err != nil {
+			return nil, err
+		}
+		fee, err := parseOKXHistoryNumber("fee", fill.Fee, true)
+		if err != nil {
+			return nil, err
+		}
+		fillPnL, err := parseOKXHistoryNumber("pnl", fill.FillPnl, true)
+		if err != nil {
+			return nil, err
+		}
+		ts, err := strconv.ParseInt(fill.Ts, 10, 64)
+		if err != nil || ts <= 0 {
+			return nil, fmt.Errorf("malformed fill timestamp %q", fill.Ts)
+		}
+		if fill.TradeID == "" {
+			return nil, fmt.Errorf("fill without trade ID")
+		}
 
 		// Convert symbol: BTC-USDT-SWAP -> BTCUSDT
 		symbol := t.convertSymbolBack(fill.InstID)
 
-		// Convert contract count to base asset quantity
-		fillQtyBase := fillSz
-		inst, err := t.getInstrument(symbol)
-		if err == nil && inst.CtVal > 0 {
-			fillQtyBase = fillSz * inst.CtVal
+		// Convert contract count to base asset quantity. Without the contract
+		// value the base quantity is unknown: fail the batch (retried next cycle).
+		ctVal, ok := ctVals[symbol]
+		if !ok {
+			inst, err := t.getInstrument(symbol)
+			if err != nil {
+				return nil, fmt.Errorf("contract value unavailable for %s: %w", fill.InstID, err)
+			}
+			if inst == nil || inst.CtVal <= 0 || math.IsNaN(inst.CtVal) || math.IsInf(inst.CtVal, 0) {
+				return nil, fmt.Errorf("contract value unavailable for %s", fill.InstID)
+			}
+			ctVal = inst.CtVal
+			ctVals[symbol] = ctVal
 		}
+		fillQtyBase := fillSz * ctVal
 
 		// Determine order action based on side and posSide
-		// OKX uses dual position mode:
+		// OKX long/short mode:
 		// - buy + long = open long
 		// - sell + long = close long
 		// - sell + short = open short
 		// - buy + short = close short
-		orderAction := "open_long"
+		// Net (one-way) fills are classified against the ledger when persisted.
+		orderAction := ""
 		posSide := strings.ToLower(fill.PosSide)
 		side := strings.ToLower(fill.Side)
+		if side != "buy" && side != "sell" {
+			return nil, fmt.Errorf("malformed fill side %q", fill.Side)
+		}
 
 		if posSide == "long" {
 			if side == "buy" {
@@ -112,13 +168,6 @@ func (t *OKXTrader) GetTrades(startTime time.Time, limit int) ([]OKXTrade, error
 				orderAction = "open_short"
 			} else {
 				orderAction = "close_short"
-			}
-		} else {
-			// One-way mode (net position)
-			if side == "buy" {
-				orderAction = "open_long"
-			} else {
-				orderAction = "open_short"
 			}
 		}
 
@@ -138,6 +187,7 @@ func (t *OKXTrader) GetTrades(startTime time.Time, limit int) ([]OKXTrade, error
 			IsMaker:     fill.ExecType == "M",
 			OrderType:   "MARKET",
 			OrderAction: orderAction,
+			FillPnL:     fillPnL,
 		}
 
 		trades = append(trades, trade)
@@ -169,34 +219,81 @@ func (t *OKXTrader) SyncOrdersFromOKX(traderID string, exchangeID string, exchan
 	logger.Infof("📥 Received %d trades from OKX", len(trades))
 
 	// Sort trades by time ASC (oldest first) for proper position building
-	sort.Slice(trades, func(i, j int) bool {
+	sort.SliceStable(trades, func(i, j int) bool {
 		return trades[i].ExecTime.UnixMilli() < trades[j].ExecTime.UnixMilli()
 	})
 
-	// Process trades one by one (no transaction to avoid deadlock)
-	orderStore := st.Order()
-	positionStore := st.Position()
-	posBuilder := store.NewPositionBuilder(positionStore)
 	syncedCount := 0
-
 	for _, trade := range trades {
+		created, err := t.persistOKXTrade(st, traderID, exchangeID, exchangeType, trade)
+		if err != nil {
+			// Stop at the first failure: later fills must not be applied to the
+			// position ledger out of order. Nothing of this fill was committed,
+			// so the next cycle retries it.
+			return fmt.Errorf("persist OKX trade %s: %w", trade.TradeID, err)
+		}
+		if created {
+			syncedCount++
+		}
+	}
+
+	logger.Infof("✅ OKX order sync completed: %d new trades synced", syncedCount)
+	return nil
+}
+
+// persistOKXTrade writes one fill's order, fill and position effects in a
+// single transaction. It returns false for an already-recorded fill.
+func (t *OKXTrader) persistOKXTrade(st *store.Store, traderID, exchangeID, exchangeType string, trade OKXTrade) (bool, error) {
+	if trade.TradeID == "" || trade.Symbol == "" || trade.FillPrice <= 0 || trade.FillQtyBase <= 0 {
+		return false, fmt.Errorf("invalid fill identity/quantity")
+	}
+	symbol := market.Normalize(trade.Symbol)
+	side := strings.ToUpper(trade.Side)
+	created, recordedAction := false, ""
+	err := st.Transaction(func(tx *gorm.DB) error {
+		created = false
 		// Check if trade already exists (use exchangeID which is UUID, not exchange type)
-		existing, err := orderStore.GetOrderByExchangeID(exchangeID, trade.TradeID)
-		if err == nil && existing != nil {
-			continue // Order already exists, skip
+		var count int64
+		if err := tx.Model(&store.TraderOrder{}).Where("exchange_id = ? AND exchange_order_id = ?", exchangeID, trade.TradeID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return nil
+		}
+		if err := tx.Model(&store.TraderFill{}).Where("exchange_id = ? AND symbol = ? AND exchange_trade_id = ?", exchangeID, symbol, trade.TradeID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return nil
 		}
 
-		// Normalize symbol
-		symbol := market.Normalize(trade.Symbol)
-
-		// Determine position side from order action
-		positionSide := "LONG"
-		if strings.Contains(trade.OrderAction, "short") {
-			positionSide = "SHORT"
+		var legs []types.OneWayLeg
+		if trade.OrderAction != "" {
+			legs = []types.OneWayLeg{{Action: trade.OrderAction, Quantity: trade.FillQtyBase}}
+		} else {
+			positions := store.NewPositionStore(tx)
+			var open [2]float64
+			for i, ps := range []string{"LONG", "SHORT"} {
+				p, err := positions.GetOpenPositionBySymbol(traderID, symbol, ps)
+				if err != nil {
+					return err
+				}
+				if p != nil && p.Quantity > 0 {
+					open[i] = p.Quantity
+				}
+			}
+			legs = types.ClassifyOneWayFill(side, trade.FillQtyBase, trade.FillPnL, open[0], open[1])
 		}
-
-		// Normalize side for storage
-		side := strings.ToUpper(trade.Side)
+		action, positionSide := okxHistoryOrderActionReview, "BOTH"
+		if len(legs) > 0 {
+			action = legs[0].Action
+			positionSide = "LONG"
+			if strings.Contains(action, "short") {
+				positionSide = "SHORT"
+			}
+		} else {
+			logger.Warnf("OKX history fill %s %s: net-mode direction undetermined; stored as review without position update", symbol, trade.TradeID)
+		}
 
 		// Create order record - use UTC time in milliseconds to avoid timezone issues
 		execTimeMs := trade.ExecTime.UTC().UnixMilli()
@@ -209,7 +306,7 @@ func (t *OKXTrader) SyncOrdersFromOKX(traderID string, exchangeID string, exchan
 			Side:            side,
 			PositionSide:    positionSide,
 			Type:            trade.OrderType,
-			OrderAction:     trade.OrderAction,
+			OrderAction:     action,
 			Quantity:        trade.FillQtyBase,
 			Price:           trade.FillPrice,
 			Status:          "FILLED",
@@ -220,11 +317,8 @@ func (t *OKXTrader) SyncOrdersFromOKX(traderID string, exchangeID string, exchan
 			CreatedAt:       execTimeMs,
 			UpdatedAt:       execTimeMs,
 		}
-
-		// Insert order record
-		if err := orderStore.CreateOrder(orderRecord); err != nil {
-			logger.Infof("  ⚠️ Failed to sync trade %s: %v", trade.TradeID, err)
-			continue
+		if err := tx.Create(orderRecord).Error; err != nil {
+			return err
 		}
 
 		// Create fill record - use UTC time in milliseconds
@@ -242,34 +336,42 @@ func (t *OKXTrader) SyncOrdersFromOKX(traderID string, exchangeID string, exchan
 			QuoteQuantity:   trade.FillPrice * trade.FillQtyBase,
 			Commission:      trade.Fee,
 			CommissionAsset: trade.FeeAsset,
-			RealizedPnL:     0, // OKX fills don't include PnL per trade
+			RealizedPnL:     0, // unchanged: PositionBuilder derives PnL for OKX
 			IsMaker:         trade.IsMaker,
 			CreatedAt:       execTimeMs,
 		}
-
-		if err := orderStore.CreateFill(fillRecord); err != nil {
-			logger.Infof("  ⚠️ Failed to sync fill for trade %s: %v", trade.TradeID, err)
+		if err := tx.Create(fillRecord).Error; err != nil {
+			return err
 		}
 
 		// Create/update position record using PositionBuilder
-		if err := posBuilder.ProcessTrade(
-			traderID, exchangeID, exchangeType,
-			symbol, positionSide, trade.OrderAction,
-			trade.FillQtyBase, trade.FillPrice, trade.Fee, 0, // No per-trade PnL from OKX
-			execTimeMs, trade.TradeID,
-		); err != nil {
-			logger.Infof("  ⚠️ Failed to sync position for trade %s: %v", trade.TradeID, err)
-		} else {
-			logger.Infof("  📍 Position updated for trade: %s (action: %s, qty: %.6f)", trade.TradeID, trade.OrderAction, trade.FillQtyBase)
+		builder := store.NewPositionBuilder(store.NewPositionStore(tx))
+		for _, leg := range legs {
+			legSide := "LONG"
+			if strings.Contains(leg.Action, "short") {
+				legSide = "SHORT"
+			}
+			fee := trade.Fee * leg.Quantity / trade.FillQtyBase
+			if err := builder.ProcessTrade(
+				traderID, exchangeID, exchangeType,
+				symbol, legSide, leg.Action,
+				leg.Quantity, trade.FillPrice, fee, 0, // No per-trade PnL from OKX
+				execTimeMs, trade.TradeID,
+			); err != nil {
+				return err
+			}
 		}
-
-		syncedCount++
-		logger.Infof("  ✅ Synced trade: %s %s %s qty=%.6f price=%.6f fee=%.6f action=%s",
-			trade.TradeID, trade.Symbol, side, trade.FillQtyBase, trade.FillPrice, trade.Fee, trade.OrderAction)
+		created, recordedAction = true, action
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
-
-	logger.Infof("✅ OKX order sync completed: %d new trades synced", syncedCount)
-	return nil
+	if created {
+		logger.Infof("  ✅ Synced trade: %s %s %s qty=%.6f price=%.6f fee=%.6f action=%s",
+			trade.TradeID, trade.Symbol, side, trade.FillQtyBase, trade.FillPrice, trade.Fee, recordedAction)
+	}
+	return created, nil
 }
 
 // StartOrderSync starts background order sync task for OKX

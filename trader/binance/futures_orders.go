@@ -846,7 +846,7 @@ func (t *FuturesTrader) SetManagedStopLoss(symbol string, positionSide string, q
 	// Use new Algo Order API. Binance validates triggerPrice against the
 	// symbol's PRICE_FILTER tickSize; fixed decimal formatting is insufficient
 	// for low-priced contracts such as WUSDT and AKTUSDT.
-	_, err = t.client.NewCreateAlgoOrderService().
+	resp, err := t.client.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Side(side).
 		PositionSide(posSide).
@@ -861,6 +861,14 @@ func (t *FuturesTrader) SetManagedStopLoss(symbol string, positionSide string, q
 		return fmt.Errorf("failed to set stop-loss: %w", classifyManagedRejection(err))
 	}
 
+	// Remember the venue identity so later confirmation (GetStopOrder by
+	// clientID) can query by algoId first. The StopOrderTrader signature is
+	// shared with OKX and fakes, so the ID is kept here rather than returned.
+	if resp != nil && resp.AlgoId > 0 && (resp.ClientAlgoId == "" || resp.ClientAlgoId == clientID) {
+		t.rememberStopAlgoID(symbol, clientID, resp.AlgoId)
+		logger.Infof("  Stop-loss price set (Algo Order): %.12g algoId=%d clientAlgoId=%s", normalizedPrice, resp.AlgoId, clientID)
+		return nil
+	}
 	logger.Infof("  Stop-loss price set (Algo Order): %.12g", normalizedPrice)
 	return nil
 }

@@ -59,6 +59,17 @@ type FuturesTrader struct {
 
 	// Cache validity period (15 seconds)
 	cacheDuration time.Duration
+
+	// Per-symbol exchangeInfo cache (see market_rules_cache.go). Zero values
+	// are valid; only fully tradable rules are cached, failures never are.
+	symbolRules      map[string]cachedSymbolInfo
+	symbolRulesMu    sync.Mutex
+	symbolRulesFetch sync.Mutex
+	symbolRulesTTL   time.Duration
+
+	// clientAlgoId -> algoId of stop orders this process placed.
+	stopAlgoIDs   map[string]int64
+	stopAlgoIDsMu sync.Mutex
 }
 
 // NewFuturesTrader creates futures trader
